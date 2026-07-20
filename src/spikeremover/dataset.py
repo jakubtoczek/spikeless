@@ -88,7 +88,7 @@ class Curve:
     peaks: list[Peak] | None = None
     peaks_group_shown: bool = True
     peak_viz: PeakViz = field(default_factory=PeakViz)
-    peak_local_baseline: bool = True   # drift baseline (line between each peak's bounds)
+    peak_local_baseline: bool = False  # drift baseline (line between each peak's bounds); off by default
     annotate: str = "none"             # on-graph labels: none | rt | auc | both
 
     children: list["Curve"] = field(default_factory=list)

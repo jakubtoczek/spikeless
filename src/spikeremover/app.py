@@ -1,4 +1,4 @@
-"""SpikeRemover main window (PySide6 + matplotlib)."""
+"""Spikeless main window (PySide6 + matplotlib). Package name stays `spikeremover`."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from html import escape as _esc
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QEvent, QMimeData, QSettings, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox,
     QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
@@ -62,6 +62,23 @@ PROC_FEATURES = [
 DOCK_KEYS = [("data", "data_dock"), ("processing", "processing_dock"),
              ("log", "log_dock"), ("report", "report_dock"), ("plot_options", "display_dock")]
 
+# Peak-table columns (key, header, value(i, pk)) — the same spec drives the report table, the
+# clipboard copy and the CSV export, so what's shown is exactly what's copied/exported.
+PEAK_COLUMNS = [
+    ("num", "#", lambda i, pk: str(i)),
+    ("name", "Peak", lambda i, pk: pk.name or f"peak {i}"),
+    ("rt", "Rt (min)", lambda i, pk: f"{pk.rt:.2f}"),
+    ("x_start", "x start", lambda i, pk: f"{pk.x_start:.2f}"),
+    ("x_end", "x end", lambda i, pk: f"{pk.x_end:.2f}"),
+    ("width", "width", lambda i, pk: f"{pk.length:.2f}"),
+    ("y_max", "y max", lambda i, pk: f"{pk.y_max:.0f}"),
+    ("auc", "AUC", lambda i, pk: f"{pk.auc:.1f}"),
+    ("pct", "%", lambda i, pk: f"{pk.pct:.1f}"),
+    ("skew", "skew", lambda i, pk: f"{pk.skew:.2f}"),
+]
+_DEFAULT_PEAK_COLS = {"num": True, "name": False, "rt": True, "x_start": False, "x_end": False,
+                      "width": False, "y_max": False, "auc": True, "pct": True, "skew": False}
+
 
 @dataclass
 class AppOptions:
@@ -84,12 +101,13 @@ class ExportOptions:
     clip_format: str = "png"
     log_timestamps: bool = True  # include [HH:MM:SS] stamps when exporting/copying the log
     report_table_html: bool = True  # copy peak tables as rich HTML (else plain TSV)
+    report_cols: dict = field(default_factory=lambda: dict(_DEFAULT_PEAK_COLS))  # which peak columns show
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} — radio-HPLC plotting & spike removal")
+        self.setWindowTitle(f"{APP_NAME} — radio-HPLC plotting, spike removal & analysis")
         self.resize(1200, 800)
         self.setAcceptDrops(True)
         icon = _app_icon()
@@ -112,9 +130,12 @@ class MainWindow(QMainWindow):
         self._fig = None
         self.d: dict = {}
         self._loading_disp = False
+        self._plot_opts_shown_once = False
+        self._undo_stack: list = []
         self._pen = _pen_icon()
 
         self._build_ui()
+        QShortcut(QKeySequence.Undo, self, activated=self._undo)   # Ctrl+Z
         self._apply_lock()
         self._apply_default_docks()
         self._update_enabled()
@@ -141,6 +162,10 @@ class MainWindow(QMainWindow):
             self.export_opts.clip_format = s.value("clip_format", "png")
             self.export_opts.log_timestamps = s.value("log_timestamps", True, type=bool)
             self.export_opts.report_table_html = s.value("report_table_html", True, type=bool)
+            rc = s.value("report_cols", "")
+            if rc:
+                self.export_opts.report_cols.update(json.loads(rc))
+            self.plot_opts.crop_fills = s.value("crop_fills", False, type=bool)
         except Exception as exc:  # noqa: BLE001
             print(f"settings load skipped: {exc}")
 
@@ -156,6 +181,8 @@ class MainWindow(QMainWindow):
         s.setValue("clip_format", eo.clip_format)
         s.setValue("log_timestamps", eo.log_timestamps)
         s.setValue("report_table_html", eo.report_table_html)
+        s.setValue("report_cols", json.dumps(eo.report_cols))
+        s.setValue("crop_fills", self.plot_opts.crop_fills)
 
     def _apply_default_docks(self):
         for key, attr in DOCK_KEYS:
@@ -287,7 +314,10 @@ class MainWindow(QMainWindow):
         self.btn_disp.clicked.connect(self._edit_node_display)
         self.btn_dup = QPushButton("Duplicate")
         self.btn_dup.clicked.connect(self._duplicate_curve)
-        for b in (self.btn_info, self.btn_adjust, self.btn_disp, self.btn_dup):
+        self.btn_export = QPushButton("Export…")
+        self.btn_export.setToolTip("Export the selection (curve → GINA X; peaks → CSV)")
+        self.btn_export.clicked.connect(self._export_selected)
+        for b in (self.btn_info, self.btn_adjust, self.btn_disp, self.btn_dup, self.btn_export):
             row.addWidget(b)
         lay.addLayout(row)
         self.data_dock.setWidget(w)
@@ -349,16 +379,24 @@ class MainWindow(QMainWindow):
         if len(parts) == 3 and parts[0] == "copytable":
             self._copy_peak_table(int(parts[1]), int(parts[2]))
 
+    def _visible_peak_columns(self):
+        return [(k, h, f) for k, h, f in PEAK_COLUMNS if self.export_opts.report_cols.get(k, False)]
+
+    def _peak_rows(self, cv):
+        """Header + value rows for cv's peaks, using only the columns enabled in report options."""
+        cols = self._visible_peak_columns()
+        head = tuple(h for _k, h, _f in cols)
+        rows = [tuple(f(i, pk) for _k, _h, f in cols) for i, pk in enumerate(cv.peaks, 1)]
+        return head, rows
+
     def _copy_peak_table(self, ds_id, curve_id):
         ds = self._ds(ds_id)
         cv = ds.find_curve(curve_id) if ds else None
         if cv is None or not cv.peaks:
             self.log("Copy table: no peaks.")
             return
-        head = ("Peak", "Rt (min)", "y_max", "AUC", "%", "skew")
-        rows = [head] + [(pk.name or f"peak {i}", f"{pk.rt:.2f}", f"{pk.y_max:.0f}",
-                          f"{pk.auc:.1f}", f"{pk.pct:.1f}", f"{pk.skew:.2f}")
-                         for i, pk in enumerate(cv.peaks, 1)]
+        head, body = self._peak_rows(cv)
+        rows = [head] + body
         md = QMimeData()
         md.setText("\n".join("\t".join(r) for r in rows))
         if self.export_opts.report_table_html:
@@ -366,7 +404,7 @@ class MainWindow(QMainWindow):
                        + "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
                        + "</table>")
         QApplication.clipboard().setMimeData(md)
-        self.log(f"Copied '{cv.name}' peak table ({len(cv.peaks)} rows) — paste into Word/PowerPoint.")
+        self.log(f"Copied '{cv.name}' peak table ({len(cv.peaks)} rows).")
 
     def _copy_log(self):
         QApplication.clipboard().setText(self._log_text())
@@ -403,6 +441,25 @@ class MainWindow(QMainWindow):
 
         mg = QWidget()
         f2 = _cform(mg)
+        # total figure size = plot area + these label margins; Auto shows the computed value
+        tw = _spin(20, 800, o.total_w_mm if o.total_w_mm else o.plot_w_mm, 1)
+        tw_auto = QCheckBox("Auto")
+        tw_auto.setChecked(o.total_w_mm is None)
+        tw.setEnabled(o.total_w_mm is not None)
+        th = _spin(20, 800, o.total_h_mm if o.total_h_mm else o.plot_h_mm, 1)
+        th_auto = QCheckBox("Auto")
+        th_auto.setChecked(o.total_h_mm is None)
+        th.setEnabled(o.total_h_mm is not None)
+        self.d["tot_w"], self.d["tot_w_auto"] = tw, tw_auto
+        self.d["tot_h"], self.d["tot_h_auto"] = th, th_auto
+        tw_auto.toggled.connect(tw.setDisabled)
+        tw_auto.toggled.connect(self._apply_display)
+        th_auto.toggled.connect(th.setDisabled)
+        th_auto.toggled.connect(self._apply_display)
+        tw.valueChanged.connect(self._apply_display)
+        th.valueChanged.connect(self._apply_display)
+        f2.addRow("Total width (mm)", _pair(tw_auto, tw))
+        f2.addRow("Total height (mm)", _pair(th_auto, th))
         self.d["out"] = _ColorButton(o.outside_color, self._apply_display)
         self.d["out_a"] = _spin(0, 1, o.outside_alpha, 0.05)
         f2.addRow("Background", self.d["out"])
@@ -527,6 +584,8 @@ class MainWindow(QMainWindow):
             return
         o, d = self.plot_opts, self.d
         o.plot_w_mm, o.plot_h_mm = d["w_mm"].value(), d["h_mm"].value()
+        o.total_w_mm = None if d["tot_w_auto"].isChecked() else d["tot_w"].value()
+        o.total_h_mm = None if d["tot_h_auto"].isChecked() else d["tot_h"].value()
         o.bg_color, o.bg_alpha = d["bg"].color, d["bg_a"].value()
         o.outside_color, o.outside_alpha = d["out"].color, d["out_a"].value()
         o.legend_loc = d["leg_loc"].currentText()
@@ -566,6 +625,11 @@ class MainWindow(QMainWindow):
                      ("y_gstart", ex["ymin"]), ("y_gend", ex["ymax"])):
             if self.d[f"{k}_auto"].isChecked():
                 self.d[k].setValue(v)
+        if self._fig is not None:   # show the computed total size while Auto is ticked
+            if self.d["tot_w_auto"].isChecked():
+                self.d["tot_w"].setValue(self._fig.get_figwidth() * 25.4)
+            if self.d["tot_h_auto"].isChecked():
+                self.d["tot_h"].setValue(self._fig.get_figheight() * 25.4)
         self._loading_disp = False
 
     # ---------------- Data tree ----------------
@@ -740,6 +804,7 @@ class MainWindow(QMainWindow):
         ds = self._ds(data[1])
         if ds is None:
             return
+        self._push_undo()
         kind = data[0]
         if kind == "dataset":
             self.datasets.remove(ds)
@@ -778,6 +843,7 @@ class MainWindow(QMainWindow):
         if not src:
             return
         if src[0] == "dataset" and (tgt is None or tgt[0] == "dataset"):
+            self._push_undo()
             self._reorder_list(self.datasets, src[1], tgt[1] if tgt else None, below, lambda d: d.id)
         elif src[0] == "curve" and tgt and tgt[0] == "curve" and src[1] == tgt[1]:
             ds = self._ds(src[1])
@@ -787,6 +853,7 @@ class MainWindow(QMainWindow):
             if ps is None or ps is not pt:  # only reorder curves that share a parent
                 self.log("To reorder curves, drop onto a sibling curve (same parent).")
                 return
+            self._push_undo()
             self._reorder_list(ps.children, src[2], tgt[2], below, lambda c: c.id)
         else:
             self.log("Reorder: drop a dataset onto another dataset, or a curve onto a sibling curve.")
@@ -818,6 +885,24 @@ class MainWindow(QMainWindow):
         self.btn_adjust.setEnabled(kind == "curve")       # normalization is per-curve
         self.btn_disp.setEnabled(kind not in (None, "dataset"))
         self.btn_dup.setEnabled(kind == "curve")
+        self.btn_export.setEnabled(kind in ("curve", "dataset", "peaks", "peak"))
+
+    # ---------------- undo ----------------
+    def _push_undo(self):
+        """Snapshot the whole dataset tree before a mutating op so Ctrl+Z can restore it."""
+        self._undo_stack.append(copy.deepcopy(self.datasets))
+        del self._undo_stack[:-25]   # ponytail: cap depth at 25, deep undo isn't worth the RAM
+
+    def _undo(self):
+        if not self._undo_stack:
+            self.log("Nothing to undo.")
+            return
+        self.datasets = self._undo_stack.pop()
+        self._rebuild_tree()
+        self._update_enabled()
+        self._refresh_plot()
+        self._update_report()
+        self.log("Undo.")
 
     # ---------------- helpers ----------------
     def log(self, msg):
@@ -876,8 +961,13 @@ class MainWindow(QMainWindow):
         self.display_dock.toggleViewAction().setEnabled(has)
         self.plot_copy_btn.setEnabled(has)
         self.plot_export_btn.setEnabled(has)
-        if not has:
+        if has:
+            if self.app_opts.docks_open.get("plot_options") and not self._plot_opts_shown_once:
+                self.display_dock.show()      # honour "open Plot options by default" once data arrives
+                self._plot_opts_shown_once = True
+        else:
             self.display_dock.hide()
+            self._plot_opts_shown_once = False
         self._on_tree_select()
 
     def _apply_lock(self):
@@ -920,9 +1010,11 @@ class MainWindow(QMainWindow):
                 html.append(f"<div style='margin-left:1em;margin-top:4px;'>curve "
                             f"'<b>{_esc(cv.name)}</b>' [{_esc(cv.kind)}]{_esc(suffix)}</div>")
                 if cv.peaks:
-                    lines.append("      #   Rt(min)   AUC        %")
-                    for i, pk in enumerate(cv.peaks, 1):
-                        lines.append(f"      {i:<3} {pk.rt:>7.2f}  {pk.auc:>9.1f}  {pk.pct:>5.1f}")
+                    head, body = self._peak_rows(cv)
+                    if head:
+                        lines.append("      " + "  ".join(f"{h:>9}" for h in head))
+                        for r in body:
+                            lines.append("      " + "  ".join(f"{c:>9}" for c in r))
                     html.append(self._peak_table_html(ds, cv))
             lines.append("")
         html.append("</div>")
@@ -933,10 +1025,11 @@ class MainWindow(QMainWindow):
         sb.setValue(min(pos, sb.maximum()))
 
     def _peak_table_html(self, ds, cv):
-        rows = ["<tr><th>#</th><th>Rt (min)</th><th>AUC</th><th>%</th></tr>"]
-        for i, pk in enumerate(cv.peaks, 1):
-            rows.append(f"<tr><td>{i}</td><td>{pk.rt:.2f}</td>"
-                        f"<td>{pk.auc:.1f}</td><td>{pk.pct:.1f}</td></tr>")
+        head, body = self._peak_rows(cv)
+        if not head:
+            return ""   # all columns hidden
+        rows = ["<tr>" + "".join(f"<th>{_esc(h)}</th>" for h in head) + "</tr>"]
+        rows += ["<tr>" + "".join(f"<td>{_esc(c)}</td>" for c in r) + "</tr>" for r in body]
         anchor = (f"<a href='copytable:{ds.id}:{cv.id}' title='Copy this table' "
                   f"style='text-decoration:none;font-size:11pt;'>⧉</a>")
         return (f"<div style='margin-left:2em;margin-top:2px;'>{anchor} "
@@ -969,6 +1062,7 @@ class MainWindow(QMainWindow):
             self.log(f"ERROR loading {Path(path).name}: {exc}")
             QMessageBox.warning(self, "Load failed", str(exc))
             return
+        self._push_undo()
         self.datasets.append(ds)
         self._rebuild_tree()
         self._select_id(("curve", ds.id, ds.root.id))
@@ -991,6 +1085,7 @@ class MainWindow(QMainWindow):
         ds, curve = self._need_curve()
         if curve is None:
             return
+        self._push_undo()
         mask = detect(curve.y, self.spike_params)
         n = int(mask.sum())
         if n:
@@ -1015,6 +1110,7 @@ class MainWindow(QMainWindow):
         ds, curve = self._need_curve()
         if curve is None:
             return
+        self._push_undo()
         curve.baseline = estimate_baseline(curve.y, self.baseline_method, self.baseline_n)
         curve.baseline_shown = True
         self.log(f"Baseline on '{curve.name}' ({self.baseline_method}).")
@@ -1030,6 +1126,7 @@ class MainWindow(QMainWindow):
         # On a curve → fresh peaks group; on an existing peak/peaks group → reprocess (re-detect
         # with the current options). Both replace this curve's single peaks group.
         reprocess = bool(data) and data[0] in ("peak", "peaks")
+        self._push_undo()
         sig = curve.y
         if curve.spike_mask is not None:   # don't let spikes become peaks or truncate neighbours
             sig = remove(curve.y, curve.spike_mask, method=self.interp_method)
@@ -1058,6 +1155,7 @@ class MainWindow(QMainWindow):
         factor = decay_factor(curve.x, hl, ds.decay_ref_offset_s)
         base_kind = "spikeless+decay" if "spikeless" in curve.kind else "decay"
         name = f"{curve.name} +decay"
+        self._push_undo()
         curve.children.append(new_curve_from(curve, curve.y * factor, name, base_kind, "#b000b0"))
         self.log(f"Applied decay to '{curve.name}' → '{name}' (ref {ds.decay_ref_label}).")
         self._rebuild_tree()
@@ -1120,6 +1218,7 @@ class MainWindow(QMainWindow):
         ds, curve = self._sel_curve()
         if curve is None or (self._selected() or [None])[0] != "curve":
             return
+        self._push_undo()
         dup = copy.deepcopy(curve)
         for c in dup.walk():
             c.id = new_id()
@@ -1252,17 +1351,58 @@ class MainWindow(QMainWindow):
         eo = self.export_opts
         dlg = QDialog(self)
         dlg.setWindowTitle("Report copy / export options")
-        form = QFormLayout(dlg)
-        html = QCheckBox("Copy peak tables as rich HTML (paste into Word/PowerPoint)")
+        outer = QVBoxLayout(dlg)
+        outer.addWidget(QLabel("Peak-table columns (shown in the report = copied):"))
+        col_chks = {}
+        for key, header, _f in PEAK_COLUMNS:
+            c = QCheckBox(header if key != "num" else "# (row number)")
+            c.setChecked(eo.report_cols.get(key, False))
+            col_chks[key] = c
+            outer.addWidget(c)
+        html = QCheckBox("Copy tables as rich HTML (else plain tab-separated text)")
         html.setChecked(eo.report_table_html)
-        form.addRow(html)
-        gina = QPushButton("Export selected curve as GINA X…")
-        gina.clicked.connect(self._export_data_gina)
-        form.addRow(gina)
-        if _run_dialog(dlg, form):
-            eo.report_table_html = html.isChecked()
-            self._save_settings()
-            self.log("Report export options updated.")
+        outer.addWidget(html)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(dlg.accept)
+        box.rejected.connect(dlg.reject)
+        outer.addWidget(box)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        for key, c in col_chks.items():
+            eo.report_cols[key] = c.isChecked()
+        eo.report_table_html = html.isChecked()
+        self._save_settings()
+        self._update_report()
+        self.log("Report options updated.")
+
+    def _export_selected(self):
+        data = self._selected()
+        if not data:
+            self.log("Export: select a curve, dataset or peaks group first.")
+            return
+        if data[0] in ("curve", "dataset"):
+            self._export_data_gina()
+        elif data[0] in ("peaks", "peak"):
+            self._export_peak_table_csv()
+
+    def _export_peak_table_csv(self):
+        ds, curve = self._sel_curve()
+        if curve is None or not curve.peaks:
+            self.log("Export: no peaks on the selection.")
+            return
+        head, body = self._peak_rows(curve)
+        if not head:
+            self.log("Export: no peak columns are enabled (Report ⚙).")
+            return
+        default = f"{ds.meta.name}_{curve.name}_peaks.csv".replace(" ", "_")
+        path, _ = QFileDialog.getSaveFileName(self, "Export peak table (CSV)", default, "CSV (*.csv)")
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        rows = [head] + body
+        Path(path).write_text("\n".join(",".join(r) for r in rows), encoding="utf-8")
+        self.log(f"Exported {len(body)} peak(s) to {path}")
 
     # ---------------- dialogs ----------------
     def _edit_info(self):
@@ -1746,6 +1886,16 @@ class MainWindow(QMainWindow):
         f2.addRow("Resolution slider max (×)", smax)
         outer.addWidget(_Collapsible("Plot view", pvw, expanded=False))
 
+        # --- Data visualization (collapsed) ---
+        dvw = QWidget()
+        fdv = QVBoxLayout(dvw)
+        crop = QCheckBox("Crop fill areas where a curve passes (clean alpha overlaps)")
+        crop.setChecked(self.plot_opts.crop_fills)
+        crop.setToolTip("Cuts AUC/baseline fills around each curve line so overlapping "
+                        "semi-transparent areas read cleanly. Best on an opaque plot background.")
+        fdv.addWidget(crop)
+        outer.addWidget(_Collapsible("Data visualization", dvw, expanded=False))
+
         # --- Processing features shown (collapsed) ---
         procw = QWidget()
         fp = QVBoxLayout(procw)
@@ -1766,10 +1916,10 @@ class MainWindow(QMainWindow):
         dock_chks = {}
         for key, _attr in DOCK_KEYS:
             c = QCheckBox(dock_labels[key])
-            c.setChecked(ao.docks_open.get(key, True))
+            c.setChecked(ao.docks_open.get(key, key != "plot_options"))
+            c.setStyleSheet("margin-left:18px;")   # indent the list so it reads under "Open by default:"
             if key == "plot_options":
-                c.setEnabled(False)
-                c.setToolTip("Plot options opens automatically once data is loaded.")
+                c.setToolTip("Plot options opens when the first dataset is loaded.")
             dock_chks[key] = c
             fm.addWidget(c)
         lock = QCheckBox("Lock menu windows (no drag/float)")
@@ -1796,11 +1946,11 @@ class MainWindow(QMainWindow):
         ao.export_border = ExportBorder(on=bd_on.isChecked(), color=bd_color.color,
                                         style=bd_style.currentText(), width=bd_width.value())
         ao.lock_docks = lock.isChecked()
+        self.plot_opts.crop_fills = crop.isChecked()
         for key, c in proc_chks.items():
             ao.proc_visible[key] = c.isChecked()
         for key, c in dock_chks.items():
-            if key != "plot_options":
-                ao.docks_open[key] = c.isChecked()
+            ao.docks_open[key] = c.isChecked()
         self.plot_view.set_background(ao.background)
         self._apply_lock()
         self._populate_processing()

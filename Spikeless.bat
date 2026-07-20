@@ -3,8 +3,7 @@ setlocal
 title Spikeless launcher
 
 rem --- everything self-contained under C:\Users\Public (no admin, no PATH changes) ---
-rem (runtime cache folder keeps its old name so upgrades don't re-download Python/uv)
-set "PUBLIC_ROOT=C:\Users\Public\SpikeRemover"
+set "PUBLIC_ROOT=C:\Users\Public\Spikeless"
 set "UV=%PUBLIC_ROOT%\uv.exe"
 set "UV_PYTHON_INSTALL_DIR=%PUBLIC_ROOT%\python"
 set "UV_CACHE_DIR=%PUBLIC_ROOT%\cache"

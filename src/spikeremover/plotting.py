@@ -76,6 +76,9 @@ class AxisOptions:
 class PlotOptions:
     plot_w_mm: float = 80.0
     plot_h_mm: float = 40.0
+    total_w_mm: float | None = None   # None = auto (plot area + label margins); else fixes figure width
+    total_h_mm: float | None = None   # (plot area then shrinks to fit the total)
+    crop_fills: bool = False          # erase fill areas where a curve passes (clean alpha overlaps)
     bg_color: str = "#ffffff"
     bg_alpha: float = 1.0
     outside_color: str = "#ffffff"
@@ -230,10 +233,14 @@ class _LegendState:
         self.peak = False
 
 
-def _draw_curve(ax, curve: Curve, ymin, leg: _LegendState):
+def _draw_curve(ax, curve: Curve, ymin, leg: _LegendState, crop=False, crop_color="#ffffff"):
     st = curve.style
     y_adj = _y_adj(curve)[0]
     base_adj = _base_adj(curve)
+    # When cropping, the curve line rides ABOVE every fill (incl. peak AUC at z=3), and a same-shape
+    # halo in the plot-background colour is drawn just beneath it, erasing any fill under the stroke
+    # so alpha overlaps read cleanly (3.png). Otherwise the line keeps its normal z=2.
+    line_z = 3.6 if crop else 2
 
     if curve.shown and st.fill and base_adj is not None:
         ax.fill_between(curve.x, y_adj, base_adj, color=st.fill_color, alpha=st.fill_alpha,
@@ -243,9 +250,12 @@ def _draw_curve(ax, curve: Curve, ymin, leg: _LegendState):
         ax.plot(curve.x, base_adj, color=bcol, alpha=curve.baseline_viz.alpha, lw=st.line_width_pt,
                 linestyle=curve.baseline_viz.linestyle, zorder=1.5)
     if curve.shown:
+        if crop:  # opaque halo the width of the stroke (+ a hair) cuts the fill around the line
+            ax.plot(curve.x, y_adj, color=to_rgba(crop_color, 1.0), lw=st.line_width_pt + 0.8,
+                    linestyle="solid", solid_capstyle="round", zorder=line_z - 0.1)
         lbl = (curve.legend_label or curve.name) if curve.show_legend else "_nolegend_"
         ax.plot(curve.x, y_adj, color=st.color, alpha=st.alpha, lw=st.line_width_pt,
-                linestyle=st.linestyle, zorder=2, label=lbl)
+                linestyle=st.linestyle, zorder=line_z, label=lbl)
         leg.show = leg.show or curve.show_legend
 
     if curve.has_spikes and curve.spikes_group_shown:
@@ -314,8 +324,12 @@ def build_figure(datasets: list[Dataset], opts: PlotOptions | None = None,
     xmin, xmax, ymin, ymax = resolve_limits(datasets, opts)
 
     left, bottom, right, top = _margins_mm(opts, ymax)
-    fig_w = opts.plot_w_mm + left + right
-    fig_h = opts.plot_h_mm + bottom + top
+    # total size = plot area + label margins (auto); or the user fixes the total and the plot area
+    # shrinks to fit inside it.
+    plot_w = opts.plot_w_mm if opts.total_w_mm is None else max(5.0, opts.total_w_mm - left - right)
+    plot_h = opts.plot_h_mm if opts.total_h_mm is None else max(5.0, opts.total_h_mm - bottom - top)
+    fig_w = plot_w + left + right
+    fig_h = plot_h + bottom + top
     fig = Figure(figsize=(fig_w / 25.4, fig_h / 25.4))
     fig.patch.set_facecolor(to_rgba(opts.outside_color, opts.outside_alpha))
     if border is not None and border.on:
@@ -324,12 +338,12 @@ def build_figure(datasets: list[Dataset], opts: PlotOptions | None = None,
                                  transform=fig.transFigure, fill=False, edgecolor=border.color,
                                  linestyle=BORDER_STYLES.get(border.style, "solid"),
                                  linewidth=border.width, zorder=10))
-    ax = fig.add_axes([left / fig_w, bottom / fig_h, opts.plot_w_mm / fig_w, opts.plot_h_mm / fig_h])
+    ax = fig.add_axes([left / fig_w, bottom / fig_h, plot_w / fig_w, plot_h / fig_h])
     ax.set_facecolor(to_rgba(opts.bg_color, opts.bg_alpha))
 
     leg = _LegendState()
     for c in _all_curves(datasets):
-        _draw_curve(ax, c, ymin, leg)
+        _draw_curve(ax, c, ymin, leg, crop=opts.crop_fills, crop_color=opts.bg_color)
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
@@ -337,8 +351,8 @@ def build_figure(datasets: list[Dataset], opts: PlotOptions | None = None,
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
         ax.spines[side].set_linewidth(opts.x.lw_pt if side == "bottom" else opts.y.lw_pt)
-    _apply_axis(ax, "x", opts.x, xmin, xmax, opts.plot_w_mm)
-    _apply_axis(ax, "y", opts.y, ymin, ymax, opts.plot_h_mm)
+    _apply_axis(ax, "x", opts.x, xmin, xmax, plot_w)
+    _apply_axis(ax, "y", opts.y, ymin, ymax, plot_h)
     ax.set_xlabel(opts.x.title, fontfamily=opts.x.title_font_family,
                   fontsize=opts.x.title_font_size, labelpad=opts.x.title_pad_mm * PT_PER_MM)
     ax.set_ylabel(_y_unit_label(datasets, opts), fontfamily=opts.y.title_font_family,

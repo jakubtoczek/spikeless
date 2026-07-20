@@ -1,4 +1,4 @@
-"""Entry point: launch the SpikeRemover GUI."""
+"""Entry point: launch the Spikeless GUI."""
 
 from __future__ import annotations
 
@@ -49,8 +49,7 @@ def main() -> int:
 
     _set_app_user_model_id(APP_NAME)
     app = QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
-    app.setApplicationDisplayName(APP_NAME)
+    app.setApplicationName(APP_NAME)   # NB: no setApplicationDisplayName — Qt would append " - Spikeless"
     icon = _app_icon()
     if icon is not None:
         app.setWindowIcon(icon)

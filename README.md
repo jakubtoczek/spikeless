@@ -1,18 +1,20 @@
 # Spikeless
 
+<img src="src/spikeremover/assets/spikeless.png" width="96" align="right" alt="Spikeless icon">
+
 Desktop GUI to clean single-point spikes from radio-HPLC spectra exported by **GINA X**,
 produce publication-ready plots, and analyse/export them. MIT-licensed (see `LICENSE`).
 *(The Python package is still named `spikeremover` internally.)*
 
 ## Run
 
-Double-click **`SpikeRemover.bat`** (the Spikeless launcher). On first run it downloads `uv`,
-installs a private Python + dependencies under `C:\Users\Public\SpikeRemover` (no admin rights,
-no PATH changes), drops a **Spikeless** shortcut (with the app icon) on your Desktop, then opens
-the GUI with no console window. Later runs start immediately — use the Desktop shortcut.
+Double-click **`Spikeless.bat`** (the launcher). On first run it downloads `uv`, installs a
+private Python + dependencies under `C:\Users\Public\Spikeless` (no admin rights, no PATH
+changes), drops a **Spikeless** shortcut (with the app icon) on your Desktop, then opens the GUI
+with no console window. Later runs start immediately — use the Desktop shortcut.
 
 To remove everything it installed, run **`uninstall.bat`** (deletes that one folder; your
-project files and exports are untouched — SpikeRemover makes no PATH or registry changes).
+project files and exports are untouched — Spikeless makes no PATH or registry changes).
 
 ## Use
 

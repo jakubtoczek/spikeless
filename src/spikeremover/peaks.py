@@ -28,7 +28,7 @@ class PeakParams:
     min_prominence: float = 0.0    # 0 => auto (5% of signal range)
     min_height: float | None = None
     min_distance: int = 1
-    local_baseline: bool = True    # integrate above a local drift line between each peak's bounds
+    local_baseline: bool = False   # integrate above a local drift line between each peak's bounds (off by default)
 
 
 def detect_peaks(y: np.ndarray, baseline: np.ndarray | None = None,
@@ -48,33 +48,44 @@ def detect_peaks(y: np.ndarray, baseline: np.ndarray | None = None,
                            distance=max(1, int(p.min_distance)))
     if len(apexes) == 0:
         return []
+    noise = _noise(sig)
     out = []
     for k, a in enumerate(apexes):
         a = int(a)
-        left, right = _peak_bounds(sig, a,
+        left, right = _peak_bounds(sig, a, noise,
                                    lo=0 if k == 0 else int(apexes[k - 1]),
                                    hi=n - 1 if k == len(apexes) - 1 else int(apexes[k + 1]))
         out.append(Peak(apex=a, left=left, right=right))
     return out
 
 
-def _peak_bounds(sig, apex, lo, hi, foot_frac=0.02):
-    """Integration bounds for one peak: the valley on each side (lowest point between the
-    apex and its neighbouring apex), trimmed inward to where the signal leaves its foot.
-    foot_frac lifts the foot level a hair above the valley floor so a flat baseline tail
-    isn't swallowed into the peak."""
+def _noise(sig):
+    """Robust baseline noise scale (σ) from the median absolute deviation. Most samples are
+    baseline, so this tracks the noise floor, not the peaks."""
+    med = float(np.median(sig))
+    mad = float(np.median(np.abs(sig - med)))
+    return max(1.4826 * mad, 1e-9)
+
+
+def _peak_bounds(sig, apex, noise, lo, hi, k=3.5, min_frac=0.01):
+    """Integration bounds for one peak: the valley on each side (lowest point between the apex
+    and its neighbouring apex), then the foot found by scanning **from the valley inward** to the
+    first sample rising above a foot level set a few noise-σ above the valley floor. A noise-based
+    (absolute) threshold — not a fraction of peak height — keeps sharp tall peaks from being clipped
+    and short peaks from swallowing baseline noise. Scanning inward means a noise dip on the flank
+    can't stop the bound short, so peaks span their real width."""
     n = len(sig)
     left_v = lo + int(np.argmin(sig[lo:apex + 1]))
     right_v = apex + int(np.argmin(sig[apex:hi + 1]))
     floor = max(float(sig[left_v]), float(sig[right_v]))
-    thr = floor + foot_frac * (float(sig[apex]) - floor)
-    left = apex
-    while left > left_v and sig[left - 1] > thr:
-        left -= 1
-    left = max(left_v, left - 1)
-    right = apex
-    while right < right_v and sig[right + 1] > thr:
-        right += 1
+    thr = floor + max(k * noise, min_frac * (float(sig[apex]) - floor))
+    left = left_v
+    while left < apex and sig[left] <= thr:
+        left += 1
+    left = max(left_v, left - 1)      # step back to include the foot itself
+    right = right_v
+    while right > apex and sig[right] <= thr:
+        right -= 1
     right = min(right_v, right + 1)
     if right <= left:
         left, right = max(0, apex - 1), min(n - 1, apex + 1)
