@@ -1,8 +1,9 @@
 @echo off
 setlocal
-title SpikeRemover launcher
+title Spikeless launcher
 
 rem --- everything self-contained under C:\Users\Public (no admin, no PATH changes) ---
+rem (runtime cache folder keeps its old name so upgrades don't re-download Python/uv)
 set "PUBLIC_ROOT=C:\Users\Public\SpikeRemover"
 set "UV=%PUBLIC_ROOT%\uv.exe"
 set "UV_PYTHON_INSTALL_DIR=%PUBLIC_ROOT%\python"
@@ -10,6 +11,17 @@ set "UV_CACHE_DIR=%PUBLIC_ROOT%\cache"
 set "UV_PROJECT_ENVIRONMENT=%PUBLIC_ROOT%\venv"
 set "PROJECT=%~dp0"
 set "PYTHONPATH=%~dp0src"
+set "ICON=%~dp0src\spikeremover\assets\spikeless.ico"
+
+rem --- one-time: put a Spikeless shortcut (with the app icon) on the Desktop ---
+set "LNK=%USERPROFILE%\Desktop\Spikeless.lnk"
+if not exist "%LNK%" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%LNK%');" ^
+        "$s.TargetPath='%~f0'; $s.WorkingDirectory='%~dp0';" ^
+        "$s.IconLocation='%ICON%'; $s.WindowStyle=7;" ^
+        "$s.Description='Spikeless - radio-HPLC plotting and spike removal'; $s.Save()"
+)
 
 rem --- one-time: fetch the uv binary ---
 if not exist "%UV%" (

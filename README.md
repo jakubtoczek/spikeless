@@ -1,13 +1,15 @@
-# SpikeRemover
+# Spikeless
 
 Desktop GUI to clean single-point spikes from radio-HPLC spectra exported by **GINA X**,
-produce publication-ready plots, and export them. MIT-licensed (see `LICENSE`).
+produce publication-ready plots, and analyse/export them. MIT-licensed (see `LICENSE`).
+*(The Python package is still named `spikeremover` internally.)*
 
 ## Run
 
-Double-click **`SpikeRemover.bat`**. On first run it downloads `uv` and installs a private
-Python + dependencies under `C:\Users\Public\SpikeRemover` (no admin rights, no PATH changes),
-then opens the GUI with no console window. Later runs start immediately.
+Double-click **`SpikeRemover.bat`** (the Spikeless launcher). On first run it downloads `uv`,
+installs a private Python + dependencies under `C:\Users\Public\SpikeRemover` (no admin rights,
+no PATH changes), drops a **Spikeless** shortcut (with the app icon) on your Desktop, then opens
+the GUI with no console window. Later runs start immediately — use the Desktop shortcut.
 
 To remove everything it installed, run **`uninstall.bat`** (deletes that one folder; your
 project files and exports are untouched — SpikeRemover makes no PATH or registry changes).
@@ -24,19 +26,27 @@ project files and exports are untouched — SpikeRemover makes no PATH or regist
    with **Rt / y / AUC / %**). Every node has a **checkbox** (unticking a parent unticks its
    children), can be **renamed** (double-click — a pen marks editable rows) and **removed** (✖).
    **Drag** curves/datasets to reorder them = change draw order (top of tree draws under, so later
-   items sit on top — matters with alpha). Buttons act on the selection: **Info** (dataset only),
-   **Adjust** (normalization, curve only), **Display…** (any node — appearance, or a peak/spike's
-   info), **Duplicate** (curve).
+   items sit on top — matters with alpha). Drop a dataset onto another dataset, or a curve onto a
+   sibling curve, to reorder; a drop line shows where it will land. Buttons act on the selection:
+   **Info** (details for *any* element — dataset metadata, curve, spikes, baseline, peaks, or a
+   single spike/peak), **Adjust** (normalization, curve only), **Display…** (any node — appearance),
+   **Duplicate** (curve).
 3. **Processing** acts on the **selected curve** (so detecting on a spikeless curve finds no
-   spikes). Each action has a ⚙ for its parameters:
+   spikes). Pipeline order is **spikes → decay → baseline → peaks**: spikes are an electronic
+   artefact unrelated to sample activity, so they are removed *before* decay correction; decay
+   comes before baseline/peaks so AUC/% reflect the activity-corrected signal. Each action has a
+   ⚙ for its parameters:
    - **Detect spikes** → marks spikes and adds a **spikeless** child curve (⚙: window, threshold,
      max width, interpolation linear / PCHIP).
-   - **Detect baseline** → adds a baseline (⚙: minimum / average of first N).
-   - **Detect peaks** → adds peaks with Rt/AUC/% (⚙: prominence, height, distance, and the
-     **local drift baseline** used for integration).
    - **Apply decay** → adds a **decay-corrected** child curve. Its ⚙ sets the isotope (+ half-life)
      and the time to decay-correct **to** (default run start); if the isotope/half-life is missing
-     when you click Apply decay, that dialog opens automatically.
+     when you click Apply decay, that dialog opens automatically. *(Hidden by default — enable it
+     under Options → Processing features shown.)*
+   - **Detect baseline** → adds a baseline (⚙: minimum / average of first N).
+   - **Detect peaks** → adds peaks with Rt/AUC/% (⚙: prominence, height, distance, and the
+     **local drift baseline** used for integration). Detection runs on a **spike-suppressed** copy
+     of the curve, so spikes don't become skinny false peaks. Running it on a plain curve makes a
+     fresh peaks group; running it on an existing peak/peaks group reprocesses with current options.
 4. **Plot options** — a collapsible panel down the **left** side (closed by default; open it with
    its toolbar button). Sections: **Plot area**, **Margins**, **Legend**, **Y axis**, **X axis** —
    plot size in mm, plot-area/margin background colour + alpha, legend position/font, axis limits,
@@ -46,19 +56,23 @@ project files and exports are untouched — SpikeRemover makes no PATH or regist
    (auto tick thickness = axis thickness); a ticked Auto limit shows the value auto-mode would
    use, greyed out. Each axis has an **Advanced** sub-section (title↔label and label↔axis spacing,
    and a grid). All sections start collapsed except **Plot area**.
-5. **Log** and **Report** panels each have **Export…** and **Copy** (to clipboard) buttons.
-6. **App options…** — a single app **background** (checker or solid, cell size in plot **mm**, so
-   it scales with the plot; shown wherever a plot background alpha < 1), a dotted **export-area
-   border** (toggle + colour/style/width), and **lock menu windows**.
-7. **Export options…** — PNG file dpi, a separate **clipboard dpi** (kept modest so a pasted plot
-   is about its Display-options mm size, not a 600-dpi monster), what **Copy** puts on the
-   clipboard (PNG image or SVG), and **Export processed data (GINA X)** — writes the processed
-   signal (spikeless if present) back to a `.txt` in the GINA format so it can be reloaded
-   (best-effort GINA X compat).
-7. **Export plot…** — PNG (dpi selectable, default 600) or SVG, at the exact mm size. Background
-   transparency is preserved.
+5. **Copy / Export / ⚙** live *per window*, not on a shared toolbar:
+   - **Log** and **Report** carry **Copy · Export · ⚙ · ✕** on their **title bar**. The ⚙ holds
+     that export's own options (log: include timestamps; report: copy tables as rich HTML). The
+     **report** additionally shows a small **⧉ copy table** link next to *each* peak table in the
+     text — click it to copy that one table (there can be several).
+   - The **plot** has a **⧉ Copy · ⭳ Export · ⚙** cluster in the top-right of the graph area; its
+     ⚙ sets PNG file dpi, **clipboard dpi** (default **600**), and clipboard format (PNG / SVG).
+     Export writes PNG (default 600 dpi) or SVG at the exact mm size, transparency preserved. The
+     report ⚙ also has **Export selected curve (GINA X)** — writes the processed signal back to a
+     `.txt` in GINA format so it can be reloaded (best-effort GINA X compat).
+6. **Options** — collapsible sections (all start collapsed): app **background** (checker/solid,
+   cell size in plot **mm**), a dotted **export-area border**, **Plot view** (resolution-slider
+   max), **Processing features shown** (tick which Processing buttons appear — Apply decay off by
+   default), and **Menu windows** (which docks **open by default**, plus **lock menu windows**).
+   These preferences persist between sessions.
 
-The **Display / Data / Processing / Log / Report** toolbar buttons open and close their docks;
+The **Plot options / Data / Processing / Log / Report** toolbar buttons open and close their docks;
 closing a dock un-presses its button, pressing it again reopens it.
 
 ### Plot navigation
@@ -67,9 +81,10 @@ The plot is rendered as a **vector** image you can zoom and pan: **mouse wheel**
 on the cursor, **drag** (any button) pans, **double-click** fits to the window. Drop a GINA
 `.txt` straight onto it to load. The **resolution slider** (bottom-left) enlarges the plot area
 1×–5× on screen (fonts/line widths stay fixed, so closely-spaced spikes/peaks separate out) —
-tick **export** to apply it to exports too. The **⧉ Copy** button copies the plot to the
-clipboard **at its real mm size** (the image carries its dpi, so pasting into PowerPoint gives the
-Plot-options size, not a giant); clipboard dpi is set in Export options.
+tick **export** to apply it to exports too. The **⧉ Copy** button (top-right cluster) copies the
+plot to the clipboard **at its real mm size** (the image carries its dpi, so pasting into
+PowerPoint gives the Plot-options size, not a giant); clipboard dpi (default 600) is set in the
+plot **⚙**.
 
 ### Adjust (decay correction & normalization)
 
@@ -125,12 +140,14 @@ curve. Show/hide, rename, or remove each node in the Data tree.
 
 **Detect peaks** on a curve finds local maxima (prominence-based) and computes, per peak,
 **Rt** (apex x), **x start/end/width**, **y max** (above baseline), **AUC**, **%** of the group
-total, and a **skewness**. Select a peak → **Display…** shows all of it (name editable). Peaks
-draw as a shaded **AUC fill** by default (or markers), with optional on-graph **Rt / %** labels.
-The baseline used for integration is a **local drift line** between each peak's bounds by default,
-or the curve's detected baseline — a **Detect peaks ⚙** option. The **report** is the dataset
-metadata + conditions + a per-curve peak table; its **Copy table** button copies an HTML table you
-can paste straight into Word/PowerPoint.
+total, and a **skewness**. Select a peak → **Info** shows all of it (name editable); **Display…**
+sets the peaks group's style. Integration bounds run apex-to-valley (the low point between a peak
+and its neighbour) then trim to the peak's feet, so the shaded region spans the whole peak rather
+than a narrow tip. Peaks draw as a shaded **AUC fill** by default (or markers), with optional
+on-graph **Rt / %** labels. The baseline used for integration is a **local drift line** between
+each peak's bounds by default, or the curve's detected baseline — a **Detect peaks ⚙** option. The
+**report** is the dataset metadata + conditions + a per-curve peak table; a **⧉ copy table** link
+next to each table copies an HTML table you can paste straight into Word/PowerPoint.
 
 ## GINA format notes
 

@@ -1,10 +1,11 @@
 """Individual-peak detection and metrics (Rt, AUC, %) for radio-HPLC traces.
 
-Detection is scipy.signal.find_peaks (prominence) with integration bounds from peak_widths.
+Detection is scipy.signal.find_peaks (prominence); integration bounds run apex-to-valley
+(the low point between each peak and its neighbour), then trim inward to the peak's feet so
+the bounds hug the real peak rather than the narrow, prominence-truncated peak_widths span.
 Metrics: retention time (apex x), AUC above a baseline, and each peak's % of the group total.
 The baseline under a peak is either a local drift line between the peak's bounds (default) or
 the curve's detected baseline.
-# ponytail: bounds from peak_widths @ rel_height 0.95; refine (valley-to-valley, fit) if needed.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.signal import find_peaks, peak_widths
+from scipy.signal import find_peaks
 
 from .dataset import Peak
 
@@ -47,15 +48,37 @@ def detect_peaks(y: np.ndarray, baseline: np.ndarray | None = None,
                            distance=max(1, int(p.min_distance)))
     if len(apexes) == 0:
         return []
-    _, _, left_ips, right_ips = peak_widths(sig, apexes, rel_height=0.95)
     out = []
-    for a, li, ri in zip(apexes, left_ips, right_ips):
-        left = max(0, int(np.floor(li)))
-        right = min(n - 1, int(np.ceil(ri)))
-        if right <= left:
-            left, right = max(0, a - 1), min(n - 1, a + 1)
-        out.append(Peak(apex=int(a), left=left, right=right))
+    for k, a in enumerate(apexes):
+        a = int(a)
+        left, right = _peak_bounds(sig, a,
+                                   lo=0 if k == 0 else int(apexes[k - 1]),
+                                   hi=n - 1 if k == len(apexes) - 1 else int(apexes[k + 1]))
+        out.append(Peak(apex=a, left=left, right=right))
     return out
+
+
+def _peak_bounds(sig, apex, lo, hi, foot_frac=0.02):
+    """Integration bounds for one peak: the valley on each side (lowest point between the
+    apex and its neighbouring apex), trimmed inward to where the signal leaves its foot.
+    foot_frac lifts the foot level a hair above the valley floor so a flat baseline tail
+    isn't swallowed into the peak."""
+    n = len(sig)
+    left_v = lo + int(np.argmin(sig[lo:apex + 1]))
+    right_v = apex + int(np.argmin(sig[apex:hi + 1]))
+    floor = max(float(sig[left_v]), float(sig[right_v]))
+    thr = floor + foot_frac * (float(sig[apex]) - floor)
+    left = apex
+    while left > left_v and sig[left - 1] > thr:
+        left -= 1
+    left = max(left_v, left - 1)
+    right = apex
+    while right < right_v and sig[right + 1] > thr:
+        right += 1
+    right = min(right_v, right + 1)
+    if right <= left:
+        left, right = max(0, apex - 1), min(n - 1, apex + 1)
+    return left, right
 
 
 def _local_base(xs, ys):
@@ -118,6 +141,9 @@ def _self_check():
     assert all(pk.auc > 0 for pk in pks), [pk.auc for pk in pks]
     assert abs(sum(pk.pct for pk in pks) - 100.0) < 1e-6, sum(pk.pct for pk in pks)
     assert abs(pks[0].rt - 200 / 60.0) < 0.1, pks[0].rt
+    # bounds must hug the peak, not the truncated tip: sigma=8, so a real peak spans well
+    # over ±2 sigma (~32 samples). Guards the "peaks too narrow" regression.
+    assert all((pk.right - pk.left) >= 24 for pk in pks), [(pk.right - pk.left) for pk in pks]
     print("peaks self-check OK")
 
 

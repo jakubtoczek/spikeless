@@ -32,13 +32,28 @@ def _apply_dark(app):
     app.setPalette(p)
 
 
+def _set_app_user_model_id(app_id):
+    """Windows: an explicit AppUserModelID makes the taskbar group the app under its own
+    icon (pythonw.exe otherwise shows the generic Python icon). No-op elsewhere."""
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:  # noqa: BLE001 — non-Windows or blocked; harmless
+        pass
+
+
 def main() -> int:
     from PySide6.QtWidgets import QApplication
 
-    from .app import MainWindow
+    from .app import APP_NAME, MainWindow, _app_icon
 
+    _set_app_user_model_id(APP_NAME)
     app = QApplication(sys.argv)
-    app.setApplicationName("SpikeRemover")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+    icon = _app_icon()
+    if icon is not None:
+        app.setWindowIcon(icon)
     _apply_dark(app)
     win = MainWindow()
     win.show()
