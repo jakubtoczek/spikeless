@@ -10,7 +10,7 @@ set "UV_CACHE_DIR=%PUBLIC_ROOT%\cache"
 set "UV_PROJECT_ENVIRONMENT=%PUBLIC_ROOT%\venv"
 set "PROJECT=%~dp0"
 set "PYTHONPATH=%~dp0src"
-set "ICON=%~dp0src\spikeremover\assets\spikeless.ico"
+set "ICON=%~dp0src\spikeless\assets\spikeless.ico"
 
 rem --- one-time: put a Spikeless shortcut (with the app icon) on the Desktop ---
 set "LNK=%USERPROFILE%\Desktop\Spikeless.lnk"
@@ -47,5 +47,5 @@ if errorlevel 1 (
 )
 
 rem --- launch the GUI with pythonw (no console window) and exit ---
-start "" "%UV_PROJECT_ENVIRONMENT%\Scripts\pythonw.exe" -m spikeremover
+start "" "%UV_PROJECT_ENVIRONMENT%\Scripts\pythonw.exe" -m spikeless
 exit /b 0

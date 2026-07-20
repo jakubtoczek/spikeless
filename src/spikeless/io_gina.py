@@ -200,7 +200,7 @@ def _self_check():
         '"01"00"\t"2,500"\t"0,000"\n'
         '"02"00"\t"7,000"\t"0,000"\n'
     )
-    p = Path(tempfile.gettempdir()) / "_spikeremover_iotest.txt"
+    p = Path(tempfile.gettempdir()) / "_spikeless_iotest.txt"
     p.write_bytes(sample.encode("cp1252"))
     ds, warns = load(p)
     assert ds.run_name == "Interval Values Demo", ds.run_name
@@ -214,7 +214,7 @@ def _self_check():
     assert _time_to_seconds('"05"00"') == 5
 
     # save round-trips through our own loader
-    out = Path(tempfile.gettempdir()) / "_spikeremover_savetest.txt"
+    out = Path(tempfile.gettempdir()) / "_spikeless_savetest.txt"
     save(ds, ds.root, out)
     ds2, _ = load(out)
     assert len(ds2.root.y) == len(ds.root.y), (len(ds2.root.y), len(ds.root.y))

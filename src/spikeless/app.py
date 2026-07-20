@@ -1,4 +1,4 @@
-"""Spikeless main window (PySide6 + matplotlib). Package name stays `spikeremover`."""
+"""Spikeless main window (PySide6 + matplotlib)."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from .plotview import Background, ZoomableFigureView
 from .spikes import SpikeParams, detect, remove
 from .viz import BaselineViz, PeakViz, SpikeViz
 
-APP_NAME = "Spikeless"   # user-facing product name (package stays 'spikeremover')
+APP_NAME = "Spikeless"
 
 _UNIT_S = {"s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
 _LEGEND_LOCS = ["upper right", "upper left", "lower right", "lower left", "center right", "best"]
@@ -1362,6 +1362,9 @@ class MainWindow(QMainWindow):
         html = QCheckBox("Copy tables as rich HTML (else plain tab-separated text)")
         html.setChecked(eo.report_table_html)
         outer.addWidget(html)
+        allbtn = QPushButton("Export all peak tables (Excel / CSV)…")
+        allbtn.clicked.connect(self._export_all_peaks)
+        outer.addWidget(allbtn)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(dlg.accept)
         box.rejected.connect(dlg.reject)
@@ -1383,26 +1386,67 @@ class MainWindow(QMainWindow):
         if data[0] in ("curve", "dataset"):
             self._export_data_gina()
         elif data[0] in ("peaks", "peak"):
-            self._export_peak_table_csv()
+            self._export_peaks(scope="one")
 
-    def _export_peak_table_csv(self):
-        ds, curve = self._sel_curve()
-        if curve is None or not curve.peaks:
-            self.log("Export: no peaks on the selection.")
+    def _export_all_peaks(self):
+        self._export_peaks(scope="all")
+
+    def _export_peaks(self, scope):
+        """Export peak tables as Excel (a sheet per curve) or CSV. scope 'one' = the selected
+        curve, 'all' = every curve with peaks. Columns follow the report options."""
+        if scope == "one":
+            ds, cv = self._sel_curve()
+            items = [(ds, cv)] if cv is not None and cv.peaks else []
+            default = (f"{ds.meta.name}_{cv.name}_peaks" if items else "peaks").replace(" ", "_")
+        else:
+            items = [(ds, cv) for ds in self.datasets for cv in ds.curves() if cv.peaks]
+            default = "peak_tables"
+        if not items:
+            self.log("Export: no peaks to export.")
             return
-        head, body = self._peak_rows(curve)
+        head, _ = self._peak_rows(items[0][1])
         if not head:
             self.log("Export: no peak columns are enabled (Report ⚙).")
             return
-        default = f"{ds.meta.name}_{curve.name}_peaks.csv".replace(" ", "_")
-        path, _ = QFileDialog.getSaveFileName(self, "Export peak table (CSV)", default, "CSV (*.csv)")
+        path, flt = QFileDialog.getSaveFileName(self, "Export peak table(s)", default,
+                                                "Excel workbook (*.xlsx);;CSV (*.csv)")
         if not path:
             return
-        if not path.lower().endswith(".csv"):
+        xlsx = path.lower().endswith(".xlsx") or ("xlsx" in flt.lower() and not path.lower().endswith(".csv"))
+        if xlsx and not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        elif not xlsx and not path.lower().endswith(".csv"):
             path += ".csv"
-        rows = [head] + body
-        Path(path).write_text("\n".join(",".join(r) for r in rows), encoding="utf-8")
-        self.log(f"Exported {len(body)} peak(s) to {path}")
+        n = self._write_peaks_xlsx(path, items) if xlsx else self._write_peaks_csv(path, items, scope)
+        self.log(f"Exported {n} peak(s) from {len(items)} curve(s) to {path}")
+
+    def _write_peaks_csv(self, path, items, scope):
+        head, _ = self._peak_rows(items[0][1])
+        prefix = ("Dataset", "Curve") if scope == "all" else ()
+        lines = [",".join(prefix + head)]
+        n = 0
+        for ds, cv in items:
+            _h, body = self._peak_rows(cv)
+            for r in body:
+                lines.append(",".join(((ds.meta.name, cv.name) if scope == "all" else ()) + r))
+                n += 1
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
+        return n
+
+    def _write_peaks_xlsx(self, path, items):
+        from openpyxl import Workbook
+        wb = Workbook()
+        wb.remove(wb.active)   # drop the default empty sheet
+        used, n = set(), 0
+        for ds, cv in items:
+            head, body = self._peak_rows(cv)
+            ws = wb.create_sheet(_sheet_name(cv.name, used))
+            ws.append(list(head))
+            for r in body:
+                ws.append([_num(c) for c in r])
+                n += 1
+        wb.save(path)
+        return n
 
     # ---------------- dialogs ----------------
     def _edit_info(self):
@@ -2055,6 +2099,26 @@ def _clear_layout(lay):
         w = item.widget()
         if w is not None:
             w.deleteLater()
+
+
+def _num(v):
+    """Coerce a formatted cell to a number for Excel (so columns stay summable); else keep text."""
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return v
+
+
+def _sheet_name(name, used):
+    """A valid, unique (<=31 char) Excel sheet name."""
+    s = "".join(c for c in str(name) if c not in '[]:*?/\\')[:31] or "Sheet"
+    base, i = s, 1
+    while s in used:
+        suffix = f"_{i}"
+        s = base[:31 - len(suffix)] + suffix
+        i += 1
+    used.add(s)
+    return s
 
 
 class _DockTitleBar(QWidget):

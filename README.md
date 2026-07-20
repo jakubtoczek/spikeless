@@ -1,10 +1,9 @@
 # Spikeless
 
-<img src="src/spikeremover/assets/spikeless.png" width="96" align="right" alt="Spikeless icon">
+<img src="src/spikeless/assets/spikeless.png" width="96" align="right" alt="Spikeless icon">
 
 Desktop GUI to clean single-point spikes from radio-HPLC spectra exported by **GINA X**,
 produce publication-ready plots, and analyse/export them. MIT-licensed (see `LICENSE`).
-*(The Python package is still named `spikeremover` internally.)*
 
 ## Run
 
@@ -161,12 +160,12 @@ next to each table copies an HTML table you can paste straight into Word/PowerPo
 ## Dev
 
 ```
-uv run python -m spikeremover              # launch
-uv run python -m spikeremover.spikes       # spike-detection self-check
-uv run python -m spikeremover.peaks        # peak-detection self-check
-uv run python -m spikeremover.adjust       # decay/baseline/normalization self-check
-uv run python -m spikeremover.io_gina      # parser + GINA-save round-trip self-check
-uv run python -m spikeremover.plotting     # plot-sizing self-check
+uv run python -m spikeless              # launch
+uv run python -m spikeless.spikes       # spike-detection self-check
+uv run python -m spikeless.peaks        # peak-detection self-check
+uv run python -m spikeless.adjust       # decay/baseline/normalization self-check
+uv run python -m spikeless.io_gina      # parser + GINA-save round-trip self-check
+uv run python -m spikeless.plotting     # plot-sizing self-check
 ```
 
 ## Roadmap (phase B)
