@@ -170,5 +170,8 @@ uv run python -m spikeless.plotting     # plot-sizing self-check
 
 ## Roadmap (phase B)
 
-Per-peak report table (area/height/retention) + Excel export, more baseline estimators
-(drift-aware, segmented, asymmetric least squares), richer peak parameters.
+More baseline estimators — **segmented** and **asymmetric least squares (arPLS)**. Richer peak
+parameters.
+
+_Done:_ SNIP drift-aware baseline; per-peak report table (area/height/retention) + Excel export;
+per-peak colour and on-graph labels; configurable per-button default display actions.
