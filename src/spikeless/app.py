@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from html import escape as _esc
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEvent, QMimeData, QSettings, Qt, Signal
+from PySide6.QtCore import QByteArray, QEvent, QMimeData, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox,
@@ -58,6 +58,22 @@ PROC_FEATURES = [
     ("baseline", "Detect baseline", "_detect_baseline", "_edit_baseline_params"),
     ("peaks", "Detect peaks", "_detect_peaks", "_edit_peak_params"),
 ]
+# Post-detection "default display actions" per feature, shown in each button's collapsible
+# (hidden by default). (step_key, checkbox label, default_on). Order = execution order.
+# Spikes tells a little story (show spikes → pause → swap to spikeless, hide the original);
+# baseline/peaks/decay just reveal their new artifact without touching anything else.
+PROC_STEPS = {
+    "spikes": [
+        ("show_spikes", "display spikes", True),
+        ("delay", "delay 0.5 s", True),
+        ("show_result", "display spikeless curve", True),
+        ("hide_original", "hide original curve & spikes", True),
+    ],
+    "decay": [("show_result", "display decay curve", True)],
+    "baseline": [("show_result", "display baseline", True)],
+    "peaks": [("show_result", "display peaks", True)],
+}
+
 # Dockable menu windows (key, attribute name) — used for the "open by default" option.
 DOCK_KEYS = [("data", "data_dock"), ("processing", "processing_dock"),
              ("log", "log_dock"), ("report", "report_dock"), ("plot_options", "display_dock")]
@@ -121,6 +137,8 @@ class MainWindow(QMainWindow):
         self.baseline_method = "min"
         self.baseline_n = 20
         self.peak_params = PeakParams()
+        # per-feature default display actions (session state; edited via each button's collapsible)
+        self.proc_steps = {k: {s: d for s, _l, d in steps} for k, steps in PROC_STEPS.items()}
         self.app_opts = AppOptions()
         self.export_opts = ExportOptions()
         self._settings = QSettings(APP_NAME, APP_NAME)
@@ -332,19 +350,43 @@ class MainWindow(QMainWindow):
         self._populate_processing()
 
     def _populate_processing(self):
-        """(Re)build the Processing buttons, showing only the features enabled in Options."""
+        """(Re)build the Processing buttons, showing only the features enabled in Options.
+        Each button carries a collapsible list of default display actions (hidden by default)."""
         _clear_layout(self._proc_lay)
         for key, label, run_name, gear_name in PROC_FEATURES:
             if not self.app_opts.proc_visible.get(key, True):
                 continue
-            row = QWidget()
-            r = QHBoxLayout(row)
+            box = QWidget()
+            col = QVBoxLayout(box)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(1)
+            r = QHBoxLayout()
             r.setContentsMargins(0, 0, 0, 0)
+            toggle = QToolButton()
+            toggle.setText("▸")
+            toggle.setAutoRaise(True)
+            toggle.setToolTip("Default display actions when this runs")
             b = QPushButton(label)
             b.clicked.connect(getattr(self, run_name))
-            r.addWidget(b)
+            r.addWidget(toggle)
+            r.addWidget(b, 1)
             r.addWidget(_gear(getattr(self, gear_name)))
-            self._proc_lay.addWidget(row)
+            col.addLayout(r)
+            body = QWidget()
+            bl = QVBoxLayout(body)
+            bl.setContentsMargins(20, 0, 0, 3)
+            bl.setSpacing(0)
+            for skey, slabel, dflt in PROC_STEPS.get(key, []):
+                cb = QCheckBox(slabel)
+                cb.setChecked(self.proc_steps[key].get(skey, dflt))
+                cb.toggled.connect(lambda on, k=key, s=skey: self.proc_steps[k].__setitem__(s, on))
+                bl.addWidget(cb)
+            body.setVisible(False)
+            toggle.clicked.connect(lambda _=False, bd=body, tg=toggle:
+                                   (bd.setVisible(not bd.isVisible()),
+                                    tg.setText("▾" if bd.isVisible() else "▸")))
+            col.addWidget(body)
+            self._proc_lay.addWidget(box)
         self._proc_lay.addStretch(1)
 
     def _build_log_dock(self):
@@ -1088,23 +1130,42 @@ class MainWindow(QMainWindow):
         self._push_undo()
         mask = detect(curve.y, self.spike_params)
         n = int(mask.sum())
-        if n:
-            import numpy as np
-            curve.spike_mask = mask
-            curve.spike_shown = np.ones(n, bool)
-            cleaned = remove(curve.y, mask, method=self.interp_method)
-            child = next((c for c in curve.children if c.kind == "spikeless"), None)
-            if child is not None:
-                child.y = cleaned
-            else:
-                curve.children.append(new_curve_from(curve, cleaned, "spikeless", "spikeless", "#00a000"))
-            self.log(f"Detected {n} spike(s) on '{curve.name}' → spikeless child ({self.interp_method}).")
-        else:
+        steps = self.proc_steps["spikes"]
+        if not n:
             curve.spike_mask = None
             self.log(f"No spikes on '{curve.name}'.")
+            self._rebuild_tree()
+            self._refresh_plot()
+            self._update_report()
+            return
+        import numpy as np
+        curve.spike_mask = mask
+        curve.spike_shown = np.ones(n, bool)
+        curve.spikes_group_shown = steps["show_spikes"]
+        cleaned = remove(curve.y, mask, method=self.interp_method)
+        child = next((c for c in curve.children if c.kind == "spikeless"), None)
+        if child is None:
+            child = new_curve_from(curve, cleaned, "spikeless", "spikeless", "#00a000")
+            curve.children.append(child)
+        else:
+            child.y = cleaned
+        child.shown = False   # phase 1: reveal the spikes on the original before swapping
+        self.log(f"Detected {n} spike(s) on '{curve.name}' → spikeless child ({self.interp_method}).")
         self._rebuild_tree()
         self._refresh_plot()
         self._update_report()
+
+        def phase2():   # phase 2: bring in the spikeless curve and (optionally) hide the original
+            child.shown = steps["show_result"]
+            if steps["hide_original"]:
+                curve.shown = False
+                curve.spikes_group_shown = False
+            self._rebuild_tree()
+            self._refresh_plot()
+        if steps["delay"]:
+            QTimer.singleShot(500, phase2)
+        else:
+            phase2()
 
     def _detect_baseline(self):
         ds, curve = self._need_curve()
@@ -1112,7 +1173,7 @@ class MainWindow(QMainWindow):
             return
         self._push_undo()
         curve.baseline = estimate_baseline(curve.y, self.baseline_method, self.baseline_n)
-        curve.baseline_shown = True
+        curve.baseline_shown = self.proc_steps["baseline"]["show_result"]
         self.log(f"Baseline on '{curve.name}' ({self.baseline_method}).")
         self._rebuild_tree()
         self._refresh_plot()
@@ -1134,7 +1195,7 @@ class MainWindow(QMainWindow):
         curve.peak_local_baseline = self.peak_params.local_baseline
         analyze_peaks(curve.x, sig, pks, curve.baseline, curve.peak_local_baseline)
         curve.peaks = pks
-        curve.peaks_group_shown = True
+        curve.peaks_group_shown = self.proc_steps["peaks"]["show_result"]
         self.log(f"{'Reprocessed' if reprocess else 'Detected'} {len(pks)} peak(s) on '{curve.name}' "
                  f"(baseline: {'local drift' if curve.peak_local_baseline else 'curve baseline'}).")
         self._rebuild_tree()
@@ -1156,7 +1217,9 @@ class MainWindow(QMainWindow):
         base_kind = "spikeless+decay" if "spikeless" in curve.kind else "decay"
         name = f"{curve.name} +decay"
         self._push_undo()
-        curve.children.append(new_curve_from(curve, curve.y * factor, name, base_kind, "#b000b0"))
+        child = new_curve_from(curve, curve.y * factor, name, base_kind, "#b000b0")
+        child.shown = self.proc_steps["decay"]["show_result"]
+        curve.children.append(child)
         self.log(f"Applied decay to '{curve.name}' → '{name}' (ref {ds.decay_ref_label}).")
         self._rebuild_tree()
         self._refresh_plot()
@@ -1661,8 +1724,10 @@ class MainWindow(QMainWindow):
             self._edit_spike_viz(curve)
         elif kind == "baseline":
             self._edit_baseline_viz(curve)
-        elif kind in ("peak", "peaks"):
-            self._edit_peak_viz(curve)
+        elif kind == "peak":
+            self._edit_peak_color(curve, data[3])   # a specific peak → just its colour
+        elif kind == "peaks":
+            self._edit_peak_viz(curve)               # the group → group style
 
     def _edit_curve_style(self, curve):
         st = curve.style
@@ -1764,6 +1829,16 @@ class MainWindow(QMainWindow):
         for key, lbl in _ANNOT:
             annot.addItem(lbl, key)
         annot.setCurrentIndex(max(0, annot.findData(curve.annotate)))
+        lsize = _spin(4, 24, v.label_size, 0.5)
+        lpos = QComboBox()
+        for key in ("auto", "above", "right", "left"):
+            lpos.addItem(key.capitalize(), key)
+        lpos.setCurrentIndex(max(0, lpos.findData(v.label_pos)))
+        lauto = QCheckBox("auto (readable on background)")
+        lauto.setChecked(v.label_color is None)
+        lcolor = _ColorButton(v.label_color or v.color)
+        lcolor.setEnabled(v.label_color is not None)
+        lauto.toggled.connect(lambda on: lcolor.setDisabled(on))
         leg = QCheckBox("Show in legend")
         leg.setChecked(v.in_legend)
         form.addRow(r_fill)
@@ -1772,11 +1847,18 @@ class MainWindow(QMainWindow):
         form.addRow("Fill alpha", alpha)
         form.addRow("Marker", marker)
         form.addRow("On-graph label", annot)
+        form.addRow("Label size (pt)", lsize)
+        form.addRow("Label position", lpos)
+        form.addRow("Label colour", lcolor)
+        form.addRow("", lauto)
         form.addRow(leg)
         if _run_dialog(dlg, form):
             curve.peak_viz = PeakViz(mode="markers" if r_mark.isChecked() else "fill",
                                      color=color.color, alpha=alpha.value(),
-                                     marker=marker.currentText(), in_legend=leg.isChecked())
+                                     marker=marker.currentText(), in_legend=leg.isChecked(),
+                                     label_size=lsize.value(),
+                                     label_color=None if lauto.isChecked() else lcolor.color,
+                                     label_pos=lpos.currentData())
             curve.annotate = annot.currentData()
             self._refresh_plot()
 
@@ -1795,6 +1877,37 @@ class MainWindow(QMainWindow):
             form.addRow(lbl, ed)
         _run_dialog(dlg, form)
 
+    def _peak_color_row(self, form, pk, curve):
+        """Add a 'Colour' + 'use group colour' pair to `form`; returns (auto_checkbox, button).
+        Ticked auto => pk.color None (inherit the group peak_viz colour)."""
+        auto = QCheckBox("use group colour")
+        auto.setChecked(pk.color is None)
+        btn = _ColorButton(pk.color or curve.peak_viz.color)
+        btn.setEnabled(pk.color is not None)
+        auto.toggled.connect(lambda on: btn.setDisabled(on))
+        form.addRow("Colour", btn)
+        form.addRow("", auto)
+        return auto, btn
+
+    def _edit_peak_color(self, curve, i):
+        if not curve.peaks or i >= len(curve.peaks):
+            return
+        pk = curve.peaks[i]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Peak {i + 1} display")
+        form = QFormLayout(dlg)
+        auto, btn = self._peak_color_row(form, pk, curve)
+        annot = QComboBox()
+        annot.addItem("(group default)", None)
+        for key, lbl in _ANNOT:
+            annot.addItem(lbl, key)
+        annot.setCurrentIndex(max(0, annot.findData(pk.annotate)))
+        form.addRow("On-graph label", annot)
+        if _run_dialog(dlg, form):
+            pk.color = None if auto.isChecked() else btn.color
+            pk.annotate = annot.currentData()   # None => inherit the curve's group label
+            self._refresh_plot()
+
     def _edit_peak_info(self, curve, i):
         if not curve.peaks or i >= len(curve.peaks):
             return
@@ -1805,6 +1918,7 @@ class MainWindow(QMainWindow):
         name = QLineEdit(pk.name)
         name.setPlaceholderText(f"peak {i + 1}")
         form.addRow("Name", name)
+        auto, colorbtn = self._peak_color_row(form, pk, curve)
         for lbl, val in [("Rt (min)", f"{pk.rt:.3f}"), ("x start (min)", f"{pk.x_start:.3f}"),
                          ("x end (min)", f"{pk.x_end:.3f}"), ("width (min)", f"{pk.length:.3f}"),
                          ("y max (above base)", f"{pk.y_max:.1f}"), ("AUC", f"{pk.auc:.2f}"),
@@ -1815,6 +1929,7 @@ class MainWindow(QMainWindow):
             form.addRow(lbl, ed)
         if _run_dialog(dlg, form):
             pk.name = name.text()
+            pk.color = None if auto.isChecked() else colorbtn.color
             self._rebuild_tree()
             self._refresh_plot()
 
@@ -1846,14 +1961,21 @@ class MainWindow(QMainWindow):
         dlg.setWindowTitle("Baseline algorithm")
         form = QFormLayout(dlg)
         method = QComboBox()
-        for key in ("min", "first_n", "none"):
+        for key in ("min", "first_n", "snip", "none"):
             method.addItem(BASELINE_LABELS[key], key)
         method.setCurrentIndex(max(0, method.findData(self.baseline_method)))
         n_spin = _int_spin(1, 100000, self.baseline_n, 1)
-        method.currentIndexChanged.connect(lambda: n_spin.setEnabled(method.currentData() == "first_n"))
-        n_spin.setEnabled(self.baseline_method == "first_n")
         form.addRow("Method", method)
-        form.addRow("First N points", n_spin)
+        form.addRow("N", n_spin)
+        n_label = form.labelForField(n_spin)  # relabel + enable N per method (shared knob)
+
+        def _sync_n():
+            m = method.currentData()
+            n_spin.setEnabled(m in ("first_n", "snip"))
+            n_label.setText("Peak half-width (pts)" if m == "snip"
+                            else "First N points" if m == "first_n" else "N (unused)")
+        method.currentIndexChanged.connect(_sync_n)
+        _sync_n()
         if _run_dialog(dlg, form):
             self.baseline_method = method.currentData()
             self.baseline_n = n_spin.value()

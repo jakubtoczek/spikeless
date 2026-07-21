@@ -75,6 +75,7 @@ class ZoomableFigureView(QGraphicsView):
         size = self._renderer.defaultSize()
         w, h = size.width(), size.height()
 
+        prev = self._item.boundingRect() if self._item is not None else None
         if self._item is not None:
             self._scene.removeItem(self._item)
         self._item = QGraphicsSvgItem()
@@ -87,7 +88,13 @@ class ZoomableFigureView(QGraphicsView):
             pos = fig.axes[0].get_position()
             self._axes_origin = QPointF(pos.x0 * w, (1.0 - pos.y0 - pos.height) * h)
         self._scene.setSceneRect(QRectF(-w, -h, 3 * w, 3 * h))
-        if not (keep_view and self._zoomed):
+        if keep_view and self._zoomed:
+            # a resolution/size change grows the figure from its (0,0) top-left; keep the point
+            # that was under the viewport centre there, so the view stays put instead of drifting.
+            if prev is not None and prev.width() > 0 and prev.height() > 0:
+                c = self.mapToScene(self.viewport().rect().center())
+                self.centerOn(c.x() / prev.width() * w, c.y() / prev.height() * h)
+        else:
             self._fit()
         self.viewport().update()
 

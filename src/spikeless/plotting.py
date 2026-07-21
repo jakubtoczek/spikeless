@@ -43,6 +43,56 @@ def _desaturate(hexcolor: str, factor: float = 0.4) -> str:
     return to_hex(colorsys.hls_to_rgb(h, min(1.0, li * 1.1), s * factor))
 
 
+def _rel_lum(rgb) -> float:
+    """WCAG relative luminance of an (r,g,b) triple in 0..1."""
+    r, g, b = (c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a, b) -> float:
+    hi, lo = sorted((_rel_lum(a), _rel_lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _readable(fg_hex: str, bg_hex: str, target: float = 3.0) -> str:
+    """Keep fg's hue but shade it — darker on a light bg, lighter on a dark bg — until it clears
+    `target` contrast against bg, so labels stay readable instead of washing out on the fill colour."""
+    try:
+        fg, bg = to_rgb(fg_hex), to_rgb(bg_hex)
+    except ValueError:
+        return fg_hex
+    if _contrast(fg, bg) >= target:
+        return fg_hex
+    h, li, s = colorsys.rgb_to_hls(*fg)
+    step = -0.07 if _rel_lum(bg) > 0.4 else 0.07
+    cand = fg
+    for _ in range(14):
+        li = min(1.0, max(0.0, li + step))
+        cand = colorsys.hls_to_rgb(h, li, s)
+        if _contrast(cand, bg) >= target or li in (0.0, 1.0):
+            break
+    return to_hex(cand)
+
+
+def _label_placement(px, py, xmin, xmax, ymin, ymax, mode, pad=3):
+    """(dx, dy, ha, va) offset-points + alignment for a peak label. 'auto' keeps it inside the
+    axes: a peak near the top edge is labelled to the side (left if also near the right edge)
+    rather than above, where it would spill out of the plot."""
+    if mode == "above":
+        return 0, pad, "center", "bottom"
+    if mode == "right":
+        return pad, 0, "left", "center"
+    if mode == "left":
+        return -pad, 0, "right", "center"
+    xr = (xmax - xmin) or 1.0
+    yr = (ymax - ymin) or 1.0
+    if py > ymin + 0.88 * yr:                 # near the top → move to the side
+        if px > xmin + 0.85 * xr:             # also near the right edge → put it on the left
+            return -pad, 0, "right", "center"
+        return pad, 0, "left", "center"
+    return 0, pad, "center", "bottom"
+
+
 @dataclass
 class AxisOptions:
     title: str = "Time (min)"
@@ -233,7 +283,8 @@ class _LegendState:
         self.peak = False
 
 
-def _draw_curve(ax, curve: Curve, ymin, leg: _LegendState, crop=False, crop_color="#ffffff"):
+def _draw_curve(ax, curve: Curve, limits, leg: _LegendState, crop=False, bg="#ffffff"):
+    xmin, xmax, ymin, ymax = limits
     st = curve.style
     y_adj = _y_adj(curve)[0]
     base_adj = _base_adj(curve)
@@ -249,9 +300,13 @@ def _draw_curve(ax, curve: Curve, ymin, leg: _LegendState, crop=False, crop_colo
         bcol = curve.baseline_viz.color or _desaturate(st.color)
         ax.plot(curve.x, base_adj, color=bcol, alpha=curve.baseline_viz.alpha, lw=st.line_width_pt,
                 linestyle=curve.baseline_viz.linestyle, zorder=1.5)
+        if len(curve.x) and float(np.nanmax(base_adj) - np.nanmin(base_adj)) < 1e-9:
+            c = float(np.nanmin(base_adj))  # flat baseline → annotate its level as y = c
+            ax.annotate(f"y = {c:.4g}", (curve.x[-1], c), textcoords="offset points",
+                        xytext=(-2, 2), ha="right", va="bottom", fontsize=6.0, color=bcol, zorder=1.6)
     if curve.shown:
         if crop:  # opaque halo the width of the stroke (+ a hair) cuts the fill around the line
-            ax.plot(curve.x, y_adj, color=to_rgba(crop_color, 1.0), lw=st.line_width_pt + 0.8,
+            ax.plot(curve.x, y_adj, color=to_rgba(bg, 1.0), lw=st.line_width_pt + 0.8,
                     linestyle="solid", solid_capstyle="round", zorder=line_z - 0.1)
         lbl = (curve.legend_label or curve.name) if curve.show_legend else "_nolegend_"
         ax.plot(curve.x, y_adj, color=st.color, alpha=st.alpha, lw=st.line_width_pt,
@@ -280,13 +335,15 @@ def _draw_curve(ax, curve: Curve, ymin, leg: _LegendState, crop=False, crop_colo
         v = curve.peak_viz
         vis = [pk for pk in curve.peaks if pk.shown]
         if v.mode == "markers":
-            if vis:
-                lbl = "Peaks" if (v.in_legend and not leg.peak) else "_nolegend_"
-                ax.plot([curve.x[pk.apex] for pk in vis], [y_adj[pk.apex] for pk in vis],
-                        linestyle="none", marker=v.marker, ms=5, mfc=v.color, mec=v.color,
-                        zorder=5, label=lbl)
-                if v.in_legend:
-                    leg.peak, leg.show = True, True
+            first = True
+            for pk in vis:  # per-peak so pk.color can override the group colour
+                col = pk.color or v.color
+                lbl = "Peaks" if (v.in_legend and not leg.peak and first) else "_nolegend_"
+                ax.plot([curve.x[pk.apex]], [y_adj[pk.apex]], linestyle="none", marker=v.marker,
+                        ms=5, mfc=col, mec=col, zorder=5, label=lbl)
+                first = False
+            if v.in_legend and vis:
+                leg.peak, leg.show = True, True
         else:  # fill each peak's AUC region (curve ↔ its local/curve baseline)
             first = True
             for pk in vis:
@@ -297,7 +354,7 @@ def _draw_curve(ax, curve: Curve, ymin, leg: _LegendState, crop=False, crop_colo
                 else:
                     b = base_adj[sl]
                 lbl = "Peaks" if (v.in_legend and not leg.peak and first) else "_nolegend_"
-                ax.fill_between(xs, ys, b, color=v.color, alpha=v.alpha, linewidth=0,
+                ax.fill_between(xs, ys, b, color=(pk.color or v.color), alpha=v.alpha, linewidth=0,
                                 zorder=3, label=lbl)
                 first = False
             if v.in_legend and vis:
@@ -305,15 +362,19 @@ def _draw_curve(ax, curve: Curve, ymin, leg: _LegendState, crop=False, crop_colo
         for pk in vis:
             txt = _peak_label(curve, pk)
             if txt:
-                ax.annotate(txt, (curve.x[pk.apex], y_adj[pk.apex]), textcoords="offset points",
-                            xytext=(0, 3), ha="center", fontsize=6.0, color=v.color, zorder=6)
+                px, py = curve.x[pk.apex], y_adj[pk.apex]
+                col = v.label_color or _readable(pk.color or v.color, bg)
+                dx, dy, ha, va = _label_placement(px, py, xmin, xmax, ymin, ymax, v.label_pos)
+                ax.annotate(txt, (px, py), textcoords="offset points", xytext=(dx, dy),
+                            ha=ha, va=va, fontsize=v.label_size, color=col, zorder=6)
 
 
 def _peak_label(curve, pk):
+    mode = curve.annotate if pk.annotate is None else pk.annotate  # per-peak overrides the group
     parts = []
-    if curve.annotate in ("rt", "both"):
+    if mode in ("rt", "both"):
         parts.append(f"Rt {pk.rt:.2f}")
-    if curve.annotate in ("auc", "both"):
+    if mode in ("auc", "both"):
         parts.append(f"{pk.pct:.0f}%")
     return "\n".join(parts)
 
@@ -343,7 +404,7 @@ def build_figure(datasets: list[Dataset], opts: PlotOptions | None = None,
 
     leg = _LegendState()
     for c in _all_curves(datasets):
-        _draw_curve(ax, c, ymin, leg, crop=opts.crop_fills, crop_color=opts.bg_color)
+        _draw_curve(ax, c, (xmin, xmax, ymin, ymax), leg, crop=opts.crop_fills, bg=opts.bg_color)
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)

@@ -102,15 +102,34 @@ def _baseline_first_n(y, n=20, **_):
     return float(np.mean(y[:n]))
 
 
+def _baseline_snip(y, n=40, **_):
+    """SNIP baseline (Statistics-sensitive Nonlinear Iterative Peak-clipping): iteratively clip
+    peaks down to the slow continuum, so it tracks drift instead of returning a flat floor.
+    n = max half-window in samples (≈ a peak's half-width). The LLS transform compresses the
+    counting range, making it Poisson-appropriate for cps data.
+    Refs: Ryan 1988, Nucl. Instrum. Methods B34:396; Morhác 2008, Appl. Spectrosc. 62:91."""
+    y = np.asarray(y, dtype=float)
+    if len(y) < 3:
+        return np.clip(y, 0, None)
+    v = np.log(np.log(np.sqrt(np.clip(y, 0, None) + 1.0) + 1.0) + 1.0)   # LLS forward
+    for p in range(1, int(max(1, n)) + 1):
+        if 2 * p >= len(v):
+            break
+        v[p:-p] = np.minimum(v[p:-p], 0.5 * (v[:-2 * p] + v[2 * p:]))    # increasing window
+    return np.clip((np.exp(np.exp(v) - 1.0) - 1.0) ** 2 - 1.0, 0, None)  # LLS inverse
+
+
 # key -> estimator(y, n=...) returning a scalar OR a per-point array.
 # Extend here (rolling minimum, ALS, segmented/drift) — apply_adjust broadcasts either shape.
 BASELINE_METHODS = {
     "none": _baseline_none,
     "min": _baseline_min,
     "first_n": _baseline_first_n,
+    "snip": _baseline_snip,
 }
 
-BASELINE_LABELS = {"none": "None", "min": "Minimum", "first_n": "Average of first N points"}
+BASELINE_LABELS = {"none": "None", "min": "Minimum", "first_n": "Average of first N points",
+                   "snip": "SNIP (drift-aware)"}
 
 
 def estimate_baseline(y: np.ndarray, method: str = "min", n: int = 20) -> np.ndarray:
@@ -189,6 +208,16 @@ def _self_check():
     assert estimate_baseline(y, "min")[0] == 5.0
     assert abs(estimate_baseline(y, "first_n", n=10)[0] - 5.0) < 1e-9
     assert estimate_baseline(y, "none")[0] == 0.0
+
+    # SNIP is drift-aware: it recovers a sloping baseline under a peak (constant methods can't)
+    xs = np.arange(600)
+    drift = 5.0 + 0.02 * xs
+    sig = drift + 80.0 * np.exp(-0.5 * ((xs - 300) / 15.0) ** 2)
+    bs = estimate_baseline(sig, "snip", n=40)
+    assert bs.shape == sig.shape, bs.shape
+    assert abs(bs[300] - drift[300]) < 8.0, (bs[300], drift[300])   # tracks slope under the apex
+    assert bs[300] < sig[300] - 40.0, bs[300]                       # sits well below the peak
+    assert np.all(bs[:50] < sig[:50] + 3.0)                         # hugs baseline in peak-free region
 
     # pct_max: peak becomes 100 after baseline subtraction
     ym, unit = apply_adjust(x, y, AdjustParams(norm_mode="pct_max", baseline_method="min"))

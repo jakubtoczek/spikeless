@@ -49,6 +49,8 @@ class Peak:
     right: int
     shown: bool = True
     name: str = ""
+    color: str | None = None   # per-peak colour override; None => use the group peak_viz.color
+    annotate: str | None = None  # per-peak on-graph label; None => use the curve's group annotate
     # metrics filled by analyze_peaks:
     rt: float = 0.0        # retention time = apex x (min)
     x_start: float = 0.0   # left bound (min)

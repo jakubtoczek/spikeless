@@ -1,6 +1,6 @@
 [project]
 name = "spikeless"
-version = "1.0.0"
+version = "0.5.0"
 description = "Spikeless — radio-HPLC plotting, spike removal and peak analysis for GINA X exports"
 requires-python = ">=3.11"
 dependencies = [

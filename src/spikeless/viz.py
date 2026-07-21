@@ -15,16 +15,6 @@ class SpikeViz:
 
 
 @dataclass
-class CurveViz:
-    """How the spikeless (corrected) curve is drawn (unused legacy; curves use Style)."""
-
-    color: str = "#00a000"
-    alpha: float = 1.0
-    linestyle: str = "solid"
-    in_legend: bool = False
-
-
-@dataclass
 class BaselineViz:
     """How a detected baseline is drawn. color None => desaturated data-curve colour."""
 
@@ -42,3 +32,7 @@ class PeakViz:
     alpha: float = 0.30
     marker: str = "v"
     in_legend: bool = False
+    # on-graph label styling
+    label_size: float = 7.0
+    label_color: str | None = None   # None => auto: a readable shade of the peak colour on the bg
+    label_pos: str = "auto"          # "auto" | "above" | "right" | "left"

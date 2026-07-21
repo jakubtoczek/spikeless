@@ -13,14 +13,17 @@ set "PYTHONPATH=%~dp0src"
 set "ICON=%~dp0src\spikeless\assets\spikeless.ico"
 
 rem --- one-time: put a Spikeless shortcut (with the app icon) on the Desktop ---
-set "LNK=%USERPROFILE%\Desktop\Spikeless.lnk"
-if not exist "%LNK%" (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('%LNK%');" ^
-        "$s.TargetPath='%~f0'; $s.WorkingDirectory='%~dp0';" ^
-        "$s.IconLocation='%ICON%'; $s.WindowStyle=7;" ^
-        "$s.Description='Spikeless - radio-HPLC plotting and spike removal'; $s.Save()"
-)
+rem     resolve Desktop via .NET so a OneDrive-redirected / localized folder works;
+rem     best-effort — a shortcut failure must never block launch
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "try {" ^
+        "$lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Spikeless.lnk';" ^
+        "if (-not (Test-Path $lnk)) {" ^
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($lnk);" ^
+            "$s.TargetPath='%~f0'; $s.WorkingDirectory='%~dp0';" ^
+            "$s.IconLocation='%ICON%'; $s.WindowStyle=7;" ^
+            "$s.Description='Spikeless - radio-HPLC plotting and spike removal'; $s.Save() }" ^
+    "} catch {}"
 
 rem --- one-time: fetch the uv binary ---
 if not exist "%UV%" (
