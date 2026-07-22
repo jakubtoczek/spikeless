@@ -9,8 +9,8 @@ from dataclasses import dataclass
 class SpikeViz:
     """How detected spikes are drawn."""
 
-    mode: str = "points"      # "points" (dots) | "segment" (recolour n-1..n+1)
-    color: str = "#ff2020"
+    mode: str = "segment"     # "segment" (recolour n-1..n+1) | "points" (dots) | "vline"
+    color: str = "#ff2020"    # "vline": vertical line from the interpolated point up to the spike max
     in_legend: bool = False
 
 

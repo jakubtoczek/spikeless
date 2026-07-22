@@ -15,9 +15,10 @@ from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox,
     QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSlider, QSpinBox, QTextBrowser,
-    QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea,
+    QSlider, QSpinBox, QTextBrowser, QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from . import io_gina
@@ -49,30 +50,48 @@ def _parse_run_dt(s):
     return None
 
 
-# Processing features (key, button label, run-slot name, gear-slot name) in PIPELINE order.
+# Processing features (key, button label, gear-slot name) in PIPELINE order. Clicking a button
+# runs its action list via _run_feature(key); the gear opens that feature's parameter dialog.
 # Spikes first (electronic artefact, unrelated to activity → must precede decay); then decay
 # (activity correction) before baseline & peaks so AUC/% reflect the corrected signal.
 PROC_FEATURES = [
-    ("spikes", "Detect spikes", "_detect_spikes", "_edit_spike_params"),
-    ("decay", "Apply decay", "_apply_decay", "_edit_decay_options"),
-    ("baseline", "Detect baseline", "_detect_baseline", "_edit_baseline_params"),
-    ("peaks", "Detect peaks", "_detect_peaks", "_edit_peak_params"),
+    ("spikes", "Detect spikes", "_edit_spike_params"),
+    ("decay", "Apply decay", "_edit_decay_options"),
+    ("baseline", "Detect baseline", "_edit_baseline_params"),
+    ("peaks", "Detect peaks", "_edit_peak_params"),
 ]
-# Post-detection "default display actions" per feature, shown in each button's collapsible
-# (hidden by default). (step_key, checkbox label, default_on). Order = execution order.
-# Spikes tells a little story (show spikes → pause → swap to spikeless, hide the original);
-# baseline/peaks/decay just reveal their new artifact without touching anything else.
-PROC_STEPS = {
+# Each Processing button runs an ordered, user-editable list of actions (its "story"): the pinned
+# process step (the detection itself — reorderable, not removable), show/hide of a target, and
+# delays. Defaults below reproduce the classic behaviour; edited live in each button's collapsible.
+# Action shapes: {"type":"process"} | {"type":"vis","show":bool,"target":str} | {"type":"delay","ms":int}
+PROC_ACTIONS = {
     "spikes": [
-        ("show_spikes", "display spikes", True),
-        ("delay", "delay 0.5 s", True),
-        ("show_result", "display spikeless curve", True),
-        ("hide_original", "hide original curve & spikes", True),
+        {"type": "process"},
+        {"type": "vis", "show": True, "target": "spikes"},
+        {"type": "delay", "ms": 500},
+        {"type": "vis", "show": True, "target": "result"},
+        {"type": "vis", "show": False, "target": "original"},
+        {"type": "vis", "show": False, "target": "spikes"},
     ],
-    "decay": [("show_result", "display decay curve", True)],
-    "baseline": [("show_result", "display baseline", True)],
-    "peaks": [("show_result", "display peaks", True)],
+    "decay": [{"type": "process"}, {"type": "vis", "show": True, "target": "result"}],
+    "baseline": [
+        {"type": "process"},
+        {"type": "vis", "show": True, "target": "baseline"},
+        {"type": "vis", "show": True, "target": "result"},
+    ],
+    "peaks": [{"type": "process"}, {"type": "vis", "show": True, "target": "peaks"}],
 }
+
+# Show/hide targets available per feature: target key -> menu/combo label. "result" is the child
+# curve the process step builds (spikeless / decay / baseline-corrected).
+PROC_TARGETS = {
+    "spikes": {"original": "original curve", "spikes": "spikes overlay", "result": "spikeless curve"},
+    "decay": {"original": "original curve", "result": "decay curve"},
+    "baseline": {"baseline": "baseline line", "result": "corrected curve"},
+    "peaks": {"peaks": "peaks"},
+}
+_ACTION_LABEL = {"spikes": "Detect spikes", "decay": "Apply decay",
+                 "baseline": "Detect baseline", "peaks": "Detect peaks"}
 
 # Dockable menu windows (key, attribute name) — used for the "open by default" option.
 DOCK_KEYS = [("data", "data_dock"), ("processing", "processing_dock"),
@@ -136,9 +155,11 @@ class MainWindow(QMainWindow):
         self.interp_method = "linear"
         self.baseline_method = "min"
         self.baseline_n = 20
+        self.baseline_clip = False   # clip the baseline-corrected curve at 0 (no negatives)
         self.peak_params = PeakParams()
-        # per-feature default display actions (session state; edited via each button's collapsible)
-        self.proc_steps = {k: {s: d for s, _l, d in steps} for k, steps in PROC_STEPS.items()}
+        # per-feature action lists (session state; edited via each button's collapsible)
+        self.proc_actions = {k: copy.deepcopy(v) for k, v in PROC_ACTIONS.items()}
+        self._proc_child = None  # last child a process step made, for a following show/hide "result"
         self.app_opts = AppOptions()
         self.export_opts = ExportOptions()
         self._settings = QSettings(APP_NAME, APP_NAME)
@@ -351,9 +372,9 @@ class MainWindow(QMainWindow):
 
     def _populate_processing(self):
         """(Re)build the Processing buttons, showing only the features enabled in Options.
-        Each button carries a collapsible list of default display actions (hidden by default)."""
+        Each button carries a collapsible, editable action list (hidden by default)."""
         _clear_layout(self._proc_lay)
-        for key, label, run_name, gear_name in PROC_FEATURES:
+        for key, label, gear_name in PROC_FEATURES:
             if not self.app_opts.proc_visible.get(key, True):
                 continue
             box = QWidget()
@@ -365,22 +386,14 @@ class MainWindow(QMainWindow):
             toggle = QToolButton()
             toggle.setText("▸")
             toggle.setAutoRaise(True)
-            toggle.setToolTip("Default display actions when this runs")
+            toggle.setToolTip("Edit what shows/hides (and when) as this runs")
             b = QPushButton(label)
-            b.clicked.connect(getattr(self, run_name))
+            b.clicked.connect(lambda _=False, k=key: self._run_feature(k))
             r.addWidget(toggle)
             r.addWidget(b, 1)
             r.addWidget(_gear(getattr(self, gear_name)))
             col.addLayout(r)
-            body = QWidget()
-            bl = QVBoxLayout(body)
-            bl.setContentsMargins(20, 0, 0, 3)
-            bl.setSpacing(0)
-            for skey, slabel, dflt in PROC_STEPS.get(key, []):
-                cb = QCheckBox(slabel)
-                cb.setChecked(self.proc_steps[key].get(skey, dflt))
-                cb.toggled.connect(lambda on, k=key, s=skey: self.proc_steps[k].__setitem__(s, on))
-                bl.addWidget(cb)
+            body = self._build_action_editor(key)
             body.setVisible(False)
             toggle.clicked.connect(lambda _=False, bd=body, tg=toggle:
                                    (bd.setVisible(not bd.isVisible()),
@@ -388,6 +401,111 @@ class MainWindow(QMainWindow):
             col.addWidget(body)
             self._proc_lay.addWidget(box)
         self._proc_lay.addStretch(1)
+
+    # ---------------- editable action list (per Processing feature) ----------------
+    # ponytail: session-state only (matches the old proc_steps); persist to QSettings if users ask.
+    def _build_action_editor(self, key):
+        """A drag-reorderable list of this feature's actions + a '＋ add' button. Edits write
+        straight back to self.proc_actions[key] (session state)."""
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(20, 0, 3, 3)
+        bl.setSpacing(1)
+        lst = _ReorderList()
+        lst._on_drop = lambda k=key, w=lst: self._reorder_actions(k, w)
+        lst.setStyleSheet("QListWidget{border:none;} QListWidget::item{border:none;}")
+        self._reload_actions(key, lst)
+        bl.addWidget(lst)
+        add = QToolButton()
+        add.setText("＋ add")
+        add.setAutoRaise(True)
+        add.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(add)
+        menu.addAction("show / hide …", lambda k=key, w=lst: self._add_action(
+            k, w, {"type": "vis", "show": True, "target": next(iter(PROC_TARGETS[k]))}))
+        menu.addAction("delay …", lambda k=key, w=lst: self._add_action(
+            k, w, {"type": "delay", "ms": 500}))
+        add.setMenu(menu)
+        bl.addWidget(add, 0, Qt.AlignLeft)
+        return body
+
+    def _reload_actions(self, key, lst):
+        """Rebuild every row from self.proc_actions[key]. Each item carries its list index as a
+        token (Qt.UserRole int, which survives a drag) so a drop's new order can be read back —
+        the inline row widgets are dropped by the move, so we recreate them all."""
+        lst.blockSignals(True)
+        lst.clear()
+        for idx, act in enumerate(self.proc_actions[key]):
+            it = QListWidgetItem(lst)
+            it.setData(Qt.UserRole, idx)
+            row = self._action_row(key, act, lst)
+            it.setSizeHint(row.sizeHint())
+            lst.setItemWidget(it, row)
+        lst.blockSignals(False)
+        h = sum(lst.sizeHintForRow(i) for i in range(lst.count())) + 2 * lst.frameWidth() + 2
+        lst.setFixedHeight(max(h, 8))
+
+    def _reorder_actions(self, key, lst):
+        order = [lst.item(i).data(Qt.UserRole) for i in range(lst.count())]
+        if any(t is None for t in order):
+            return  # token lost (shouldn't happen) → leave the model untouched
+        old = self.proc_actions[key]
+        self.proc_actions[key] = [old[t] for t in order]
+        self._reload_actions(key, lst)
+
+    def _add_action(self, key, lst, act):
+        self.proc_actions[key].append(act)
+        self._reload_actions(key, lst)
+
+    def _del_action(self, key, lst, act):
+        self.proc_actions[key] = [a for a in self.proc_actions[key] if a is not act]
+        self._reload_actions(key, lst)
+
+    def _action_row(self, key, act, lst):
+        """One editable row; combos/spin write straight into the act dict."""
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(3)
+        h.addWidget(QLabel("⋮⋮"))   # drag affordance (the whole row drags)
+        t = act.get("type")
+        if t == "process":
+            lab = QLabel(f"● {_ACTION_LABEL.get(key, key)} (runs here)")
+            lab.setStyleSheet("font-weight:600;")
+            h.addWidget(lab, 1)
+            return w   # no delete: the process step cannot be removed
+        if t == "vis":
+            sh = QComboBox()
+            sh.addItems(["show", "hide"])
+            sh.setCurrentIndex(0 if act.get("show", True) else 1)
+            sh.currentIndexChanged.connect(lambda i, a=act: a.__setitem__("show", i == 0))
+            tgt = QComboBox()
+            keys = list(PROC_TARGETS[key])
+            for tk in keys:
+                tgt.addItem(PROC_TARGETS[key][tk], tk)
+            tgt.setCurrentIndex(keys.index(act["target"]) if act.get("target") in keys else 0)
+            tgt.currentIndexChanged.connect(
+                lambda _i, a=act, c=tgt: a.__setitem__("target", c.currentData()))
+            h.addWidget(sh)
+            h.addWidget(tgt, 1)
+        elif t == "delay":
+            h.addWidget(QLabel("delay"))
+            spin = QDoubleSpinBox()
+            spin.setRange(0.0, 10.0)
+            spin.setSingleStep(0.1)
+            spin.setDecimals(2)
+            spin.setSuffix(" s")
+            spin.setValue(act.get("ms", 500) / 1000.0)
+            spin.valueChanged.connect(lambda v, a=act: a.__setitem__("ms", int(round(v * 1000))))
+            h.addWidget(spin)
+            h.addStretch(1)
+        x = QToolButton()
+        x.setText("✕")
+        x.setAutoRaise(True)
+        x.setToolTip("Delete this step")
+        x.clicked.connect(lambda _=False, k=key, w2=lst, a=act: self._del_action(k, w2, a))
+        h.addWidget(x)
+        return w
 
     def _build_log_dock(self):
         self.log_dock = QDockWidget("Log", self)
@@ -791,6 +909,14 @@ class MainWindow(QMainWindow):
             state = item.checkState(0)
             self._set_shown(data, state == Qt.Checked)
             self._cascade(item, state)  # unticking a parent unticks its children
+            # ticking a single spike/peak while its group is hidden turns the group on
+            # (its siblings keep their own state — only this one becomes visible)
+            if data[0] in ("spike", "peak") and state == Qt.Checked:
+                grp = item.parent()
+                gd = grp.data(0, Qt.UserRole) if grp is not None else None
+                if gd and grp.checkState(0) != Qt.Checked:
+                    grp.setCheckState(0, Qt.Checked)
+                    self._set_shown(gd, True)
         if bool(item.flags() & Qt.ItemIsEditable):
             self._set_name(data, item.text(0))
         self.data_tree.blockSignals(False)
@@ -1123,25 +1249,70 @@ class MainWindow(QMainWindow):
             self.log("Select a curve first.")
         return ds, curve
 
-    def _detect_spikes(self):
+    def _run_feature(self, key):
+        """Click handler for a Processing button: run its editable action list on the selected curve."""
         ds, curve = self._need_curve()
         if curve is None:
             return
         self._push_undo()
+        self._proc_child = None
+        self._run_actions(key, ds, curve, self.proc_actions[key], 0)
+
+    def _run_actions(self, key, ds, curve, acts, i):
+        """Execute a feature's action list from index i. A delay schedules the rest via QTimer
+        (re-entrant), so later actions run after the pause; a process that finds nothing aborts."""
+        procs = {"spikes": self._proc_spikes, "decay": self._proc_decay,
+                 "baseline": self._proc_baseline, "peaks": self._proc_peaks}
+        while i < len(acts):
+            a = acts[i]
+            t = a.get("type")
+            if t == "process":
+                if procs[key](ds, curve) is False:
+                    break
+            elif t == "vis":
+                self._apply_vis(key, curve, a.get("target"), bool(a.get("show")))
+            elif t == "delay":
+                self._rebuild_tree()
+                self._refresh_plot()
+                QTimer.singleShot(int(a.get("ms", 500)),
+                                  lambda k=key, nx=i + 1: self._run_actions(k, ds, curve, acts, nx))
+                return
+            i += 1
+        self._rebuild_tree()
+        self._refresh_plot()
+        self._update_report()
+
+    def _apply_vis(self, key, curve, target, show):
+        """Show/hide one artifact of the selected curve. 'result' = the child the process step made."""
+        if target == "original":
+            curve.shown = show
+        elif target == "spikes":
+            curve.spikes_group_shown = show
+        elif target == "baseline":
+            curve.baseline_shown = show
+        elif target == "peaks":
+            curve.peaks_group_shown = show
+        elif target == "result":
+            child = self._proc_child
+            if child is None:   # e.g. show:result placed before process → best-effort find
+                kind = {"spikes": "spikeless", "decay": "decay",
+                        "baseline": "baseline-corrected"}.get(key, key)
+                child = next((c for c in curve.children if kind in c.kind), None)
+            if child is not None:
+                child.shown = show
+
+    # -- process steps: detect + build artifacts (hidden); visibility is driven by vis actions.
+    def _proc_spikes(self, ds, curve) -> bool:
+        import numpy as np
         mask = detect(curve.y, self.spike_params)
         n = int(mask.sum())
-        steps = self.proc_steps["spikes"]
         if not n:
             curve.spike_mask = None
             self.log(f"No spikes on '{curve.name}'.")
-            self._rebuild_tree()
-            self._refresh_plot()
-            self._update_report()
-            return
-        import numpy as np
+            return False
         curve.spike_mask = mask
         curve.spike_shown = np.ones(n, bool)
-        curve.spikes_group_shown = steps["show_spikes"]
+        curve.spikes_group_shown = False
         cleaned = remove(curve.y, mask, method=self.interp_method)
         child = next((c for c in curve.children if c.kind == "spikeless"), None)
         if child is None:
@@ -1149,45 +1320,36 @@ class MainWindow(QMainWindow):
             curve.children.append(child)
         else:
             child.y = cleaned
-        child.shown = False   # phase 1: reveal the spikes on the original before swapping
+        child.shown = False
+        self._proc_child = child
         self.log(f"Detected {n} spike(s) on '{curve.name}' → spikeless child ({self.interp_method}).")
-        self._rebuild_tree()
-        self._refresh_plot()
-        self._update_report()
+        return True
 
-        def phase2():   # phase 2: bring in the spikeless curve and (optionally) hide the original
-            child.shown = steps["show_result"]
-            if steps["hide_original"]:
-                curve.shown = False
-                curve.spikes_group_shown = False
-            self._rebuild_tree()
-            self._refresh_plot()
-        if steps["delay"]:
-            QTimer.singleShot(500, phase2)
-        else:
-            phase2()
-
-    def _detect_baseline(self):
-        ds, curve = self._need_curve()
-        if curve is None:
-            return
-        self._push_undo()
+    def _proc_baseline(self, ds, curve) -> bool:
+        import numpy as np
         curve.baseline = estimate_baseline(curve.y, self.baseline_method, self.baseline_n)
-        curve.baseline_shown = self.proc_steps["baseline"]["show_result"]
-        self.log(f"Baseline on '{curve.name}' ({self.baseline_method}).")
-        self._rebuild_tree()
-        self._refresh_plot()
-        self._update_report()
+        curve.baseline_shown = False
+        corrected = curve.y - curve.baseline           # detrend/offset by the detected baseline
+        if self.baseline_clip:
+            corrected = np.clip(corrected, 0.0, None)
+        child = next((c for c in curve.children if c.kind == "baseline-corrected"), None)
+        if child is None:
+            child = new_curve_from(curve, corrected, f"{curve.name} −baseline",
+                                   "baseline-corrected", "#0088aa")
+            curve.children.append(child)
+        else:
+            child.y = corrected
+        child.shown = False
+        self._proc_child = child
+        self.log(f"Baseline on '{curve.name}' ({self.baseline_method}) → corrected child"
+                 f"{' (clipped ≥0)' if self.baseline_clip else ''}.")
+        return True
 
-    def _detect_peaks(self):
+    def _proc_peaks(self, ds, curve) -> bool:
         data = self._selected()
-        ds, curve = self._need_curve()
-        if curve is None:
-            return
         # On a curve → fresh peaks group; on an existing peak/peaks group → reprocess (re-detect
         # with the current options). Both replace this curve's single peaks group.
         reprocess = bool(data) and data[0] in ("peak", "peaks")
-        self._push_undo()
         sig = curve.y
         if curve.spike_mask is not None:   # don't let spikes become peaks or truncate neighbours
             sig = remove(curve.y, curve.spike_mask, method=self.interp_method)
@@ -1195,35 +1357,28 @@ class MainWindow(QMainWindow):
         curve.peak_local_baseline = self.peak_params.local_baseline
         analyze_peaks(curve.x, sig, pks, curve.baseline, curve.peak_local_baseline)
         curve.peaks = pks
-        curve.peaks_group_shown = self.proc_steps["peaks"]["show_result"]
+        curve.peaks_group_shown = False
         self.log(f"{'Reprocessed' if reprocess else 'Detected'} {len(pks)} peak(s) on '{curve.name}' "
                  f"(baseline: {'local drift' if curve.peak_local_baseline else 'curve baseline'}).")
-        self._rebuild_tree()
-        self._refresh_plot()
-        self._update_report()
+        return True
 
-    def _apply_decay(self):
-        ds, curve = self._need_curve()
-        if curve is None:
-            return
+    def _proc_decay(self, ds, curve) -> bool:
         hl = ds.half_life_s or lookup_half_life_s(ds.meta.radioisotope)
         if not hl:  # missing info → open the decay options popup, then retry
             self._edit_decay_options(ds)
             hl = ds.half_life_s or lookup_half_life_s(ds.meta.radioisotope)
             if not hl:
                 self.log("Apply decay: no half-life set.")
-                return
+                return False
         factor = decay_factor(curve.x, hl, ds.decay_ref_offset_s)
         base_kind = "spikeless+decay" if "spikeless" in curve.kind else "decay"
         name = f"{curve.name} +decay"
-        self._push_undo()
         child = new_curve_from(curve, curve.y * factor, name, base_kind, "#b000b0")
-        child.shown = self.proc_steps["decay"]["show_result"]
+        child.shown = False
         curve.children.append(child)
+        self._proc_child = child
         self.log(f"Applied decay to '{curve.name}' → '{name}' (ref {ds.decay_ref_label}).")
-        self._rebuild_tree()
-        self._refresh_plot()
-        self._update_report()
+        return True
 
     def _edit_decay_options(self, ds=None):
         if ds is None or isinstance(ds, bool):   # gear's clicked(bool) must not be taken as a dataset
@@ -1768,22 +1923,25 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Spikes display")
         form = QFormLayout(dlg)
-        r_pts = QRadioButton("Single points")
         r_seg = QRadioButton("Colour n-1 → n+1")
+        r_pts = QRadioButton("Single points")
+        r_vln = QRadioButton("Vertical line (interpolated → max)")
         grp = QButtonGroup(dlg)
-        grp.addButton(r_pts)
         grp.addButton(r_seg)
-        (r_seg if v.mode == "segment" else r_pts).setChecked(True)
+        grp.addButton(r_pts)
+        grp.addButton(r_vln)
+        {"points": r_pts, "vline": r_vln}.get(v.mode, r_seg).setChecked(True)
         color = _ColorButton(v.color)
         leg = QCheckBox("Show in legend")
         leg.setChecked(v.in_legend)
-        form.addRow(r_pts)
         form.addRow(r_seg)
+        form.addRow(r_pts)
+        form.addRow(r_vln)
         form.addRow("Colour", color)
         form.addRow(leg)
         if _run_dialog(dlg, form):
-            curve.spike_viz = SpikeViz(mode="segment" if r_seg.isChecked() else "points",
-                                       color=color.color, in_legend=leg.isChecked())
+            mode = "points" if r_pts.isChecked() else "vline" if r_vln.isChecked() else "segment"
+            curve.spike_viz = SpikeViz(mode=mode, color=color.color, in_legend=leg.isChecked())
             self._refresh_plot()
 
     def _edit_baseline_viz(self, curve):
@@ -1937,20 +2095,27 @@ class MainWindow(QMainWindow):
     def _edit_spike_params(self):
         p = self.spike_params
         dlg = QDialog(self)
-        dlg.setWindowTitle("Spike detection")
-        form = QFormLayout(dlg)
+        dlg.setWindowTitle("Detect spikes — options")
+        outer = QVBoxLayout(dlg)
+
+        det, df = _section("Spike detection")      # finds the spikes (overlay on the parent)
         window = _int_spin(3, 101, p.window, 2)
         n_sigma = _spin(1, 50, p.n_sigma, 0.5)
         max_width = _int_spin(1, 10, p.max_width, 1)
+        df.addRow("Window (odd)", window)
+        df.addRow("Threshold (n·σ)", n_sigma)
+        df.addRow("Max width", max_width)
+        outer.addWidget(det)
+
+        bld, bf = _section("Spikeless curve")       # builds the cleaned child curve
         interp = QComboBox()
         for key, lbl in _INTERP_METHODS:
             interp.addItem(lbl, key)
         interp.setCurrentIndex(max(0, interp.findData(self.interp_method)))
-        form.addRow("Window (odd)", window)
-        form.addRow("Threshold (n·σ)", n_sigma)
-        form.addRow("Max width", max_width)
-        form.addRow("Interpolation", interp)
-        if _run_dialog(dlg, form):
+        bf.addRow("Interpolation", interp)
+        outer.addWidget(bld)
+
+        if _dialog_ok(dlg, outer):
             self.spike_params = SpikeParams(window=window.value() | 1, n_sigma=n_sigma.value(),
                                             max_width=max_width.value())
             self.interp_method = interp.currentData()
@@ -1958,16 +2123,18 @@ class MainWindow(QMainWindow):
 
     def _edit_baseline_params(self):
         dlg = QDialog(self)
-        dlg.setWindowTitle("Baseline algorithm")
-        form = QFormLayout(dlg)
+        dlg.setWindowTitle("Detect baseline — options")
+        outer = QVBoxLayout(dlg)
+
+        det, df = _section("Baseline detection")        # estimates the baseline (overlay on parent)
         method = QComboBox()
-        for key in ("min", "first_n", "snip", "none"):
+        for key in ("min", "first_n", "snip", "arpls", "none"):
             method.addItem(BASELINE_LABELS[key], key)
         method.setCurrentIndex(max(0, method.findData(self.baseline_method)))
         n_spin = _int_spin(1, 100000, self.baseline_n, 1)
-        form.addRow("Method", method)
-        form.addRow("N", n_spin)
-        n_label = form.labelForField(n_spin)  # relabel + enable N per method (shared knob)
+        df.addRow("Method", method)
+        df.addRow("N", n_spin)
+        n_label = df.labelForField(n_spin)  # relabel + enable N per method (shared knob)
 
         def _sync_n():
             m = method.currentData()
@@ -1976,32 +2143,61 @@ class MainWindow(QMainWindow):
                             else "First N points" if m == "first_n" else "N (unused)")
         method.currentIndexChanged.connect(_sync_n)
         _sync_n()
-        if _run_dialog(dlg, form):
+        outer.addWidget(det)
+
+        cor, cf = _section("Baseline correction  (corrected curve = curve − baseline)")
+        clip = QCheckBox("Clip negative values to 0")
+        clip.setChecked(self.baseline_clip)
+        cf.addRow(clip)
+        outer.addWidget(cor)
+
+        if _dialog_ok(dlg, outer):
             self.baseline_method = method.currentData()
             self.baseline_n = n_spin.value()
-            self.log(f"Baseline algorithm: {self.baseline_method}.")
+            self.baseline_clip = clip.isChecked()
+            self.log(f"Baseline algorithm: {self.baseline_method}"
+                     f"{', corrected clipped ≥0' if self.baseline_clip else ''}.")
 
     def _edit_peak_params(self):
         p = self.peak_params
+        eo = self.export_opts
         dlg = QDialog(self)
-        dlg.setWindowTitle("Peak detection")
-        form = QFormLayout(dlg)
+        dlg.setWindowTitle("Detect peaks — options")
+        outer = QVBoxLayout(dlg)
+
+        det, df = _section("Peak detection")
         prom = _spin(0, 1e9, p.min_prominence, 1)
         height = QLineEdit("" if p.min_height is None else f"{p.min_height:g}")
         dist = _int_spin(1, 100000, p.min_distance, 1)
         local = QCheckBox("Local (drift) baseline per peak")
         local.setChecked(p.local_baseline)
-        form.addRow("Min prominence (0=auto)", prom)
-        form.addRow("Min height (blank=none)", height)
-        form.addRow("Min distance (points)", dist)
-        form.addRow(local)
-        if _run_dialog(dlg, form):
+        df.addRow("Min prominence (0=auto)", prom)
+        df.addRow("Min height (blank=none)", height)
+        df.addRow("Min distance (points)", dist)
+        df.addRow(local)
+        outer.addWidget(det)
+
+        # report-building bit: which peak-table columns show (same setting as the Report gear)
+        rep, rf = _section("Report  (peak-table columns, shown = copied/exported)")
+        col_chks = {}
+        for key, header, _f in PEAK_COLUMNS:
+            c = QCheckBox(header if key != "num" else "# (row number)")
+            c.setChecked(eo.report_cols.get(key, False))
+            col_chks[key] = c
+            rf.addRow(c)
+        outer.addWidget(rep)
+
+        if _dialog_ok(dlg, outer):
             try:
                 h = float(height.text().replace(",", ".")) if height.text().strip() else None
             except ValueError:
                 h = None
             self.peak_params = PeakParams(min_prominence=prom.value(), min_height=h,
                                           min_distance=dist.value(), local_baseline=local.isChecked())
+            for key, c in col_chks.items():
+                eo.report_cols[key] = c.isChecked()
+            self._save_settings()
+            self._update_report()
             self.log(f"Peak params: prominence={self.peak_params.min_prominence:g}, "
                      f"local baseline={self.peak_params.local_baseline}.")
 
@@ -2066,7 +2262,7 @@ class MainWindow(QMainWindow):
         procw = QWidget()
         fp = QVBoxLayout(procw)
         proc_chks = {}
-        for key, label, _run, _gear in PROC_FEATURES:
+        for key, label, _gear in PROC_FEATURES:
             c = QCheckBox(label)
             c.setChecked(ao.proc_visible.get(key, True))
             proc_chks[key] = c
@@ -2143,6 +2339,23 @@ class _DataTree(QTreeWidget):
         # dropped past the last row → move to the end of the top-level (dataset) list
         tgt_data = tgt.data(0, Qt.UserRole) if tgt is not None else None
         self.reordered.emit(src.data(0, Qt.UserRole), tgt_data, below)
+
+
+class _ReorderList(QListWidget):
+    """QListWidget that reorders its rows by internal drag and calls `_on_drop` afterwards.
+    A drag drops the rows' inline widgets (setItemWidget), so the callback rebuilds them; the
+    per-item Qt.UserRole token (a plain int) survives the move and gives the new order."""
+
+    def __init__(self):
+        super().__init__()
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._on_drop = None
+
+    def dropEvent(self, e):
+        super().dropEvent(e)
+        if self._on_drop:
+            self._on_drop()
 
 
 class _Collapsible(QWidget):
@@ -2277,6 +2490,12 @@ def _cform(w):
     return f
 
 
+def _section(title):
+    """A titled group box holding a form; returns (box, form) so callers add rows to `form`."""
+    box = QGroupBox(title)
+    return box, QFormLayout(box)
+
+
 def _pen_icon():
     pm = QPixmap(14, 14)
     pm.fill(Qt.transparent)
@@ -2346,4 +2565,13 @@ def _run_dialog(dlg, form):
     box.accepted.connect(dlg.accept)
     box.rejected.connect(dlg.reject)
     form.addRow(box)
+    return dlg.exec() == QDialog.Accepted
+
+
+def _dialog_ok(dlg, layout):
+    """Like _run_dialog but for a plain box layout (e.g. a stack of _section group boxes)."""
+    box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    box.accepted.connect(dlg.accept)
+    box.rejected.connect(dlg.reject)
+    layout.addWidget(box)
     return dlg.exec() == QDialog.Accepted

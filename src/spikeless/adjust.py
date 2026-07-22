@@ -119,6 +119,39 @@ def _baseline_snip(y, n=40, **_):
     return np.clip((np.exp(np.exp(v) - 1.0) - 1.0) ** 2 - 1.0, 0, None)  # LLS inverse
 
 
+def _baseline_arpls(y, lam=1e5, ratio=1e-6, max_iter=50, **_):
+    """arPLS baseline (asymmetrically reweighted penalized least squares): fit a smooth curve
+    that is pulled toward the data but reweighted each iteration so points above it (peaks) stop
+    tugging it up, leaving the slow continuum. Smoother than SNIP on noisy drift.
+    lam = smoothness penalty (higher = stiffer baseline); scaled for typical trace lengths, so it
+    absorbs `n` from the registry and ignores it. Returns the per-point baseline.
+    Ref: Baek, Park, Ahn, Choo 2015, Analyst 140:250."""
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+
+    y = np.asarray(y, dtype=float)
+    N = len(y)
+    if N < 3:
+        return np.clip(y, 0, None)
+    D = sparse.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(N - 2, N))  # 2nd difference
+    H = lam * (D.T @ D)
+    w = np.ones(N)
+    z = y
+    for _ in range(max_iter):
+        z = spsolve((sparse.diags(w, 0) + H).tocsc(), w * y)
+        d = y - z
+        neg = d[d < 0]
+        if neg.size == 0:
+            break
+        m, s = neg.mean(), neg.std() + 1e-12
+        arg = np.clip(2.0 * (d - (2.0 * s - m)) / s, -709.0, 709.0)  # avoid exp overflow
+        wt = 1.0 / (1.0 + np.exp(arg))                               # logistic reweight
+        if np.linalg.norm(w - wt) / (np.linalg.norm(w) + 1e-12) < ratio:
+            break
+        w = wt
+    return z
+
+
 # key -> estimator(y, n=...) returning a scalar OR a per-point array.
 # Extend here (rolling minimum, ALS, segmented/drift) — apply_adjust broadcasts either shape.
 BASELINE_METHODS = {
@@ -126,10 +159,11 @@ BASELINE_METHODS = {
     "min": _baseline_min,
     "first_n": _baseline_first_n,
     "snip": _baseline_snip,
+    "arpls": _baseline_arpls,
 }
 
 BASELINE_LABELS = {"none": "None", "min": "Minimum", "first_n": "Average of first N points",
-                   "snip": "SNIP (drift-aware)"}
+                   "snip": "SNIP (drift-aware)", "arpls": "arPLS (asymmetric least squares)"}
 
 
 def estimate_baseline(y: np.ndarray, method: str = "min", n: int = 20) -> np.ndarray:
@@ -218,6 +252,13 @@ def _self_check():
     assert abs(bs[300] - drift[300]) < 8.0, (bs[300], drift[300])   # tracks slope under the apex
     assert bs[300] < sig[300] - 40.0, bs[300]                       # sits well below the peak
     assert np.all(bs[:50] < sig[:50] + 3.0)                         # hugs baseline in peak-free region
+
+    # arPLS is also drift-aware and drops in via the registry like SNIP
+    ba = estimate_baseline(sig, "arpls")
+    assert ba.shape == sig.shape, ba.shape
+    assert abs(ba[300] - drift[300]) < 8.0, (ba[300], drift[300])   # tracks slope under the apex
+    assert ba[300] < sig[300] - 40.0, ba[300]                       # sits well below the peak
+    assert np.all(ba[:50] < sig[:50] + 3.0)                         # hugs baseline in peak-free region
 
     # pct_max: peak becomes 100 after baseline subtraction
     ym, unit = apply_adjust(x, y, AdjustParams(norm_mode="pct_max", baseline_method="min"))

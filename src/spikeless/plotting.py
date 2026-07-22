@@ -324,7 +324,16 @@ def _draw_curve(ax, curve: Curve, limits, leg: _LegendState, crop=False, bg="#ff
                 sl = slice(max(0, i - 1), min(len(curve.x), i + 2))
                 ax.plot(curve.x[sl], y_adj[sl], color=v.color, lw=st.line_width_pt, zorder=4,
                         label=lbl if k == 0 else "_nolegend_")
-        elif len(vis):
+        elif v.mode == "vline" and len(vis):
+            clean = np.ones(len(curve.x), bool)
+            clean[idxs] = False                     # ignore every spike when interpolating the base
+            if clean.sum() >= 2:
+                # base = the linear interpolated point (matches spikes.remove "linear"; pchip only visually)
+                base_v = np.interp(curve.x[vis], curve.x[clean], y_adj[clean])
+                for k, i in enumerate(vis):
+                    ax.plot([curve.x[i], curve.x[i]], [base_v[k], y_adj[i]], color=v.color,
+                            lw=st.line_width_pt, zorder=4, label=lbl if k == 0 else "_nolegend_")
+        elif v.mode == "points" and len(vis):
             ax.plot(curve.x[vis], y_adj[vis], linestyle="none", marker="o", ms=3,
                     mfc=v.color, mec=v.color, zorder=4, label=lbl)
         if v.in_legend and len(vis):
