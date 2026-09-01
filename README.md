@@ -5,15 +5,34 @@
 Desktop GUI to clean single-point spikes from radio-HPLC spectra exported by **GINA X**,
 produce publication-ready plots, and analyse/export them. MIT-licensed (see `LICENSE`).
 
-## Run
+## Install (Windows)
 
-Double-click **`Spikeless.bat`** (the launcher). On first run it downloads `uv`, installs a
-private Python + dependencies under `C:\Users\Public\Spikeless` (no admin rights, no PATH
-changes), drops a **Spikeless** shortcut (with the app icon) on your Desktop, then opens the GUI
-with no console window. Later runs start immediately — use the Desktop shortcut.
+No admin rights, no PATH or registry changes, and nothing written into your user profile.
 
-To remove everything it installed, run **`uninstall.bat`** (deletes that one folder; your
-project files and exports are untouched — Spikeless makes no PATH or registry changes).
+1. On the GitHub page: **Code ▸ Download ZIP**.
+2. **Right-click the ZIP ▸ Properties ▸ tick *Unblock* ▸ OK.** Windows flags everything
+   that came from the internet, and without this step SmartScreen stops the launcher with
+   *"Windows protected your PC"*.
+3. Extract it somewhere it can stay — `C:\Users\Public\Spikeless` works for every account on the
+   machine; your Documents folder is fine too.
+4. Double-click **`Spikeless.bat`**. It asks once where to put the Python runtime:
+
+   | | Where | Good for |
+   |---|---|---|
+   | **1 — shared** | `C:\ProgramData\PyApps` | the default. Any tool set up the same way re-uses that `uv.exe`, Python and package cache. Files common to both are stored once (hard-linked), so a second tool only costs the libraries it does not already share |
+   | **2 — private** | `C:\Users\Public\Spikeless` | one self-contained folder that `uninstall.bat` deletes whole |
+
+   It then downloads [`uv`](https://github.com/astral-sh/uv), a matching Python and the
+   dependencies — about 450 MB on disk, a minute or two on a normal connection — and puts
+   a **Spikeless** shortcut on your Desktop.
+5. From now on use the Desktop shortcut. Leave the extracted folder where it is; the
+   shortcut points at it.
+
+The question is asked once — after that the existing folder is found and re-used, so later
+launches start straight away. Set `SPIKELESS_RUNTIME` to force some other location.
+
+`uninstall.bat` reverses all of it: the whole folder in the private case, only Spikeless's own
+virtual environment in the shared case, so anything else using that folder keeps working.
 
 ## Use
 
@@ -166,6 +185,7 @@ uv run python -m spikeless.peaks        # peak-detection self-check
 uv run python -m spikeless.adjust       # decay/baseline/normalization self-check
 uv run python -m spikeless.io_gina      # parser + GINA-save round-trip self-check
 uv run python -m spikeless.plotting     # plot-sizing self-check
+bash misc/root_test.sh                  # where the launcher decides to install
 ```
 
 ## Roadmap (phase B)
