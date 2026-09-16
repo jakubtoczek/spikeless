@@ -191,6 +191,9 @@ uv run python -m spikeless.plotting     # plot-sizing self-check
 bash misc/root_test.sh                  # where the launcher decides to install
 ```
 
+Startup is kept off scipy: `scipy.signal` and `scipy.ndimage` are imported inside the functions
+that need them (1.3 s of import that nothing needs until a peak is actually detected).
+
 ## Roadmap (phase B)
 
 More baseline estimators — **segmented** and **asymmetric least squares (arPLS)**. Richer peak

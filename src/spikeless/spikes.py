@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import median_filter
 
 _MAD_TO_SIGMA = 1.4826  # MAD -> std for normally distributed data
 
@@ -51,6 +50,7 @@ def detect(y: np.ndarray, params: SpikeParams | None = None) -> np.ndarray:
         return np.zeros(len(y), dtype=bool)
     win = max(3, p.window | 1)  # force odd, >= 3
 
+    from scipy.ndimage import median_filter   # imported here, not at startup (see peaks.py)
     med = median_filter(y, size=win, mode="reflect")
     abs_resid = np.abs(y - med)
     mad_local = median_filter(abs_resid, size=win, mode="reflect")

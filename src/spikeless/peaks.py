@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.signal import find_peaks
 
 from .dataset import Peak
 
@@ -40,6 +39,8 @@ def detect_peaks(y: np.ndarray, baseline: np.ndarray | None = None,
     n = len(sig)
     if n < 3:
         return []
+    from scipy.signal import find_peaks   # 1.3 s to import; nothing needs it until a
+                                         # peak is actually detected, so keep it off startup
     prom = p.min_prominence
     if prom <= 0:
         rng = float(np.nanmax(sig) - np.nanmin(sig))
