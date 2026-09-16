@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from html import escape as _esc
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QByteArray, QEvent, QMimeData, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
@@ -793,9 +794,6 @@ class MainWindow(QMainWindow):
         self._loading_disp = False
 
     # ---------------- Data tree ----------------
-    def _ds_label(self, ds):
-        return ds.meta.name
-
     def _add_cross(self, item, data):
         b = QPushButton("✖")
         b.setFixedSize(20, 18)
@@ -861,7 +859,7 @@ class MainWindow(QMainWindow):
         self.data_tree.clear()
         for ds in self.datasets:
             any_shown = any(c.shown for c in ds.curves())
-            dit = self._mk(None, self._ds_label(ds), ("dataset", ds.id),
+            dit = self._mk(None, ds.meta.name, ("dataset", ds.id),
                            checkable=True, checked=any_shown, editable=True, draggable=True)
             self._build_curve_item(dit, ds, ds.root, is_root=True)
             dit.setExpanded(True)
@@ -949,7 +947,6 @@ class MainWindow(QMainWindow):
             c = ds.find_curve(data[2])
             n = len(c.spike_indices())
             if c.spike_shown is None:
-                import numpy as np
                 c.spike_shown = np.ones(n, bool)
             c.spike_shown[data[3]] = shown
         elif kind == "peak":
@@ -972,7 +969,7 @@ class MainWindow(QMainWindow):
         ds = self._ds(data[1])
         if ds is None:
             return
-        self._push_undo()
+        self._push_undo(f"remove {data[0]}")
         kind = data[0]
         if kind == "dataset":
             self.datasets.remove(ds)
@@ -1011,7 +1008,7 @@ class MainWindow(QMainWindow):
         if not src:
             return
         if src[0] == "dataset" and (tgt is None or tgt[0] == "dataset"):
-            self._push_undo()
+            self._push_undo("reorder datasets")
             self._reorder_list(self.datasets, src[1], tgt[1] if tgt else None, below, lambda d: d.id)
         elif src[0] == "curve" and tgt and tgt[0] == "curve" and src[1] == tgt[1]:
             ds = self._ds(src[1])
@@ -1021,7 +1018,7 @@ class MainWindow(QMainWindow):
             if ps is None or ps is not pt:  # only reorder curves that share a parent
                 self.log("To reorder curves, drop onto a sibling curve (same parent).")
                 return
-            self._push_undo()
+            self._push_undo("reorder curves")
             self._reorder_list(ps.children, src[2], tgt[2], below, lambda c: c.id)
         else:
             self.log("Reorder: drop a dataset onto another dataset, or a curve onto a sibling curve.")
@@ -1056,21 +1053,22 @@ class MainWindow(QMainWindow):
         self.btn_export.setEnabled(kind in ("curve", "dataset", "peaks", "peak"))
 
     # ---------------- undo ----------------
-    def _push_undo(self):
-        """Snapshot the whole dataset tree before a mutating op so Ctrl+Z can restore it."""
-        self._undo_stack.append(copy.deepcopy(self.datasets))
+    def _push_undo(self, label):
+        """Snapshot the whole dataset tree before a mutating op so Ctrl+Z can restore it.
+        *label* is what the log will say the undo took back, in the user's words."""
+        self._undo_stack.append((copy.deepcopy(self.datasets), label))
         del self._undo_stack[:-25]   # ponytail: cap depth at 25, deep undo isn't worth the RAM
 
     def _undo(self):
         if not self._undo_stack:
             self.log("Nothing to undo.")
             return
-        self.datasets = self._undo_stack.pop()
+        self.datasets, label = self._undo_stack.pop()
         self._rebuild_tree()
         self._update_enabled()
         self._refresh_plot()
         self._update_report()
-        self.log("Undo.")
+        self.log(f"Undone: {label}.")
 
     # ---------------- helpers ----------------
     def log(self, msg):
@@ -1230,7 +1228,7 @@ class MainWindow(QMainWindow):
             self.log(f"ERROR loading {Path(path).name}: {exc}")
             QMessageBox.warning(self, "Load failed", str(exc))
             return
-        self._push_undo()
+        self._push_undo(f"load {ds.meta.name}")
         self.datasets.append(ds)
         self._rebuild_tree()
         self._select_id(("curve", ds.id, ds.root.id))
@@ -1254,7 +1252,7 @@ class MainWindow(QMainWindow):
         ds, curve = self._need_curve()
         if curve is None:
             return
-        self._push_undo()
+        self._push_undo(_ACTION_LABEL.get(key, key))
         self._proc_child = None
         self._run_actions(key, ds, curve, self.proc_actions[key], 0)
 
@@ -1303,7 +1301,6 @@ class MainWindow(QMainWindow):
 
     # -- process steps: detect + build artifacts (hidden); visibility is driven by vis actions.
     def _proc_spikes(self, ds, curve) -> bool:
-        import numpy as np
         mask = detect(curve.y, self.spike_params)
         n = int(mask.sum())
         if not n:
@@ -1326,7 +1323,6 @@ class MainWindow(QMainWindow):
         return True
 
     def _proc_baseline(self, ds, curve) -> bool:
-        import numpy as np
         curve.baseline = estimate_baseline(curve.y, self.baseline_method, self.baseline_n)
         curve.baseline_shown = False
         corrected = curve.y - curve.baseline           # detrend/offset by the detected baseline
@@ -1436,7 +1432,7 @@ class MainWindow(QMainWindow):
         ds, curve = self._sel_curve()
         if curve is None or (self._selected() or [None])[0] != "curve":
             return
-        self._push_undo()
+        self._push_undo(f"duplicate {curve.name}")
         dup = copy.deepcopy(curve)
         for c in dup.walk():
             c.id = new_id()
@@ -1704,7 +1700,6 @@ class MainWindow(QMainWindow):
         _run_dialog(dlg, form)
 
     def _curve_info(self):
-        import numpy as np
         _ds, curve = self._sel_curve()
         if curve is None:
             return
@@ -1719,7 +1714,6 @@ class MainWindow(QMainWindow):
         self._info_dialog(f"Curve info — {curve.name}", rows)
 
     def _baseline_info(self):
-        import numpy as np
         _ds, curve = self._sel_curve()
         if curve is None or curve.baseline is None:
             return
@@ -2115,7 +2109,7 @@ class MainWindow(QMainWindow):
         bf.addRow("Interpolation", interp)
         outer.addWidget(bld)
 
-        if _dialog_ok(dlg, outer):
+        if _run_dialog(dlg, outer):
             self.spike_params = SpikeParams(window=window.value() | 1, n_sigma=n_sigma.value(),
                                             max_width=max_width.value())
             self.interp_method = interp.currentData()
@@ -2151,7 +2145,7 @@ class MainWindow(QMainWindow):
         cf.addRow(clip)
         outer.addWidget(cor)
 
-        if _dialog_ok(dlg, outer):
+        if _run_dialog(dlg, outer):
             self.baseline_method = method.currentData()
             self.baseline_n = n_spin.value()
             self.baseline_clip = clip.isChecked()
@@ -2187,7 +2181,7 @@ class MainWindow(QMainWindow):
             rf.addRow(c)
         outer.addWidget(rep)
 
-        if _dialog_ok(dlg, outer):
+        if _run_dialog(dlg, outer):
             try:
                 h = float(height.text().replace(",", ".")) if height.text().strip() else None
             except ValueError:
@@ -2538,16 +2532,6 @@ def _pair(left, right):
     return w
 
 
-def _triple(a, b, c):
-    w = QWidget()
-    h = QHBoxLayout(w)
-    h.setContentsMargins(0, 0, 0, 0)
-    h.addWidget(a, 1)
-    h.addWidget(b)
-    h.addWidget(c)
-    return w
-
-
 def _set_halflife(spin, unit, hl_s):
     if not hl_s:
         return
@@ -2560,18 +2544,11 @@ def _set_halflife(spin, unit, hl_s):
     unit.setCurrentText("s")
 
 
-def _run_dialog(dlg, form):
+def _run_dialog(dlg, lay):
+    """Add OK/Cancel to the dialog's layout and run it. Takes a QFormLayout (rows) or a plain
+    box layout (a stack of _section group boxes) — the only thing that differed."""
     box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
     box.accepted.connect(dlg.accept)
     box.rejected.connect(dlg.reject)
-    form.addRow(box)
-    return dlg.exec() == QDialog.Accepted
-
-
-def _dialog_ok(dlg, layout):
-    """Like _run_dialog but for a plain box layout (e.g. a stack of _section group boxes)."""
-    box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    box.accepted.connect(dlg.accept)
-    box.rejected.connect(dlg.reject)
-    layout.addWidget(box)
+    (lay.addRow if isinstance(lay, QFormLayout) else lay.addWidget)(box)
     return dlg.exec() == QDialog.Accepted

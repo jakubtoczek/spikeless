@@ -188,6 +188,8 @@ uv run python -m spikeless.peaks        # peak-detection self-check
 uv run python -m spikeless.adjust       # decay/baseline/normalization self-check
 uv run python -m spikeless.io_gina      # parser + GINA-save round-trip self-check
 uv run python -m spikeless.plotting     # plot-sizing self-check
+uv run python misc/smoke_test.py        # headless UI run: load -> spikes -> baseline ->
+                                        #   peaks -> decay -> report/CSV/undo
 bash misc/root_test.sh                  # where the launcher decides to install
 ```
 
