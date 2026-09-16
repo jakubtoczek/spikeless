@@ -31,6 +31,7 @@ from .plotting import BORDER_STYLES, ExportBorder, PlotOptions, auto_extents, bu
 from .plotview import Background, ZoomableFigureView
 from .spikes import SpikeParams, detect, remove
 from .viz import BaselineViz, PeakViz, SpikeViz
+from . import __version__
 
 APP_NAME = "Spikeless"
 
@@ -143,7 +144,7 @@ class ExportOptions:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} — radio-HPLC plotting, spike removal & analysis")
+        self.setWindowTitle(f"{APP_NAME} {__version__} — radio-HPLC plotting, spike removal & analysis")
         self.resize(1200, 800)
         self.setAcceptDrops(True)
         icon = _app_icon()
