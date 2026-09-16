@@ -11,32 +11,19 @@ set "PROJECT=%~dp0"
 set "PYTHONPATH=%~dp0src"
 set "ICON=%~dp0src\spikeless\assets\spikeless.ico"
 
-rem --- pick a root. The folder on disk is the memory, so this is asked once, ---
-rem     and an existing private install always keeps working untouched.
-rem     Set SPIKELESS_RUNTIME to force a location of your own.
+rem --- pick a root. No question is asked: shared unless you ask for private. ---
+rem       Spikeless.bat private   (or 2)  -> a folder only Spikeless uses
+rem       set SPIKELESS_RUNTIME=...    -> some other location of your own
+rem     After the first run the folder on disk is the memory, so a plain
+rem     double-click (and the Desktop shortcut) re-use whatever is there.
 set "ROOT="
 if defined SPIKELESS_RUNTIME set "ROOT=%SPIKELESS_RUNTIME%"
+if not defined ROOT if /I "%~1"=="private" set "ROOT=%PRIVATE_ROOT%"
+if not defined ROOT if "%~1"=="2" set "ROOT=%PRIVATE_ROOT%"
 if not defined ROOT if exist "%PRIVATE_ROOT%\uv.exe" set "ROOT=%PRIVATE_ROOT%"
 if not defined ROOT if exist "%SHARED_ROOT%\uv.exe"  set "ROOT=%SHARED_ROOT%"
-if defined ROOT goto :have_root
-
-echo.
-echo   First run - where should Python and the packages be installed?
-echo.
-echo     [1] Shared    %SHARED_ROOT%
-echo         Re-used by any other tool pointed at the same folder.
-echo         Python and the package cache are stored once instead of once per
-echo         app - roughly 1.5 GB saved for every extra app. Recommended.
-echo.
-echo     [2] Private   %PRIVATE_ROOT%
-echo         Only Spikeless uses it, and uninstall.bat removes all of it.
-echo.
-set "PICK="
-set /p "PICK=Choose 1 or 2 [1]: "
-if "%PICK%"=="2" set "ROOT=%PRIVATE_ROOT%"
 if not defined ROOT set "ROOT=%SHARED_ROOT%"
 
-:have_root
 set "UV=%ROOT%\uv.exe"
 set "UV_PYTHON_INSTALL_DIR=%ROOT%\python"
 set "UV_CACHE_DIR=%ROOT%\cache"
@@ -47,19 +34,6 @@ if exist "%ROOT%\venv\Scripts\pythonw.exe" set "UV_PROJECT_ENVIRONMENT=%ROOT%\ve
 rem the cache must sit on the same drive as the venv, or uv copies instead of
 rem hardlinking and the sharing buys nothing
 set "UV_NO_MODIFY_PATH=1"
-
-rem --- one-time: put a Spikeless shortcut (with the app icon) on the Desktop ---
-rem     resolve Desktop via .NET so a OneDrive-redirected / localized folder works;
-rem     best-effort - a shortcut failure must never block launch
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "try {" ^
-        "$lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Spikeless.lnk';" ^
-        "if (-not (Test-Path $lnk)) {" ^
-            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($lnk);" ^
-            "$s.TargetPath='%~f0'; $s.WorkingDirectory='%~dp0';" ^
-            "$s.IconLocation='%ICON%'; $s.WindowStyle=7;" ^
-            "$s.Description='Spikeless - radio-HPLC plotting and spike removal'; $s.Save() }" ^
-    "} catch {}"
 
 rem --- one-time: fetch the uv binary ---
 if not exist "%UV%" (
@@ -84,6 +58,26 @@ if errorlevel 1 (
     echo Environment setup failed.
     pause
     exit /b 1
+)
+
+rem --- one-time: put a Spikeless shortcut (with the app icon) on the Desktop ---
+rem     resolve Desktop via .NET so a OneDrive-redirected / localized folder works;
+rem     best-effort - a shortcut failure must never block launch.
+rem     The stamp lives in the venv, not the root, because two apps can share
+rem     one root and each still needs its own shortcut.
+rem     The stamp is what keeps this off the fast path: starting PowerShell only to be
+rem     told the shortcut already exists cost a third of a second of every launch.
+if not exist "%UV_PROJECT_ENVIRONMENT%\.shortcut" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "try {" ^
+            "$lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Spikeless.lnk';" ^
+            "if (-not (Test-Path $lnk)) {" ^
+                "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($lnk);" ^
+                "$s.TargetPath='%~f0'; $s.WorkingDirectory='%~dp0';" ^
+                "$s.IconLocation='%ICON%'; $s.WindowStyle=7;" ^
+                "$s.Description='Spikeless - radio-HPLC plotting and spike removal'; $s.Save() }" ^
+        "} catch {}"
+    echo done> "%UV_PROJECT_ENVIRONMENT%\.shortcut"
 )
 
 rem --- launch the GUI with pythonw (no console window) and exit ---

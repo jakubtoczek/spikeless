@@ -15,21 +15,24 @@ No admin rights, no PATH or registry changes, and nothing written into your user
    *"Windows protected your PC"*.
 3. Extract it somewhere it can stay — `C:\Users\Public\Spikeless` works for every account on the
    machine; your Documents folder is fine too.
-4. Double-click **`Spikeless.bat`**. It asks once where to put the Python runtime:
+4. Double-click **`Spikeless.bat`**. Nothing is asked: the Python runtime goes into the
+   **shared** folder `C:\ProgramData\PyApps`, where every tool set up this way re-uses the
+   same `uv.exe`, Python and package cache — files common to two of them are stored once
+   (hard-linked), so a second tool only costs the libraries it does not already share.
 
-   | | Where | Good for |
-   |---|---|---|
-   | **1 — shared** | `C:\ProgramData\PyApps` | the default. Any tool set up the same way re-uses that `uv.exe`, Python and package cache. Files common to both are stored once (hard-linked), so a second tool only costs the libraries it does not already share |
-   | **2 — private** | `C:\Users\Public\Spikeless` | one self-contained folder that `uninstall.bat` deletes whole |
+   Prefer it self-contained? Run **`Spikeless.bat private`** from a terminal (or `2`) the
+   *first* time, and everything lands in `C:\Users\Public\Spikeless`, a single folder that
+   `uninstall.bat` deletes whole.
 
-   It then downloads [`uv`](https://github.com/astral-sh/uv), a matching Python and the
+   Either way it downloads [`uv`](https://github.com/astral-sh/uv), a matching Python and the
    dependencies — about 450 MB on disk, a minute or two on a normal connection — and puts
    a **Spikeless** shortcut on your Desktop.
 5. From now on use the Desktop shortcut. Leave the extracted folder where it is; the
    shortcut points at it.
 
-The question is asked once — after that the existing folder is found and re-used, so later
-launches start straight away. Set `SPIKELESS_RUNTIME` to force some other location.
+The choice is made once: from then on the folder on disk is the memory, so the Desktop
+shortcut and a plain double-click find it and start straight away — no argument needed
+again. Set `SPIKELESS_RUNTIME` to force some other location.
 
 `uninstall.bat` reverses all of it: the whole folder in the private case, only Spikeless's own
 virtual environment in the shared case, so anything else using that folder keeps working.
