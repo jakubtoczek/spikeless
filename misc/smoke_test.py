@@ -116,5 +116,27 @@ assert w.datasets[0].root.find(corr2.id).peaks is None, "peaks not removed"
 w._undo()
 assert len(w.datasets[0].root.find(corr2.id).peaks) == 2, "undo did not bring the peaks back"
 
+# ---- the export-area border shows on screen but is never rendered into an export ----
+from matplotlib.patches import Rectangle
+assert w.app_opts.export_border.on, "border option off — the next check would prove nothing"
+def _frames(fig):
+    return [a for a in fig.artists if isinstance(a, Rectangle)]
+assert len(_frames(w._fig)) == 1, "screen figure lost its export-area guide"
+assert _frames(w._export_fig()) == [], "the guide leaked into the exported/copied figure"
+
+# ---- a fixed total size drives the plot area: the field greys out and reports the result ----
+d = w.d
+assert d["w_mm"].isEnabled() and d["h_mm"].isEnabled(), "plot size not editable while total is Auto"
+d["tot_w_auto"].setChecked(False)
+d["tot_w"].setValue(200.0)
+assert not d["w_mm"].isEnabled(), "plot width still editable under a fixed total"
+assert d["h_mm"].isEnabled(), "plot height greyed out by a fixed total WIDTH"
+shown = d["w_mm"].value()
+real = w._fig.plot_area_mm[0]
+assert abs(shown - real) <= 0.51, (shown, real)   # the mm fields show whole mm, like Total does
+assert shown < 200.0, (shown,)                      # the label margins come out of the total
+d["tot_w_auto"].setChecked(True)
+assert d["w_mm"].isEnabled(), "plot width stayed grey after going back to Auto"
+
 os.unlink(src); os.unlink(csv)
 print("spikeless smoke OK")

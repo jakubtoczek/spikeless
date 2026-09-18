@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from . import io_gina
+from . import io_gina, io_paste
 from .adjust import (BASELINE_LABELS, ISOTOPES, AdjustParams, decay_factor, estimate_baseline,
                      lookup_half_life_s)
 from .dataset import Condition, Curve, Dataset, new_curve_from, new_id
@@ -126,9 +126,9 @@ class AppOptions:
     # which Processing buttons are shown (Apply decay hidden by default)
     proc_visible: dict = field(default_factory=lambda: {
         "spikes": True, "baseline": True, "peaks": True, "decay": False})
-    # which menu windows open by default (Plot options starts hidden)
+    # which menu windows open by default (Plot options waits for the first dataset, then opens)
     docks_open: dict = field(default_factory=lambda: {
-        "data": True, "processing": True, "log": True, "report": True, "plot_options": False})
+        "data": True, "processing": True, "log": True, "report": True, "plot_options": True})
 
 
 @dataclass
@@ -172,16 +172,19 @@ class MainWindow(QMainWindow):
         self.d: dict = {}
         self._loading_disp = False
         self._plot_opts_shown_once = False
+        self._paste_n = 0            # how many clipboard pastes this session, for dataset names
         self._undo_stack: list = []
         self._pen = _pen_icon()
 
         self._build_ui()
-        QShortcut(QKeySequence.Undo, self, activated=self._undo)   # Ctrl+Z
+        QShortcut(QKeySequence.Undo, self, activated=self._undo)    # Ctrl+Z
+        QShortcut(QKeySequence.Paste, self, activated=self._paste)  # Ctrl+V
         self._apply_lock()
         self._apply_default_docks()
         self._update_enabled()
         self._position_overlay()
-        self.log(f"{APP_NAME} ready. Drag a GINA .txt file here or use Browse.")
+        self.log(f"{APP_NAME} ready. Drag a GINA .txt file here, use Browse, "
+                 "or paste two columns (time, cps) with Ctrl+V.")
         self._update_report()
 
     # ---------------- persisted preferences ----------------
@@ -195,7 +198,7 @@ class MainWindow(QMainWindow):
             pv = s.value("proc_visible", "")
             if pv:
                 self.app_opts.proc_visible.update(json.loads(pv))
-            do = s.value("docks_open", "")
+            do = s.value("docks_open2", "")   # v2: Plot options now defaults to open
             if do:
                 self.app_opts.docks_open.update(json.loads(do))
             self.export_opts.png_dpi = int(s.value("png_dpi", 600))
@@ -216,7 +219,7 @@ class MainWindow(QMainWindow):
         s.setValue("lock_docks", ao.lock_docks)
         s.setValue("scale_max", ao.scale_max)
         s.setValue("proc_visible", json.dumps(ao.proc_visible))
-        s.setValue("docks_open", json.dumps(ao.docks_open))
+        s.setValue("docks_open2", json.dumps(ao.docks_open))
         s.setValue("png_dpi", eo.png_dpi)
         s.setValue("clip_dpi", eo.clip_dpi)
         s.setValue("clip_format", eo.clip_format)
@@ -312,6 +315,12 @@ class MainWindow(QMainWindow):
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse)
         tb.addWidget(browse)
+        paste = QPushButton("Paste (Ctrl+V)")
+        paste.setToolTip("Import columns from the clipboard (Prism, Excel, any text): time then "
+                         "count rate. Extra value columns, or time/value pairs, load one dataset "
+                         "each. Time unit is guessed — minutes, or seconds if they look like it.")
+        paste.clicked.connect(self._paste)
+        tb.addWidget(paste)
         tb.addSeparator()
         for dock in (self.display_dock, self.data_dock, self.processing_dock,
                      self.log_dock, self.report_dock):
@@ -614,6 +623,10 @@ class MainWindow(QMainWindow):
         th.setEnabled(o.total_h_mm is not None)
         self.d["tot_w"], self.d["tot_w_auto"] = tw, tw_auto
         self.d["tot_h"], self.d["tot_h_auto"] = th, th_auto
+        # a fixed total owns the plot area: grey its field out and report what it works out to
+        for auto, spin in ((tw_auto, self.d["w_mm"]), (th_auto, self.d["h_mm"])):
+            spin.setEnabled(auto.isChecked())
+            auto.toggled.connect(spin.setEnabled)
         tw_auto.toggled.connect(tw.setDisabled)
         tw_auto.toggled.connect(self._apply_display)
         th_auto.toggled.connect(th.setDisabled)
@@ -792,6 +805,12 @@ class MainWindow(QMainWindow):
                 self.d["tot_w"].setValue(self._fig.get_figwidth() * 25.4)
             if self.d["tot_h_auto"].isChecked():
                 self.d["tot_h"].setValue(self._fig.get_figheight() * 25.4)
+            # and the mirror: with the total fixed, show the plot area it leaves
+            pw, ph = getattr(self._fig, "plot_area_mm", (None, None))
+            if pw is not None and not self.d["tot_w_auto"].isChecked():
+                self.d["w_mm"].setValue(pw)
+            if ph is not None and not self.d["tot_h_auto"].isChecked():
+                self.d["h_mm"].setValue(ph)
         self._loading_disp = False
 
     # ---------------- Data tree ----------------
@@ -1110,8 +1129,9 @@ class MainWindow(QMainWindow):
         return o
 
     def _export_fig(self):
+        # border=None: the dotted frame marks the export area on screen, it is not part of the plot
         factor = self.view_scale if self.scale_export else 1.0
-        return build_figure(self.datasets, self._opts_scaled(factor), border=self.app_opts.export_border)
+        return build_figure(self.datasets, self._opts_scaled(factor))
 
     def _refresh_plot(self):
         if not self.datasets:
@@ -1229,7 +1249,31 @@ class MainWindow(QMainWindow):
             self.log(f"ERROR loading {Path(path).name}: {exc}")
             QMessageBox.warning(self, "Load failed", str(exc))
             return
-        self._push_undo(f"load {ds.meta.name}")
+        self._adopt(ds, warnings)
+
+    def _paste(self):
+        """Ctrl+V on the window: import two pasted columns (time, count rate) as a dataset."""
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QPlainTextEdit)):
+            fw.paste()   # a text field has focus — that paste is not ours
+            return
+        self._paste_n += 1
+        try:
+            dss, warnings = io_paste.load_text(QApplication.clipboard().text(),
+                                               f"Clipboard {self._paste_n}")
+        except Exception as exc:  # noqa: BLE001
+            self._paste_n -= 1
+            self.log(f"ERROR pasting from clipboard: {exc}")
+            QMessageBox.warning(self, "Paste failed", str(exc))
+            return
+        # one paste = one undo step, however many columns it held
+        for i, ds in enumerate(dss):
+            self._adopt(ds, warnings if i == 0 else [], undo=(i == 0))
+
+    def _adopt(self, ds, warnings, undo=True):
+        """Take a freshly parsed dataset into the session: select it, log it, redraw."""
+        if undo:
+            self._push_undo(f"load {ds.meta.name}")
         self.datasets.append(ds)
         self._rebuild_tree()
         self._select_id(("curve", ds.id, ds.root.id))
@@ -2223,7 +2267,8 @@ class MainWindow(QMainWindow):
         bd = ao.export_border
         bdw = QWidget()
         fb = QFormLayout(bdw)
-        bd_on = QCheckBox("Show dotted border")
+        bd_on = QCheckBox("Show border on screen")
+        bd_on.setToolTip("Marks where the exported image ends. Never copied or exported.")
         bd_on.setChecked(bd.on)
         bd_color = _ColorButton(bd.color)
         bd_style = QComboBox()
@@ -2234,7 +2279,7 @@ class MainWindow(QMainWindow):
         fb.addRow("Colour", bd_color)
         fb.addRow("Style", bd_style)
         fb.addRow("Width (pt)", bd_width)
-        outer.addWidget(_Collapsible("Export-area border", bdw, expanded=False))
+        outer.addWidget(_Collapsible("Export-area guide (screen only)", bdw, expanded=False))
 
         # --- Plot view (collapsed) ---
         pvw = QWidget()
@@ -2273,7 +2318,7 @@ class MainWindow(QMainWindow):
         dock_chks = {}
         for key, _attr in DOCK_KEYS:
             c = QCheckBox(dock_labels[key])
-            c.setChecked(ao.docks_open.get(key, key != "plot_options"))
+            c.setChecked(ao.docks_open.get(key, True))
             c.setStyleSheet("margin-left:18px;")   # indent the list so it reads under "Open by default:"
             if key == "plot_options":
                 c.setToolTip("Plot options opens when the first dataset is loaded.")

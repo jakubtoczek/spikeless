@@ -401,6 +401,7 @@ def build_figure(datasets: list[Dataset], opts: PlotOptions | None = None,
     fig_w = plot_w + left + right
     fig_h = plot_h + bottom + top
     fig = Figure(figsize=(fig_w / 25.4, fig_h / 25.4))
+    fig.plot_area_mm = (plot_w, plot_h)   # what the size fields report back when a total is fixed
     fig.patch.set_facecolor(to_rgba(opts.outside_color, opts.outside_alpha))
     if border is not None and border.on:
         ins_x, ins_y = 1.0 / fig_w, 1.0 / fig_h

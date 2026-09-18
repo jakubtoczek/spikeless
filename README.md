@@ -41,6 +41,9 @@ virtual environment in the shared case, so anything else using that folder keeps
 
 1. **Drag** a GINA `.txt` onto the window (or **Browse…**). The spectrum plots immediately.
    Before any data is loaded there is no plot, and Plot options / Detect are disabled.
+   Or **Ctrl+V** to paste columns straight from Prism or Excel — time then counts, or several
+   value columns / `time, value, time, value` pairs for one dataset each. The log says what it
+   assumed about units and layout.
 2. **Data** panel is a **tree**. Each **dataset** node is metadata only — name, file, run
    date/time, molecule, **radioisotope** (dropdown), and user-added **conditions** (Info, each a
    free note or a label/value pair). Under it sit **curves**: the **original**, and processed
@@ -90,7 +93,8 @@ virtual environment in the shared case, so anything else using that folder keeps
      report ⚙ also has **Export selected curve (GINA X)** — writes the processed signal back to a
      `.txt` in GINA format so it can be reloaded (best-effort GINA X compat).
 6. **Options** — collapsible sections (all start collapsed): app **background** (checker/solid,
-   cell size in plot **mm**), a dotted **export-area border**, **Plot view** (resolution-slider
+   cell size in plot **mm**), the dotted **export-area guide** (on screen only — it is never
+   copied or exported), **Plot view** (resolution-slider
    max), **Processing features shown** (tick which Processing buttons appear — Apply decay off by
    default), and **Menu windows** (which docks **open by default**, plus **lock menu windows**).
    These preferences persist between sessions.
