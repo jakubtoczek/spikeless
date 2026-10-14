@@ -41,11 +41,14 @@ virtual environment in the shared case, so anything else using that folder keeps
 
 ## Use
 
-1. **Drag** a GINA `.txt` onto the window (or **Browse…**). The spectrum plots immediately.
+1. **Drag** a GINA `.txt` onto the window (or **Open…**). The spectrum plots immediately.
    Before any data is loaded there is no plot, and Plot options / Detect are disabled.
    Or **Ctrl+V** to paste columns straight from Prism or Excel — time then counts, or several
    value columns / `time, value, time, value` pairs for one dataset each. The log says what it
    assumed about units and layout.
+   **Save…** (Ctrl+S) writes the whole session — datasets, every curve made from them, spikes,
+   baselines, peaks and their names, styles, the plot options — to a `.spikeless` file; **Open…**
+   or a drop opens it again (replacing what is open, after asking; Ctrl+Z gives that back).
 2. **Data** panel is a **tree**. Each **dataset** node is metadata only — name, file, run
    date/time, molecule, **radioisotope** (dropdown), and user-added **conditions** (Info, each a
    free note or a label/value pair). Under it sit **curves**: the **original**, and processed
@@ -69,40 +72,57 @@ virtual environment in the shared case, so anything else using that folder keeps
    - **Apply decay** → adds a **decay-corrected** child curve. Its ⚙ sets the isotope (+ half-life)
      and the time to decay-correct **to** (default run start); if the isotope/half-life is missing
      when you click Apply decay, that dialog opens automatically. *(Hidden by default — enable it
-     under Options → Processing features shown.)*
-   - **Detect baseline** → adds a baseline (⚙: minimum / average of first N).
-   - **Detect peaks** → adds peaks with Rt/AUC/% (⚙: prominence, height, distance, and the
-     **local drift baseline** used for integration). Detection runs on a **spike-suppressed** copy
+     in Options › Processing.)*
+   - **Detect baseline** → adds a baseline and a **baseline-corrected** child curve (⚙: minimum,
+     average of the first N points, SNIP or arPLS — the two that follow a drifting baseline — and
+     whether negatives of the corrected curve are set to 0).
+   - **Detect peaks** → adds peaks with Rt/AUC/% (⚙: prominence, height, distance, and whether
+     to integrate above a **local drift line** even when the curve has a baseline). Detection runs on a **spike-suppressed** copy
      of the curve, so spikes don't become skinny false peaks. Running it on a plain curve makes a
      fresh peaks group; running it on an existing peak/peaks group reprocesses with current options.
-4. **Plot options** — a collapsible panel down the **left** side (closed by default; open it with
-   its toolbar button). Sections: **Plot area**, **Margins**, **Legend**, **Y axis**, **X axis** —
-   plot size in mm, plot-area/margin background colour + alpha, legend position/font, axis limits,
-   fonts, tick length/thickness, and each axis's **Advanced** (title/label spacing, and a grid on
-   major + minor). (Per-curve appearance is set from the Data tree via **Display…**.)
-   Numeric axis limits, **graduation start/end**, and tick thickness have **Auto** tickboxes
-   (auto tick thickness = axis thickness); a ticked Auto limit shows the value auto-mode would
-   use, greyed out. Each axis has an **Advanced** sub-section (title↔label and label↔axis spacing,
-   and a grid). All sections start collapsed except **Plot area**.
-5. **Copy / Export / ⚙** live *per window*, not on a shared toolbar:
-   - **Log** and **Report** carry **Copy · Export · ⚙ · ✕** on their **title bar**. The ⚙ holds
-     that export's own options (log: include timestamps; report: copy tables as rich HTML). The
-     **report** additionally shows a small **⧉ copy table** link next to *each* peak table in the
-     text — click it to copy that one table (there can be several).
-   - The **plot** has a **⧉ Copy · ⭳ Export · ⚙** cluster in the top-right of the graph area; its
-     ⚙ sets PNG file dpi, **clipboard dpi** (default **600**), and clipboard format (PNG / SVG).
-     Export writes PNG (default 600 dpi) or SVG at the exact mm size, transparency preserved. The
-     report ⚙ also has **Export selected curve (GINA X)** — writes the processed signal back to a
-     `.txt` in GINA format so it can be reloaded (best-effort GINA X compat).
-6. **Options** — collapsible sections (all start collapsed): app **background** (checker/solid,
-   cell size in plot **mm**), the dotted **export-area guide** (on screen only — it is never
-   copied or exported), **Plot view** (resolution-slider
-   max), **Processing features shown** (tick which Processing buttons appear — Apply decay off by
-   default), and **Menu windows** (which docks **open by default**, plus **lock menu windows**).
-   These preferences persist between sessions.
+4. **Plot options** — a collapsible panel down the **left** side; it opens with the first
+   dataset (Options › Panels). Sections: **Plot area**, **Margins**, **Legend**, **Y axis**,
+   **X axis** — plot size in mm, plot-area/margin background colour + alpha, legend position/font,
+   axis limits, fonts, tick length/thickness, and each axis's **Advanced** (title/label spacing,
+   and a grid on major + minor). (Per-curve appearance is set from the Data tree via
+   **Display…**.) Numeric axis limits, **graduation start/end**, and tick thickness have **Auto**
+   tickboxes (auto tick thickness = axis thickness); a ticked Auto limit shows the value
+   auto-mode would use, greyed out. All sections start collapsed except **Plot area**. The mouse
+   wheel scrolls the panel and only changes a field once it is clicked into; a typed number is
+   applied on Enter or on leaving the field.
+5. **Report** (toolbar) — its own window: the **format** and the **sections** on the left, the
+   report as it will be written on the right, kept up to date as you work. Formats: **PDF**,
+   **.odt** (opens in Word and LibreOffice), **Excel** (a sheet per table, the plot on its own
+   sheet), **Markdown** (the plot beside it as a `.png`), **web page**. Sections, ticked in or
+   out: the **plot** (as Export writes it, at its size in mm), the **datasets** (file, run,
+   molecule, radioisotope, conditions), the **curves** (each one, and how it, its spikes, baseline
+   and peaks were made — method and settings), the **spikes** (time and height of each), the
+   **peak tables** (tick their columns underneath; the same columns go into the Data panel's peak
+   exports). **Save report…** (Ctrl+S) writes it; **Copy** puts its text and tables on the
+   clipboard for a document (the plot has its own Copy).
+6. **Options** (toolbar) — its own window, topics on the left: **Plot** (crop fills, PNG export
+   and copy resolution, copy as PNG or SVG), **Screen** (the checker or solid background behind
+   the plot, the dotted export-area guide — neither is ever copied or exported — and the
+   resolution slider's top), **Processing** (which buttons the panel shows; Apply decay is off at
+   first), **Isotopes** (the Radioisotope lists and the half-lives decay correction uses: edit a
+   cell, + / −), **Panels** (which open at start; lock them) and **Log** (timestamps in its copy
+   and export). Every change is saved at once to `spikeless_options.json` beside
+   `Spikeless.bat`; **Export… / Import…** carry it to another computer, **Reset to defaults**
+   starts over. Each processing button's ⚙ settings are not kept: they start from their
+   defaults every session.
+7. **Copy / Export / ⚙**: the **plot** has a **⧉ Copy · ⭳ Export · ⚙** cluster in the top-right of
+   the graph area; Export writes PNG (600 dpi unless set otherwise) or SVG at the exact mm size,
+   transparency preserved. The **Log** carries **Copy · Export · ⚙ · ✕** on its title bar. Their ⚙
+   opens Options at their page. The Data panel's **Export…** writes the selected curve back to a
+   GINA-style `.txt` (it reloads; GINA X compatibility is best-effort), or the selected peaks to
+   Excel / CSV.
 
-The **Plot options / Data / Processing / Log / Report** toolbar buttons open and close their docks;
-closing a dock un-presses its button, pressing it again reopens it.
+The **Plot options / Data / Processing / Log** toolbar buttons open and close their panels;
+closing a panel un-presses its button, pressing it again reopens it.
+
+**Keys**: Ctrl+Z / Ctrl+Y undo and redo any change to the data (each named in the log), Ctrl+C
+copies the plot (or the selected text), Ctrl+V pastes columns, **Del** removes the selected node
+of the Data tree (what its ✖ does), Ctrl+S saves the session (in the Report window: the report).
 
 ### Plot navigation
 
@@ -112,20 +132,19 @@ on the cursor, **drag** (any button) pans, **double-click** fits to the window. 
 1×–5× on screen (fonts/line widths stay fixed, so closely-spaced spikes/peaks separate out) —
 tick **export** to apply it to exports too. The **⧉ Copy** button (top-right cluster) copies the
 plot to the clipboard **at its real mm size** (the image carries its dpi, so pasting into
-PowerPoint gives the Plot-options size, not a giant); clipboard dpi (default 600) is set in the
-plot **⚙**.
+PowerPoint gives the Plot-options size, not a giant); copy resolution (600 dpi) is in
+Options › Plot.
 
-### Adjust (decay correction & normalization)
+### Decay correction and normalization
 
-Per-dataset and fully reversible (it never mutates the loaded data):
+Neither changes the loaded data:
 
-- **Decay correction** — corrects each sample back to a reference time using the isotope
-  half-life. The half-life is auto-filled from a built-in table for the **Radioisotope** field
-  (Lu-177, Ga-68, F-18, …) and can be overridden manually. Reference = run start (from the file
-  header), an offset in minutes from start, or a clock time on the run date.
-- **Normalization** — Counts (cps), **% of max**, or **% of total**. The `%` modes subtract a
-  **baseline** first; baseline method is selectable (**Minimum**, **Average of first N points**;
-  the estimator is a small registry so drift-aware / segmented methods can be added later).
+- **Apply decay** makes a **decay-corrected** child curve: each sample corrected back to a
+  reference time with the isotope's half-life (Options › Isotopes, or typed in its ⚙).
+  Reference = run start (from the file header) or an offset in minutes from it.
+- **Adjust** (Data panel) sets how a curve is **shown**: Counts (cps), **% of max** or **% of
+  total**. The `%` modes subtract the curve's detected baseline first (or its minimum, if it has
+  none).
 
 ## Spike detection algorithm
 
@@ -146,6 +165,11 @@ itself untouched. For signal `y` and window `w` (odd; default 7):
    (`n_sigma` default 5; `positive_only` flags only upward excursions — real spikes are high cps).
 5. **Width guard**: any run of consecutive candidates longer than `max_width` (default 1) is
    *dropped*, because a wide excursion is a real peak, not a spike.
+6. **Neighbour guard**: what is left must also stand `n_sigma · σ` clear of **both** points
+   beside it (beside the run, for a wider one). The apex of a narrow real peak rises above the
+   window's median but not far above its neighbours; a spike jumps away from both. (Until
+   2026.10.14 this step was missing, and the apex of a ~10-point peak could be flagged and
+   interpolated away.)
 
 Parameters (**⚙** next to Detect): `window`, `n_sigma`, `max_width`.
 
@@ -154,7 +178,7 @@ Parameters (**⚙** next to Detect): `window`, `n_sigma`, `max_width`.
 Flagged points are replaced by interpolation from their nearest un-flagged neighbours; all other
 samples are left exactly as-is, so a point on a real peak's flank is restored to the local peak
 level, not to baseline. If fewer than two clean points remain, the signal is left unchanged.
-Method (Remove **⚙**):
+Method (Detect spikes **⚙**):
 
 - **Linear** (default) — a straight line between the nearest clean points (`numpy.interp`). For a
   single-point spike that is exactly `n-1 → n+1`. Cannot overshoot.
@@ -173,10 +197,10 @@ total, and a **skewness**. Select a peak → **Info** shows all of it (name edit
 sets the peaks group's style. Integration bounds run apex-to-valley (the low point between a peak
 and its neighbour) then trim to the peak's feet, so the shaded region spans the whole peak rather
 than a narrow tip. Peaks draw as a shaded **AUC fill** by default (or markers), with optional
-on-graph **Rt / %** labels. The baseline used for integration is a **local drift line** between
-each peak's bounds by default, or the curve's detected baseline — a **Detect peaks ⚙** option. The
-**report** is the dataset metadata + conditions + a per-curve peak table; a **⧉ copy table** link
-next to each table copies an HTML table you can paste straight into Word/PowerPoint.
+on-graph **Rt / %** labels. A peak's area is taken above the curve's detected baseline when it
+has one, else above a straight line between the peak's bounds (the **Detect peaks ⚙** can ask for
+that line always). The **report** has a table per curve with peaks, in the columns ticked there;
+Info and the report say which settings found them.
 
 ## GINA format notes
 
@@ -194,19 +218,23 @@ uv run python -m spikeless.peaks        # peak-detection self-check
 uv run python -m spikeless.adjust       # decay/baseline/normalization self-check
 uv run python -m spikeless.io_gina      # parser + GINA-save round-trip self-check
 uv run python -m spikeless.plotting     # plot-sizing self-check
+uv run python -m spikeless.options      # options file: malformed values keep their defaults
+uv run python -m spikeless.session      # session file round-trip self-check
 uv run python misc/bump.py              # stamp today's date as the version
+uv run python misc/make_icon.py         # redraw the icon (needs Pillow)
 uv run python misc/smoke_test.py        # headless UI run: load -> spikes -> baseline ->
-                                        #   peaks -> decay -> report/CSV/undo
+                                        #   peaks -> decay -> report (every format) / CSV /
+                                        #   undo / redo / Del / session / Options window
 bash misc/root_test.sh                  # where the launcher decides to install
 ```
 
 Startup is kept off scipy: `scipy.signal` and `scipy.ndimage` are imported inside the functions
 that need them (1.3 s of import that nothing needs until a peak is actually detected).
 
-## Roadmap (phase B)
+## Roadmap
 
-More baseline estimators — **segmented** and **asymmetric least squares (arPLS)**. Richer peak
-parameters.
+A **segmented** baseline estimator. Richer peak parameters.
 
-_Done:_ SNIP drift-aware baseline; per-peak report table (area/height/retention) + Excel export;
-per-peak colour and on-graph labels; configurable per-button default display actions.
+_Done:_ SNIP and arPLS drift-aware baselines; per-peak report table + Excel export; per-peak
+colour and on-graph labels; configurable per-button display actions; Report and Options windows;
+session files.

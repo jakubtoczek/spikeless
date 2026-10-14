@@ -1,19 +1,14 @@
-"""Non-destructive signal adjustment: decay correction, baseline, normalization.
+"""Signal arithmetic for the processing steps: decay correction, baseline, normalization.
 
-Applied at plot/analysis time from a Dataset's `adjust` params, so nothing here mutates
-the loaded data — changing the settings and changing them back returns the original trace.
+Nothing here mutates its inputs. Decay correction and baseline subtraction each make a new
+child curve (app.py); normalization is applied at plot time from a curve's `adjust` params,
+so changing it and changing it back returns the original trace.
 
-Pipeline order:  raw/spikeless  ->  decay correct  ->  (baseline subtract -> normalize)
-
-Baseline estimation is a small registry (BASELINE_METHODS) so more methods can be added
-without touching callers. It ships with the two basics (minimum, average of first N points);
-drift-aware / segmented / asymmetric-least-squares estimators slot in as new entries that
-return a per-point array instead of a scalar — apply_adjust already handles either.
+Baseline estimation is a small registry (BASELINE_METHODS): an estimator returns a scalar
+or a per-point array, and estimate_baseline broadcasts either.
 """
 
 from __future__ import annotations
-
-import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -21,54 +16,25 @@ import numpy as np
 _LN2 = np.log(2.0)
 
 # ---------------------------------------------------------------- half-lives
-# Half-life in SECONDS for isotopes common in radio-HPLC. Keyed as ELEMENT+MASS
-# (e.g. "LU177"). Lookup normalizes "Lu-177", "177Lu", "lu 177" to the same key.
-HALF_LIVES_S: dict[str, float] = {
-    "F18": 109.771 * 60,
-    "GA68": 67.71 * 60,
-    "SC44": 3.97 * 3600,
-    "CU64": 12.701 * 3600,
-    "CU67": 61.83 * 3600,
-    "TC99M": 6.0067 * 3600,
-    "TCM99": 6.0067 * 3600,  # alias: 'Tc-99m' normalizes letters->TCM
-    "I123": 13.2234 * 3600,
-    "IN111": 67.313 * 3600,
-    "I124": 4.1760 * 86400,
-    "TB161": 6.89 * 86400,
-    "LU177": 6.647 * 86400,
-    "I131": 8.0252 * 86400,
-    "ZR89": 78.41 * 3600,
-    "Y90": 64.053 * 3600,
-    "AC225": 9.920 * 86400,
-    "PB212": 10.622 * 3600,
-    "RA223": 11.4377 * 86400,
-}
-
-_TIME_UNITS_S = {"s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
-
-# Curated dropdown list: (display name, half-life in HOURS). Order as provided.
+# The isotopes the dropdowns offer, (name, half-life in hours): the lab's common list, in
+# its order. Options › Isotopes edits it, through set_half_lives.
 ISOTOPES = [
-    ("⁹⁹ᵐTc", 6.007), ("²⁰¹Tl", 73.08), ("¹¹¹In", 67.296), ("¹²³I", 13.223),
-    ("¹²⁵I", 1425.6), ("¹⁸F", 1.829), ("⁶⁸Ga", 1.12865), ("⁶⁴Cu", 12.9),
-    ("⁹⁰Y", 64.6), ("¹⁷⁷Lu", 159.46536), ("¹⁶¹Tb", 166.872),
+    ("⁹⁹ᵐTc", 6.00718), ("²⁰¹Tl", 73.01), ("¹¹¹In", 67.313), ("¹²³I", 13.2234),
+    ("¹²⁵I", 1425.6), ("¹⁸F", 1.8288), ("⁶⁸Ga", 1.12782), ("⁶⁴Cu", 12.7004),
+    ("⁹⁰Y", 64.053), ("¹⁷⁷Lu", 159.528), ("¹⁶¹Tb", 166.9),
 ]
-ISOTOPE_HL_S = {name: hours * 3600.0 for name, hours in ISOTOPES}
+HALF_LIFE_S = {name: h * 3600.0 for name, h in ISOTOPES}
+
+
+def set_half_lives(pairs):
+    """The isotope table, (name, hours) pairs; rows without both are left out."""
+    HALF_LIFE_S.clear()
+    HALF_LIFE_S.update({k: float(h) * 3600.0 for k, h in pairs if k and h})
 
 
 def lookup_half_life_s(isotope: str) -> float | None:
-    """Half-life (s) for an isotope name (dropdown display or free text), or None."""
-    if not isotope:
-        return None
-    if isotope in ISOTOPE_HL_S:  # exact dropdown display name (e.g. "¹⁷⁷Lu")
-        return ISOTOPE_HL_S[isotope]
-    letters = "".join(re.findall(r"[A-Za-z]+", isotope)).upper()
-    digits = "".join(re.findall(r"\d+", isotope))
-    if letters and digits:
-        hit = HALF_LIVES_S.get(letters + digits)
-        if hit:
-            return hit
-    key = "".join(ch for ch in isotope.upper() if ch.isalnum())
-    return HALF_LIVES_S.get(key)
+    """Half-life (s) of an isotope of the table, or None."""
+    return HALF_LIFE_S.get(isotope)
 
 
 # ---------------------------------------------------------------- decay
@@ -177,19 +143,11 @@ def estimate_baseline(y: np.ndarray, method: str = "min", n: int = 20) -> np.nda
 # ---------------------------------------------------------------- params + apply
 @dataclass
 class AdjustParams:
-    """Per-dataset, reversible display/analysis transform. Default = identity (raw cps)."""
+    """A curve's normalization, applied at plot time. Default = identity (raw cps)."""
 
-    decay_correct: bool = False
-    half_life_s: float | None = None
-    ref_offset_s: float = 0.0        # reference time, seconds from run start (0 = run start)
-    ref_label: str = "run start"     # human description, for log/report
     norm_mode: str = "cps"           # "cps" | "pct_max" | "pct_total"
     baseline_method: str = "min"     # key in BASELINE_METHODS (used by pct_* modes)
     baseline_n: int = 20
-
-    @property
-    def is_identity(self) -> bool:
-        return not self.decay_correct and self.norm_mode == "cps"
 
 
 _UNIT_LABEL = {"cps": "Counts (cps)", "pct_max": "% of max", "pct_total": "% of total"}
@@ -200,14 +158,10 @@ def apply_adjust(x_min: np.ndarray, y: np.ndarray, params: AdjustParams | None,
     """Return (adjusted_y, y_unit_label). Pure — does not touch the inputs.
 
     For %-modes the baseline subtracted is the curve's detected `baseline` if given, else the
-    fallback estimate (params.baseline_method). Decay is applied here only if params say so;
-    normally decay is its own curve, so params.decay_correct stays False.
+    fallback estimate (params.baseline_method).
     """
     y = np.asarray(y, dtype=float).copy()
     p = params or AdjustParams()
-
-    if p.decay_correct and p.half_life_s:
-        y = y * decay_factor(x_min, p.half_life_s, p.ref_offset_s)
 
     if p.norm_mode == "cps":
         return y, _UNIT_LABEL["cps"]
@@ -273,9 +227,11 @@ def _self_check():
     y0, u0 = apply_adjust(x, y, AdjustParams())
     assert np.array_equal(y0, y) and u0 == "Counts (cps)"
 
-    # lookup normalizes formatting
-    assert lookup_half_life_s("Lu-177") == lookup_half_life_s("177Lu") == HALF_LIVES_S["LU177"]
-    assert lookup_half_life_s("unobtainium") is None
+    # the isotope table is the one the options set
+    assert abs(lookup_half_life_s("¹⁷⁷Lu") - 159.528 * 3600) < 1e-6
+    set_half_lives([("¹⁷⁷Lu", 160.0), ("X", 0), ("", 5)])     # rows without both are dropped
+    assert lookup_half_life_s("¹⁷⁷Lu") == 160.0 * 3600 and lookup_half_life_s("X") is None
+    set_half_lives(ISOTOPES)
     print("adjust self-check OK")
 
 

@@ -1,17 +1,24 @@
 """Headless smoke test for the Spikeless UI. QT_QPA_PLATFORM=offscreen.
 
 Drives one synthetic GINA export through the whole chain the way a click would:
-load -> detect spikes -> baseline -> peaks -> decay, then report, CSV export and undo.
+load -> detect spikes -> baseline -> peaks -> decay, then report (every format), CSV export,
+undo / redo, Del, a session saved and opened again, and the Options window.
 Run it after touching app.py:  python misc/smoke_test.py
 """
-import os, tempfile, time
+import os, tempfile, time, zipfile
+from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
-from spikeless.adjust import ISOTOPE_HL_S
+from spikeless import options, report, session
+from spikeless.adjust import HALF_LIFE_S
 from spikeless.app import MainWindow
+
+TMP = Path(tempfile.gettempdir())
+options.OPTIONS_FILE = TMP / "_spikeless_smoke_options.json"   # the shipped defaults,
+options.OPTIONS_FILE.unlink(missing_ok=True)                    # not the user's file
 
 # ---- a GINA export with a sloping baseline, two peaks and three single-point spikes ----
 n, dt = 600, 1.0
@@ -83,44 +90,97 @@ big = max(corr.peaks, key=lambda p: p.auc)
 assert abs(big.rt - 150 / 60) < 0.2 and big.pct > 50, "the tall peak should dominate the AUC"
 
 # ---- decay correction grows the tail, never the reference point ----
-ds.half_life_s = ISOTOPE_HL_S["¹⁸F"]
+ds.half_life_s = HALF_LIFE_S["¹⁸F"]
 w._run_feature("decay")
 dec = next(c for c in corr.children if "decay" in c.kind)
 assert abs(dec.y[0] - corr.y[0]) < 1e-6, "t=0 is the reference: it must not move"
 assert dec.y[-1] > corr.y[-1], "later samples should be scaled up, not down"
 
-# ---- report and CSV carry the same numbers ----
-w._update_report()
-rep = w._report_text
-assert "Smoke Run" in rep and "3 spikes" in rep and "2 peaks" in rep, rep[:400]
+# ---- each processed curve says how it was made ----
+assert "Hampel" in root.how["spikes"] and "Hampel" in clean.how["curve"], (root.how, clean.how)
+assert clean.how.get("baseline") and corr.how["curve"].startswith("baseline of"), corr.how
+assert "prominence" in corr.how["peaks"], corr.how
+assert "decay-corrected" in dec.how["curve"], dec.how
+
+# ---- the report: the preview and every format carry the same numbers ----
+rep = report.html(w.datasets)
+assert "Smoke Run" in rep and "Spikes: 3 found" in rep and "Peaks: 2" in rep, rep[:600]
+assert "Hampel" in rep, "the report does not say how the spikes were found"
+w._report()
+rw = w.report_win
+assert "Smoke Run" in rw.view.toPlainText(), "the preview is empty"
+for ext in (".pdf", ".odt", ".xlsx", ".md", ".html"):
+    out = TMP / f"spikeless_smoke_report{ext}"
+    rw.write(out)
+    assert out.stat().st_size > 1000, (ext, out.stat().st_size)
+assert f"{rts[0]:.2f}" in (TMP / "spikeless_smoke_report.md").read_text(encoding="utf-8")
+assert (TMP / "spikeless_smoke_report_plot.png").exists(), "the markdown's plot is not beside it"
+assert any(n.startswith("Pictures/") for n in
+           zipfile.ZipFile(TMP / "spikeless_smoke_report.odt").namelist()), "no plot in the .odt"
+assert "data:image/png;base64" in (TMP / "spikeless_smoke_report.html").read_text("utf-8")
+from openpyxl import load_workbook
+wb = load_workbook(TMP / "spikeless_smoke_report.xlsx")
+assert "Plot" in wb.sheetnames and wb["Plot"]._images, wb.sheetnames
+pk = wb[next(n for n in wb.sheetnames if "baseline" in n)]
+head = [c.value for c in pk[2]]
+assert pk.cell(3, head.index("Rt (min)") + 1).value == float(f"{rts[0]:.2f}"), list(pk.values)
+
+# a section unticked in the window leaves the report, and the choice is saved
+import json
+from PySide6.QtCore import Qt
+tables = next(rw.tree.topLevelItem(i) for i in range(rw.tree.topLevelItemCount())
+              if rw.tree.topLevelItem(i).text(0) == "Peak tables")
+tables.setCheckState(0, Qt.Unchecked)
+assert "Rt (min)" not in report.html(w.datasets) and "Rt (min)" not in rw.view.toPlainText()
+assert json.loads(options.OPTIONS_FILE.read_text("utf-8"))["report_sections"]["peaks"] is False
+tables.setCheckState(0, Qt.Checked)
+
+# ---- CSV carries the report's numbers ----
 csv = os.path.join(tempfile.gettempdir(), "spikeless_smoke_peaks.csv")
-assert w._write_peaks_csv(csv, [(ds, corr)], "one") == 2
+assert w._write_peaks_csv(csv, corr) == 2
 rows = [r.split(",") for r in open(csv, encoding="utf-8").read().splitlines()]
 assert len(rows) == 3, rows                         # header + one line per peak
-rt_col = rows[0].index("Rt (min)")                  # which columns are on is a saved preference
+rt_col = rows[0].index("Rt (min)")
 assert rows[1][rt_col] == f"{rts[0]:.2f}", (rows[1], rts)
 
-# ---- undo says what it took back, and takes back exactly that ----
+
+# ---- undo says what it took back, and takes back exactly that; redo brings it back ----
+def decay_kids():
+    c = next(c for c in w.datasets[0].root.walk() if c.kind == "baseline-corrected")
+    return [k for k in c.children if "decay" in k.kind]
+
+
 w._undo()
 assert w.log_view.toPlainText().rstrip().endswith("Undone: Apply decay."), \
     w.log_view.toPlainText()[-120:]
+assert not decay_kids(), "the decay curve survived undo"
+w._redo()
+assert w.log_view.toPlainText().rstrip().endswith("Redone: Apply decay.")
+assert len(decay_kids()) == 1, "redo did not bring the decay curve back"
+w._undo()
 ds = w.datasets[0]                                  # undo restores a deep copy: re-find everything
 corr2 = next(c for c in ds.root.walk() if c.kind == "baseline-corrected")
-assert not any("decay" in c.kind for c in corr2.children), "the decay curve survived undo"
-assert len(corr2.peaks) == 2, "undo went one step too far"
+assert not decay_kids() and len(corr2.peaks) == 2, "undo went one step too far"
 
-# ---- removing a node is undoable too ----
-w._select_id(("curve", ds.id, corr2.id))
-w._remove_node(("peaks", ds.id, corr2.id))
-assert w.datasets[0].root.find(corr2.id).peaks is None, "peaks not removed"
+# ---- Del removes what ✖ removes, undoably; the original curve has no ✖ ----
+w._select_id(("peaks", ds.id, corr2.id))
+w._delete_selected()
+assert w.datasets[0].root.find(corr2.id).peaks is None, "Del did not remove the peaks"
 w._undo()
 assert len(w.datasets[0].root.find(corr2.id).peaks) == 2, "undo did not bring the peaks back"
+w._select_id(("curve", ds.id, ds.root.id))
+w._delete_selected()
+assert len(w.datasets) == 1, "Del removed the dataset through its original curve"
 
 # ---- the export-area border shows on screen but is never rendered into an export ----
 from matplotlib.patches import Rectangle
-assert w.app_opts.export_border.on, "border option off — the next check would prove nothing"
+assert options.PREFS["export_border"]["on"], "border option off — the next check proves nothing"
+
+
 def _frames(fig):
     return [a for a in fig.artists if isinstance(a, Rectangle)]
+
+
 assert len(_frames(w._fig)) == 1, "screen figure lost its export-area guide"
 assert _frames(w._export_fig()) == [], "the guide leaked into the exported/copied figure"
 
@@ -138,5 +198,49 @@ assert shown < 200.0, (shown,)                      # the label margins come out
 d["tot_w_auto"].setChecked(True)
 assert d["w_mm"].isEnabled(), "plot width stayed grey after going back to Auto"
 
-os.unlink(src); os.unlink(csv)
+# ---- a session comes back as it was saved, plot options included ----
+w.d["h_mm"].setValue(55.0)
+ses = TMP / "spikeless_smoke.spikeless"
+ses.write_text(session.dumps(w.datasets, w.plot_opts), encoding="utf-8")
+names = [c.name for c in w.datasets[0].root.walk()]
+w.d["h_mm"].setValue(40.0)
+w._remove_node(("dataset", w.datasets[0].id))
+QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)   # "replace?" — yes
+w._load(src)                                       # something for the session to replace
+w._open_session(str(ses))
+assert [c.name for c in w.datasets[0].root.walk()] == names, "the curve tree changed"
+assert len(next(c for c in w.datasets[0].root.walk() if c.peaks).peaks) == 2
+assert w.plot_opts.plot_h_mm == 55.0 and w.d["h_mm"].value() == 55.0, "plot options lost"
+assert ses.name in w.windowTitle()
+w._undo()
+assert w.datasets[0].root.children == [], "undo did not give back what the session replaced"
+
+# ---- the Options window: saved as changed, followed at once, reset ----
+from PySide6.QtWidgets import QCheckBox, QPushButton, QTableWidget
+from spikeless.adjust import lookup_half_life_s
+w._options("Screen")
+ow = w.options_win
+assert ow.topics.currentItem().text() == "Screen"
+next(c for c in ow.pages.currentWidget().findChildren(QCheckBox)
+     if c.text() == "Checkered").setChecked(False)
+assert w.plot_view._bg.checkered is False, "the plot did not follow the option"
+assert json.loads(options.OPTIONS_FILE.read_text("utf-8"))["background"]["checkered"] is False
+w._options("Processing")
+next(c for c in ow.pages.currentWidget().findChildren(QCheckBox)
+     if c.text() == "Apply decay").setChecked(True)
+assert any(b.text() == "Apply decay" for b in w._proc_body.findChildren(QPushButton))
+w._options("Isotopes")
+t = ow.pages.currentWidget().findChildren(QTableWidget)[0]
+t.item(0, 1).setText("7")
+assert lookup_half_life_s(t.item(0, 0).text()) == 7 * 3600, "the isotope table was not taken"
+ow._apply(None)                                     # Reset to defaults
+from PySide6.QtCore import QEvent
+QApplication.sendPostedEvents(None, QEvent.DeferredDelete)   # the old buttons, gone
+assert w.plot_view._bg.checkered and lookup_half_life_s("⁹⁹ᵐTc") == 6.00718 * 3600
+assert not any(b.text() == "Apply decay" for b in w._proc_body.findChildren(QPushButton))
+
+w.close()
+for f in [src, csv, ses, options.OPTIONS_FILE, TMP / "spikeless_smoke_report_plot.png"] + \
+        [TMP / f"spikeless_smoke_report{e}" for e in (".pdf", ".odt", ".xlsx", ".md", ".html")]:
+    os.unlink(f)
 print("spikeless smoke OK")

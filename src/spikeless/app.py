@@ -3,32 +3,33 @@
 from __future__ import annotations
 
 import copy
+import csv
 import datetime as _dt
 import io
-import json
-from dataclasses import dataclass, field
-from html import escape as _esc
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QByteArray, QEvent, QMimeData, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, QMimeData, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QColorDialog, QComboBox,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
     QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea,
-    QSlider, QSpinBox, QTextBrowser, QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem,
+    QSlider, QSpinBox, QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
-from . import io_gina, io_paste
-from .adjust import (BASELINE_LABELS, ISOTOPES, AdjustParams, decay_factor, estimate_baseline,
-                     lookup_half_life_s)
-from .dataset import Condition, Curve, Dataset, new_curve_from, new_id
+from . import io_gina, io_paste, session
+from .adjust import BASELINE_LABELS, AdjustParams, decay_factor, estimate_baseline, \
+    lookup_half_life_s
+from .dataset import Condition, Dataset, new_curve_from, new_id
+from .options import PREFS, PROC_LABELS, OptionsWindow, guard_fields, load_prefs
+from .options import ColorButton as _ColorButton
 from .peaks import PeakParams, analyze_peaks, detect_peaks
-from .plotting import BORDER_STYLES, ExportBorder, PlotOptions, auto_extents, build_figure
-from .plotview import Background, ZoomableFigureView
+from .plotting import ExportBorder, PlotOptions, auto_extents, build_figure
+from .plotview import OPENS, Background, ZoomableFigureView
+from .report import ReportWindow, num, peak_rows, sheet_name
 from .spikes import SpikeParams, detect, remove
 from .viz import BaselineViz, PeakViz, SpikeViz
 from . import __version__
@@ -56,12 +57,9 @@ def _parse_run_dt(s):
 # runs its action list via _run_feature(key); the gear opens that feature's parameter dialog.
 # Spikes first (electronic artefact, unrelated to activity → must precede decay); then decay
 # (activity correction) before baseline & peaks so AUC/% reflect the corrected signal.
-PROC_FEATURES = [
-    ("spikes", "Detect spikes", "_edit_spike_params"),
-    ("decay", "Apply decay", "_edit_decay_options"),
-    ("baseline", "Detect baseline", "_edit_baseline_params"),
-    ("peaks", "Detect peaks", "_edit_peak_params"),
-]
+PROC_FEATURES = [(k, PROC_LABELS[k], gear) for k, gear in (
+    ("spikes", "_edit_spike_params"), ("decay", "_edit_decay_options"),
+    ("baseline", "_edit_baseline_params"), ("peaks", "_edit_peak_params"))]
 # Each Processing button runs an ordered, user-editable list of actions (its "story"): the pinned
 # process step (the detection itself — reorderable, not removable), show/hide of a target, and
 # delays. Defaults below reproduce the classic behaviour; edited live in each button's collapsible.
@@ -92,59 +90,18 @@ PROC_TARGETS = {
     "baseline": {"baseline": "baseline line", "result": "corrected curve"},
     "peaks": {"peaks": "peaks"},
 }
-_ACTION_LABEL = {"spikes": "Detect spikes", "decay": "Apply decay",
-                 "baseline": "Detect baseline", "peaks": "Detect peaks"}
+_ACTION_LABEL = PROC_LABELS
 
-# Dockable menu windows (key, attribute name) — used for the "open by default" option.
+# Panels (options key, attribute name) — for Options › Panels, "open when Spikeless starts".
 DOCK_KEYS = [("data", "data_dock"), ("processing", "processing_dock"),
-             ("log", "log_dock"), ("report", "report_dock"), ("plot_options", "display_dock")]
-
-# Peak-table columns (key, header, value(i, pk)) — the same spec drives the report table, the
-# clipboard copy and the CSV export, so what's shown is exactly what's copied/exported.
-PEAK_COLUMNS = [
-    ("num", "#", lambda i, pk: str(i)),
-    ("name", "Peak", lambda i, pk: pk.name or f"peak {i}"),
-    ("rt", "Rt (min)", lambda i, pk: f"{pk.rt:.2f}"),
-    ("x_start", "x start", lambda i, pk: f"{pk.x_start:.2f}"),
-    ("x_end", "x end", lambda i, pk: f"{pk.x_end:.2f}"),
-    ("width", "width", lambda i, pk: f"{pk.length:.2f}"),
-    ("y_max", "y max", lambda i, pk: f"{pk.y_max:.0f}"),
-    ("auc", "AUC", lambda i, pk: f"{pk.auc:.1f}"),
-    ("pct", "%", lambda i, pk: f"{pk.pct:.1f}"),
-    ("skew", "skew", lambda i, pk: f"{pk.skew:.2f}"),
-]
-_DEFAULT_PEAK_COLS = {"num": True, "name": False, "rt": True, "x_start": False, "x_end": False,
-                      "width": False, "y_max": False, "auc": True, "pct": True, "skew": False}
-
-
-@dataclass
-class AppOptions:
-    background: Background = field(default_factory=Background)
-    lock_docks: bool = True
-    export_border: ExportBorder = field(default_factory=ExportBorder)
-    scale_max: int = 5   # top of the resolution slider (× plot size)
-    # which Processing buttons are shown (Apply decay hidden by default)
-    proc_visible: dict = field(default_factory=lambda: {
-        "spikes": True, "baseline": True, "peaks": True, "decay": False})
-    # which menu windows open by default (Plot options waits for the first dataset, then opens)
-    docks_open: dict = field(default_factory=lambda: {
-        "data": True, "processing": True, "log": True, "report": True, "plot_options": True})
-
-
-@dataclass
-class ExportOptions:
-    png_dpi: int = 600
-    clip_dpi: int = 600          # clipboard copies at 600 dpi too (was 150)
-    clip_format: str = "png"
-    log_timestamps: bool = True  # include [HH:MM:SS] stamps when exporting/copying the log
-    report_table_html: bool = True  # copy peak tables as rich HTML (else plain TSV)
-    report_cols: dict = field(default_factory=lambda: dict(_DEFAULT_PEAK_COLS))  # which peak columns show
+             ("log", "log_dock"), ("plot_options", "display_dock")]
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} {__version__} — radio-HPLC plotting, spike removal & analysis")
+        self._title = f"{APP_NAME} {__version__} — radio-HPLC plotting, spike removal & analysis"
+        self.setWindowTitle(self._title)
         self.resize(1200, 800)
         self.setAcceptDrops(True)
         icon = _app_icon()
@@ -162,10 +119,11 @@ class MainWindow(QMainWindow):
         # per-feature action lists (session state; edited via each button's collapsible)
         self.proc_actions = {k: copy.deepcopy(v) for k, v in PROC_ACTIONS.items()}
         self._proc_child = None  # last child a process step made, for a following show/hide "result"
-        self.app_opts = AppOptions()
-        self.export_opts = ExportOptions()
-        self._settings = QSettings(APP_NAME, APP_NAME)
-        self._load_settings()
+        load_prefs()
+        self.options_win: OptionsWindow | None = None    # built when first opened
+        self.report_win: ReportWindow | None = None
+        self._session_path: Path | None = None
+        self._dir = Path.home()      # where file dialogs open: the last file's folder
         self.view_scale = 1.0        # resolution slider (× plot size, on-screen)
         self.scale_export = False    # also apply the slider to exports/clipboard
         self._fig = None
@@ -174,75 +132,62 @@ class MainWindow(QMainWindow):
         self._plot_opts_shown_once = False
         self._paste_n = 0            # how many clipboard pastes this session, for dataset names
         self._undo_stack: list = []
+        self._redo_stack: list = []
         self._pen = _pen_icon()
 
         self._build_ui()
-        QShortcut(QKeySequence.Undo, self, activated=self._undo)    # Ctrl+Z
-        QShortcut(QKeySequence.Paste, self, activated=self._paste)  # Ctrl+V
+        for key, slot in ((QKeySequence.Undo, self._undo), (QKeySequence.Redo, self._redo),
+                          (QKeySequence.Copy, self._copy), (QKeySequence.Paste, self._paste),
+                          (QKeySequence.Save, self._save_session)):
+            QShortcut(key, self, activated=slot)
+        QShortcut(QKeySequence.Delete, self.data_tree, activated=self._delete_selected,
+                  context=Qt.WidgetShortcut)   # not while a name is being typed
         self._apply_lock()
         self._apply_default_docks()
         self._update_enabled()
         self._position_overlay()
-        self.log(f"{APP_NAME} ready. Drag a GINA .txt file here, use Browse, "
+        self.log(f"{APP_NAME} ready. Drag a GINA .txt file or a saved session here, use Open…, "
                  "or paste two columns (time, cps) with Ctrl+V.")
-        self._update_report()
 
-    # ---------------- persisted preferences ----------------
-    def _load_settings(self):
-        """Restore the few user 'defaults' (Options dialog) from QSettings. Best-effort:
-        a corrupt store must never stop the app starting."""
-        s = self._settings
-        try:
-            self.app_opts.lock_docks = s.value("lock_docks", True, type=bool)
-            self.app_opts.scale_max = int(s.value("scale_max", 5))
-            pv = s.value("proc_visible", "")
-            if pv:
-                self.app_opts.proc_visible.update(json.loads(pv))
-            do = s.value("docks_open2", "")   # v2: Plot options now defaults to open
-            if do:
-                self.app_opts.docks_open.update(json.loads(do))
-            self.export_opts.png_dpi = int(s.value("png_dpi", 600))
-            self.export_opts.clip_dpi = int(s.value("clip_dpi", 600))
-            self.export_opts.clip_format = s.value("clip_format", "png")
-            self.export_opts.log_timestamps = s.value("log_timestamps", True, type=bool)
-            self.export_opts.report_table_html = s.value("report_table_html", True, type=bool)
-            rc = s.value("report_cols", "")
-            if rc:
-                self.export_opts.report_cols.update(json.loads(rc))
-            self.plot_opts.crop_fills = s.value("crop_fills", False, type=bool)
-        except Exception as exc:  # noqa: BLE001
-            print(f"settings load skipped: {exc}")
+    # ---------------- options ----------------
+    def apply_prefs(self):
+        """The options changed (Options window): everything that shows them follows."""
+        self.plot_view.set_background(Background(**PREFS["background"]))
+        self.scale_slider.setMaximum(PREFS["scale_max"] * 10)
+        self._apply_lock()
+        if PREFS["proc_visible"] != self._proc_shown:
+            self._populate_processing()
+        if self.report_win is not None:
+            self.report_win.sync()
+        self._refresh_plot()
 
-    def _save_settings(self):
-        s = self._settings
-        ao, eo = self.app_opts, self.export_opts
-        s.setValue("lock_docks", ao.lock_docks)
-        s.setValue("scale_max", ao.scale_max)
-        s.setValue("proc_visible", json.dumps(ao.proc_visible))
-        s.setValue("docks_open2", json.dumps(ao.docks_open))
-        s.setValue("png_dpi", eo.png_dpi)
-        s.setValue("clip_dpi", eo.clip_dpi)
-        s.setValue("clip_format", eo.clip_format)
-        s.setValue("log_timestamps", eo.log_timestamps)
-        s.setValue("report_table_html", eo.report_table_html)
-        s.setValue("report_cols", json.dumps(eo.report_cols))
-        s.setValue("crop_fills", self.plot_opts.crop_fills)
+    def _options(self, topic=None):
+        if self.options_win is None:
+            self.options_win = OptionsWindow(self)
+        self.options_win.open(topic)
+
+    def _report(self):
+        if self.report_win is None:
+            self.report_win = ReportWindow(self)
+        self.report_win.open()
 
     def _apply_default_docks(self):
         for key, attr in DOCK_KEYS:
             dock = getattr(self, attr)
             if key == "plot_options":
                 continue  # plot options stays hidden until data is loaded (see _update_enabled)
-            dock.setVisible(self.app_opts.docks_open.get(key, True))
+            dock.setVisible(PREFS["docks_open"].get(key, True))
 
     def closeEvent(self, e):
-        self._save_settings()
+        for w in (self.options_win, self.report_win):   # or the app stays up with them
+            if w is not None:
+                w.close()
         super().closeEvent(e)
 
     # ---------------- UI construction ----------------
     def _build_ui(self):
         self.plot_view = ZoomableFigureView()
-        self.plot_view.set_background(self.app_opts.background)
+        self.plot_view.set_background(Background(**PREFS["background"]))
         self.plot_view.filesDropped.connect(self._load_paths)
         self.plot_view.resized.connect(self._position_overlay)
         self.setCentralWidget(self.plot_view)
@@ -251,7 +196,7 @@ class MainWindow(QMainWindow):
         # into the neighbouring dock when data loads.
         vp = self.plot_view.viewport()
 
-        # top-right cluster: Copy, Export, gear — mirrors the Log/Report title-bar tools
+        # top-right cluster: Copy, Export, gear — mirrors the Log's title-bar tools
         self.plot_tools = QWidget(vp)
         self.plot_tools.setObjectName("plotTools")
         self.plot_tools.setStyleSheet(
@@ -263,7 +208,8 @@ class MainWindow(QMainWindow):
         ht.setSpacing(0)
         self.plot_copy_btn = _tool("⧉ Copy", "Copy plot to clipboard", self._copy_plot)
         self.plot_export_btn = _tool("⭳ Export", "Export plot to PNG/SVG", self._export_plot)
-        gear = _tool("⚙", "Plot copy / export options", self._edit_plot_export_options)
+        gear = _tool("⚙", "Copy / export options (Options › Plot)",
+                     lambda: self._options("Plot"))
         for b in (self.plot_copy_btn, self.plot_export_btn, gear):
             ht.addWidget(b)
         self.plot_tools.adjustSize()
@@ -278,7 +224,7 @@ class MainWindow(QMainWindow):
         hb.setSpacing(4)
         self.scale_slider = QSlider(Qt.Horizontal)
         self.scale_slider.setMinimum(10)
-        self.scale_slider.setMaximum(self.app_opts.scale_max * 10)
+        self.scale_slider.setMaximum(PREFS["scale_max"] * 10)
         self.scale_slider.setValue(10)
         self.scale_slider.setFixedWidth(90)
         self.scale_slider.valueChanged.connect(self._on_scale)
@@ -298,12 +244,10 @@ class MainWindow(QMainWindow):
         self._build_processing_dock()
         self._build_display_dock()
         self._build_log_dock()
-        self._build_report_dock()
         self.display_dock.hide()
         self._build_toolbar()
 
-        self.splitDockWidget(self.log_dock, self.report_dock, Qt.Horizontal)
-        self.resizeDocks([self.log_dock, self.report_dock], [150, 150], Qt.Vertical)
+        self.resizeDocks([self.log_dock], [150], Qt.Vertical)
         self.resizeDocks([self.data_dock, self.processing_dock], [380, 110], Qt.Vertical)
         self.resizeDocks([self.display_dock], [300], Qt.Horizontal)
         self._refresh_plot()
@@ -312,23 +256,30 @@ class MainWindow(QMainWindow):
         tb = QToolBar("Main")
         tb.setMovable(False)
         self.addToolBar(tb)
-        browse = QPushButton("Browse…")
-        browse.clicked.connect(self._browse)
-        tb.addWidget(browse)
-        paste = QPushButton("Paste (Ctrl+V)")
-        paste.setToolTip("Import columns from the clipboard (Prism, Excel, any text): time then "
-                         "count rate. Extra value columns, or time/value pairs, load one dataset "
-                         "each. Time unit is guessed — minutes, or seconds if they look like it.")
-        paste.clicked.connect(self._paste)
-        tb.addWidget(paste)
+        for text, tip, slot in (
+                ("Open…", "A GINA .txt export, or a saved session (.spikeless)", self._browse),
+                ("Paste (Ctrl+V)", "Import columns from the clipboard (Prism, Excel, any text): "
+                 "time then count rate. Extra value columns, or time/value pairs, load one "
+                 "dataset each. Time unit is guessed — minutes, or seconds if they look like it.",
+                 self._paste),
+                ("Save…", "Save the session — datasets, curves, peaks, plot options — to open "
+                 "it again later (Ctrl+S)", self._save_session)):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            tb.addWidget(b)
         tb.addSeparator()
-        for dock in (self.display_dock, self.data_dock, self.processing_dock,
-                     self.log_dock, self.report_dock):
+        for dock in (self.display_dock, self.data_dock, self.processing_dock, self.log_dock):
             tb.addWidget(self._dock_button(dock))
         tb.addSeparator()
-        opt = QPushButton("Options")   # copy/export now live per-window (title bars + plot overlay)
-        opt.clicked.connect(self._edit_app_options)
-        tb.addWidget(opt)
+        for text, tip, slot in (("Report", "The report: pick its sections, see it, save it",
+                                 self._report),
+                                ("Options", "How the plot is shown, copied and exported; the "
+                                 "panels; the isotopes", self._options)):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, f=slot: f())
+            tb.addWidget(b)
 
     def _dock_button(self, dock):
         btn = QToolButton()
@@ -385,8 +336,9 @@ class MainWindow(QMainWindow):
         """(Re)build the Processing buttons, showing only the features enabled in Options.
         Each button carries a collapsible, editable action list (hidden by default)."""
         _clear_layout(self._proc_lay)
+        self._proc_shown = dict(PREFS["proc_visible"])
         for key, label, gear_name in PROC_FEATURES:
-            if not self.app_opts.proc_visible.get(key, True):
+            if not PREFS["proc_visible"].get(key, True):
                 continue
             box = QWidget()
             col = QVBoxLayout(box)
@@ -414,7 +366,7 @@ class MainWindow(QMainWindow):
         self._proc_lay.addStretch(1)
 
     # ---------------- editable action list (per Processing feature) ----------------
-    # ponytail: session-state only (matches the old proc_steps); persist to QSettings if users ask.
+    # ponytail: session-state only (matches the old proc_steps); persist with the options if users ask.
     def _build_action_editor(self, key):
         """A drag-reorderable list of this feature's actions + a '＋ add' button. Edits write
         straight back to self.proc_actions[key] (session state)."""
@@ -527,67 +479,18 @@ class MainWindow(QMainWindow):
         self.log_dock.setTitleBarWidget(_DockTitleBar(self.log_dock, [
             ("copy", "Copy", "Copy the log to the clipboard", self._copy_log),
             ("export", "Export", "Export the log to a .txt file", self._export_log),
-            ("gear", "⚙", "Log copy / export options", self._edit_log_export_options),
+            ("gear", "⚙", "Log copy / export options (Options › Log)",
+             lambda: self._options("Log")),
         ]))
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
-
-    def _build_report_dock(self):
-        self.report_dock = QDockWidget("Report", self)
-        self._report_text = ""          # plain-text mirror (for Copy/Export, no UI icons)
-        self.report_view = QTextBrowser()
-        self.report_view.setOpenLinks(False)   # the per-table ⧉ anchors are handled by us
-        self.report_view.anchorClicked.connect(self._on_report_anchor)
-        self.report_dock.setWidget(self.report_view)
-        self.report_dock.setTitleBarWidget(_DockTitleBar(self.report_dock, [
-            ("copy", "Copy", "Copy the whole report", self._copy_report),
-            ("export", "Export", "Export the report to a .txt file", self._export_report),
-            ("gear", "⚙", "Report copy / export options", self._edit_report_export_options),
-        ]))
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.report_dock)
-
-    def _on_report_anchor(self, url):
-        parts = url.toString().split(":")
-        if len(parts) == 3 and parts[0] == "copytable":
-            self._copy_peak_table(int(parts[1]), int(parts[2]))
-
-    def _visible_peak_columns(self):
-        return [(k, h, f) for k, h, f in PEAK_COLUMNS if self.export_opts.report_cols.get(k, False)]
-
-    def _peak_rows(self, cv):
-        """Header + value rows for cv's peaks, using only the columns enabled in report options."""
-        cols = self._visible_peak_columns()
-        head = tuple(h for _k, h, _f in cols)
-        rows = [tuple(f(i, pk) for _k, _h, f in cols) for i, pk in enumerate(cv.peaks, 1)]
-        return head, rows
-
-    def _copy_peak_table(self, ds_id, curve_id):
-        ds = self._ds(ds_id)
-        cv = ds.find_curve(curve_id) if ds else None
-        if cv is None or not cv.peaks:
-            self.log("Copy table: no peaks.")
-            return
-        head, body = self._peak_rows(cv)
-        rows = [head] + body
-        md = QMimeData()
-        md.setText("\n".join("\t".join(r) for r in rows))
-        if self.export_opts.report_table_html:
-            md.setHtml("<table border=1 cellspacing=0 cellpadding=3>"
-                       + "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
-                       + "</table>")
-        QApplication.clipboard().setMimeData(md)
-        self.log(f"Copied '{cv.name}' peak table ({len(cv.peaks)} rows).")
 
     def _copy_log(self):
         QApplication.clipboard().setText(self._log_text())
         self.log("Log copied to clipboard.")
 
-    def _copy_report(self):
-        QApplication.clipboard().setText(self._report_text)
-        self.log("Report copied to clipboard.")
-
     def _log_text(self):
         text = self.log_view.toPlainText()
-        if not self.export_opts.log_timestamps:
+        if not PREFS["log_timestamps"]:
             import re
             text = re.sub(r"^\[\d\d:\d\d:\d\d\] ", "", text, flags=re.MULTILINE)
         return text
@@ -595,6 +498,14 @@ class MainWindow(QMainWindow):
     # ---------------- Display options dock ----------------
     def _build_display_dock(self):
         self.display_dock = QDockWidget("Plot options", self)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.display_dock)
+        self._load_display()
+
+    def _load_display(self):
+        """(Re)build the Plot options panel from self.plot_opts: at start, and when a session
+        brings its own."""
+        old = self.display_dock.widget()
+        self.d = {}
         host = QWidget()
         outer = QVBoxLayout(host)
         o = self.plot_opts
@@ -667,8 +578,10 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(host)
+        guard_fields(host)
         self.display_dock.setWidget(scroll)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.display_dock)
+        if old is not None:
+            old.deleteLater()
 
     def _axis_group(self, pfx, ax):
         g = QWidget()
@@ -1001,6 +914,7 @@ class MainWindow(QMainWindow):
                 self.datasets.remove(ds)  # removing the root removes the dataset
         elif kind in ("spikes", "baseline", "peaks"):
             c = ds.find_curve(data[2])
+            c.how.pop(kind, None)
             if kind == "spikes":
                 c.spike_mask = None
                 c.spike_shown = None
@@ -1072,23 +986,33 @@ class MainWindow(QMainWindow):
         self.btn_dup.setEnabled(kind == "curve")
         self.btn_export.setEnabled(kind in ("curve", "dataset", "peaks", "peak"))
 
-    # ---------------- undo ----------------
+    # ---------------- undo / redo ----------------
     def _push_undo(self, label):
         """Snapshot the whole dataset tree before a mutating op so Ctrl+Z can restore it.
         *label* is what the log will say the undo took back, in the user's words."""
         self._undo_stack.append((copy.deepcopy(self.datasets), label))
         del self._undo_stack[:-25]   # ponytail: cap depth at 25, deep undo isn't worth the RAM
+        self._redo_stack.clear()     # a new change: what was undone can't come back
 
     def _undo(self):
-        if not self._undo_stack:
-            self.log("Nothing to undo.")
+        self._step(self._undo_stack, self._redo_stack, "undo", "Undone")
+
+    def _redo(self):
+        self._step(self._redo_stack, self._undo_stack, "redo", "Redone")
+
+    def _step(self, src, dst, what, done):
+        """Ctrl+Z / Ctrl+Y: the state on top of src comes back; the one left goes on dst."""
+        if not src:
+            self.log(f"Nothing to {what}.")
             return
-        self.datasets, label = self._undo_stack.pop()
+        datasets, label = src.pop()
+        dst.append((self.datasets, label))
+        self.datasets = datasets
         self._rebuild_tree()
         self._update_enabled()
         self._refresh_plot()
         self._update_report()
-        self.log(f"Undone: {label}.")
+        self.log(f"{done}: {label}.")
 
     # ---------------- helpers ----------------
     def log(self, msg):
@@ -1124,6 +1048,7 @@ class MainWindow(QMainWindow):
 
     def _opts_scaled(self, factor):
         o = copy.deepcopy(self.plot_opts)
+        o.crop_fills = PREFS["crop_fills"]
         o.plot_w_mm *= factor
         o.plot_h_mm *= factor
         return o
@@ -1139,7 +1064,7 @@ class MainWindow(QMainWindow):
             self.plot_view.clear()
             return
         self._fig = build_figure(self.datasets, self._opts_scaled(self.view_scale),
-                                 border=self.app_opts.export_border)
+                                 border=ExportBorder(**PREFS["export_border"]))
         self.plot_view.set_figure(self._fig, keep_view=True)
         self._fill_auto_fields()
 
@@ -1149,7 +1074,7 @@ class MainWindow(QMainWindow):
         self.plot_copy_btn.setEnabled(has)
         self.plot_export_btn.setEnabled(has)
         if has:
-            if self.app_opts.docks_open.get("plot_options") and not self._plot_opts_shown_once:
+            if PREFS["docks_open"].get("plot_options") and not self._plot_opts_shown_once:
                 self.display_dock.show()      # honour "open Plot options by default" once data arrives
                 self._plot_opts_shown_once = True
         else:
@@ -1159,90 +1084,42 @@ class MainWindow(QMainWindow):
 
     def _apply_lock(self):
         base = QDockWidget.DockWidgetClosable
-        feats = base if self.app_opts.lock_docks else (
+        feats = base if PREFS["lock_docks"] else (
             base | QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        for dock in (self.data_dock, self.processing_dock, self.display_dock,
-                     self.log_dock, self.report_dock):
+        for dock in (self.data_dock, self.processing_dock, self.display_dock, self.log_dock):
             dock.setFeatures(feats)
 
     def _update_report(self):
-        ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        lines = [f"{APP_NAME} report — {ts}", ""]
-        html = ["<div style='font-family:Segoe UI,sans-serif;font-size:9pt;'>",
-                f"<p style='color:#9aa;'>{APP_NAME} report — {ts}</p>"]
-        for ds in self.datasets:
-            lines.append(f"# {ds.meta.name}")
-            html.append(f"<p style='font-weight:600;margin:6px 0 0 0;'># {_esc(ds.meta.name)}</p>")
-            meta_items = [("file", ds.meta.original_filename)]
-            if ds.run_datetime:
-                meta_items.append(("run", ds.run_datetime))
-            if ds.meta.molecule:
-                meta_items.append(("molecule", ds.meta.molecule))
-            if ds.meta.radioisotope:
-                meta_items.append(("radioisotope", ds.meta.radioisotope))
-            meta_items += [("condition", c.text()) for c in ds.conditions]
-            for label, value in meta_items:
-                lines.append(f"  {label}: {value}")
-                html.append(f"<div style='margin-left:1em;color:#bbb;'>{label}: {_esc(str(value))}</div>")
-            for cv in ds.curves():
-                marks = []
-                if cv.has_spikes:
-                    marks.append(f"{len(cv.spike_indices())} spikes")
-                if cv.baseline is not None:
-                    marks.append("baseline")
-                if cv.peaks:
-                    marks.append(f"{len(cv.peaks)} peaks")
-                suffix = f" — {', '.join(marks)}" if marks else ""
-                lines.append(f"  curve '{cv.name}' [{cv.kind}]{suffix}")
-                html.append(f"<div style='margin-left:1em;margin-top:4px;'>curve "
-                            f"'<b>{_esc(cv.name)}</b>' [{_esc(cv.kind)}]{_esc(suffix)}</div>")
-                if cv.peaks:
-                    head, body = self._peak_rows(cv)
-                    if head:
-                        lines.append("      " + "  ".join(f"{h:>9}" for h in head))
-                        for r in body:
-                            lines.append("      " + "  ".join(f"{c:>9}" for c in r))
-                    html.append(self._peak_table_html(ds, cv))
-            lines.append("")
-        html.append("</div>")
-        self._report_text = "\n".join(lines)
-        sb = self.report_view.verticalScrollBar()   # preserve place across the wholesale rebuild
-        pos = sb.value()
-        self.report_view.setHtml("".join(html))
-        sb.setValue(min(pos, sb.maximum()))
-
-    def _peak_table_html(self, ds, cv):
-        head, body = self._peak_rows(cv)
-        if not head:
-            return ""   # all columns hidden
-        rows = ["<tr>" + "".join(f"<th>{_esc(h)}</th>" for h in head) + "</tr>"]
-        rows += ["<tr>" + "".join(f"<td>{_esc(c)}</td>" for c in r) + "</tr>" for r in body]
-        anchor = (f"<a href='copytable:{ds.id}:{cv.id}' title='Copy this table' "
-                  f"style='text-decoration:none;font-size:11pt;'>⧉</a>")
-        return (f"<div style='margin-left:2em;margin-top:2px;'>{anchor} "
-                f"<span style='color:#9aa;'>copy table</span>"
-                f"<table border='1' cellspacing='0' cellpadding='3' style='margin-top:2px;'>"
-                + "".join(rows) + "</table></div>")
+        """The data changed: the report follows, if it is open."""
+        if self.report_win is not None:
+            self.report_win.refresh_later()
 
     # ---------------- loading ----------------
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(".txt")
+        if e.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(OPENS)
                                           for u in e.mimeData().urls()):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        self._load_paths([u.toLocalFile() for u in e.mimeData().urls()
-                          if u.toLocalFile().lower().endswith(".txt")])
+        self._load_paths([u.toLocalFile() for u in e.mimeData().urls()])
 
     def _load_paths(self, paths):
+        """Open what was dropped or picked: GINA exports, or one session file."""
         for p in paths:
-            self._load(p)
+            if p.lower().endswith(session.EXT):
+                self._open_session(p)
+            elif p.lower().endswith(".txt"):
+                self._load(p)
 
     def _browse(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Open GINA export", "", "Text (*.txt)")
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Open", str(self._dir),
+            f"GINA export or session (*.txt *{session.EXT});;GINA export (*.txt);;"
+            f"Session (*{session.EXT})")
         self._load_paths(paths)
 
     def _load(self, path):
+        self._dir = Path(path).parent
         try:
             ds, warnings = io_gina.load(path)
         except Exception as exc:  # noqa: BLE001
@@ -1250,6 +1127,67 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Load failed", str(exc))
             return
         self._adopt(ds, warnings)
+
+    # ---------------- session file ----------------
+    def _save_session(self):
+        if not self.datasets:
+            self.log("Save: nothing loaded yet.")
+            return
+        name = self._session_path or self._dir / f"{self.datasets[0].meta.name}{session.EXT}"
+        path, _ = QFileDialog.getSaveFileName(self, "Save session", str(name),
+                                              f"Spikeless session (*{session.EXT})")
+        if not path:
+            return
+        path = Path(path)
+        if not path.name.lower().endswith(session.EXT):   # not with_suffix: names carry dots
+            path = path.with_name(path.name + session.EXT)
+        try:
+            path.write_text(session.dumps(self.datasets, self.plot_opts), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Save failed", str(exc))
+            return
+        self._session_at(path)
+        self.log(f"Session saved to {path}")
+
+    def _open_session(self, path):
+        try:
+            datasets, plot = session.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            self.log(f"ERROR opening {Path(path).name}: {exc}")
+            QMessageBox.warning(self, "Open failed", str(exc))
+            return
+        if self.datasets and QMessageBox.question(
+                self, "Open session", f"Replace the {len(self.datasets)} dataset(s) open now? "
+                "Ctrl+Z brings them back.") != QMessageBox.Yes:
+            return
+        self._push_undo(f"open {Path(path).name}")
+        self.datasets, self.plot_opts = datasets, plot
+        self._session_at(Path(path))
+        self._load_display()
+        self._rebuild_tree()
+        self._update_enabled()
+        self._refresh_plot()
+        self._update_report()
+        n = sum(len(d.curves()) for d in datasets)
+        self.log(f"Opened session {path}: {len(datasets)} dataset(s), {n} curve(s).")
+
+    def _session_at(self, path):
+        self._session_path, self._dir = path, path.parent
+        self.setWindowTitle(f"{path.name} — {self._title}")
+
+    def _copy(self):
+        """Ctrl+C on the window: the plot, unless a text field has focus."""
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QPlainTextEdit)):
+            fw.copy()
+        else:
+            self._copy_plot()
+
+    def _delete_selected(self):
+        """Del in the Data tree: what its ✖ removes (the original curve has none)."""
+        item = self.data_tree.currentItem()
+        if item is not None and self.data_tree.itemWidget(item, 1) is not None:
+            self._remove_node(item.data(0, Qt.UserRole))
 
     def _paste(self):
         """Ctrl+V on the window: import two pasted columns (time, count rate) as a dataset."""
@@ -1363,6 +1301,12 @@ class MainWindow(QMainWindow):
         else:
             child.y = cleaned
         child.shown = False
+        sp = self.spike_params
+        curve.how["spikes"] = (f"Hampel filter, window {sp.window}, threshold {sp.n_sigma:g} σ, "
+                               f"at most {sp.max_width} point(s) wide")
+        child.how["curve"] = (f"{n} spike(s) of '{curve.name}' replaced by "
+                              f"{dict(linear='linear', pchip='PCHIP')[self.interp_method]} "
+                              f"interpolation ({curve.how['spikes']})")
         self._proc_child = child
         self.log(f"Detected {n} spike(s) on '{curve.name}' → spikeless child ({self.interp_method}).")
         return True
@@ -1381,6 +1325,11 @@ class MainWindow(QMainWindow):
         else:
             child.y = corrected
         child.shown = False
+        n = {"first_n": f", first {self.baseline_n} points",
+             "snip": f", half-width {self.baseline_n} points"}.get(self.baseline_method, "")
+        curve.how["baseline"] = BASELINE_LABELS[self.baseline_method] + n
+        child.how["curve"] = (f"baseline of '{curve.name}' subtracted ({curve.how['baseline']}"
+                              f"{'; negatives set to 0' if self.baseline_clip else ''})")
         self._proc_child = child
         self.log(f"Baseline on '{curve.name}' ({self.baseline_method}) → corrected child"
                  f"{' (clipped ≥0)' if self.baseline_clip else ''}.")
@@ -1399,8 +1348,18 @@ class MainWindow(QMainWindow):
         analyze_peaks(curve.x, sig, pks, curve.baseline, curve.peak_local_baseline)
         curve.peaks = pks
         curve.peaks_group_shown = False
+        p = self.peak_params
+        prom = "auto (5% of the range)" if p.min_prominence <= 0 else f"{p.min_prominence:g}"
+        area = ("a straight line between each peak's bounds"
+                if curve.peak_local_baseline or curve.baseline is None else "the curve's baseline")
+        curve.how["peaks"] = ", ".join(
+            [f"prominence {prom}"]
+            + ([f"height ≥ {p.min_height:g}"] if p.min_height is not None else [])
+            + ([f"{p.min_distance} points apart"] if p.min_distance > 1 else [])
+            + (["spikes interpolated over first"] if curve.spike_mask is not None else [])
+        ) + f"; area above {area}"
         self.log(f"{'Reprocessed' if reprocess else 'Detected'} {len(pks)} peak(s) on '{curve.name}' "
-                 f"(baseline: {'local drift' if curve.peak_local_baseline else 'curve baseline'}).")
+                 f"(area above {area}).")
         return True
 
     def _proc_decay(self, ds, curve) -> bool:
@@ -1416,6 +1375,8 @@ class MainWindow(QMainWindow):
         name = f"{curve.name} +decay"
         child = new_curve_from(curve, curve.y * factor, name, base_kind, "#b000b0")
         child.shown = False
+        child.how["curve"] = (f"'{curve.name}' decay-corrected to {ds.decay_ref_label}"
+                              f" ({ds.meta.radioisotope or 'half-life'} {hl / 3600:g} h)")
         curve.children.append(child)
         self._proc_child = child
         self.log(f"Applied decay to '{curve.name}' → '{name}' (ref {ds.decay_ref_label}).")
@@ -1430,11 +1391,7 @@ class MainWindow(QMainWindow):
         dlg = QDialog(self)
         dlg.setWindowTitle("Apply decay — options")
         form = QFormLayout(dlg)
-        iso = QComboBox()
-        iso.addItem("—", "")
-        for name, hours in ISOTOPES:
-            iso.addItem(f"{name}   ({hours:g} h)", name)
-        iso.setCurrentIndex(max(0, iso.findData(ds.meta.radioisotope)))
+        iso = _iso_combo(ds.meta.radioisotope)
         hl_val = QDoubleSpinBox()
         hl_val.setRange(0, 1e9)
         hl_val.setDecimals(4)
@@ -1511,7 +1468,7 @@ class MainWindow(QMainWindow):
             return
         fig = self._export_fig()
         cb = QApplication.clipboard()
-        if self.export_opts.clip_format == "svg":
+        if PREFS["clip_format"] == "svg":
             buf = io.BytesIO()
             fig.savefig(buf, format="svg", facecolor=fig.get_facecolor(), edgecolor="none")
             md = QMimeData()
@@ -1520,10 +1477,10 @@ class MainWindow(QMainWindow):
             cb.setMimeData(md)
             self.log("Plot copied (SVG).")
         else:
-            img = self._render_qimage(fig, self.export_opts.clip_dpi)
+            img = self._render_qimage(fig, PREFS["clip_dpi"])
             cb.setImage(img)
             self.log(f"Plot copied {fig.get_figwidth() * 25.4:.0f}×{fig.get_figheight() * 25.4:.0f} mm "
-                     f"({img.width()}×{img.height()} px @ {self.export_opts.clip_dpi} dpi).")
+                     f"({img.width()}×{img.height()} px @ {PREFS['clip_dpi']} dpi).")
 
     def _export_plot(self):
         if not self.datasets:
@@ -1533,7 +1490,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         fig = self._export_fig()
-        dpi = self.export_opts.png_dpi
+        dpi = PREFS["png_dpi"]
         is_png = path.lower().endswith(".png") or "png" in flt.lower()
         if is_png and not path.lower().endswith(".png"):
             path += ".png"
@@ -1567,76 +1524,7 @@ class MainWindow(QMainWindow):
             Path(path).write_text(self._log_text(), encoding="utf-8")
             self.log(f"Log exported to {path}")
 
-    def _export_report(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export report", "spikeless_report.txt", "Text (*.txt)")
-        if path:
-            Path(path).write_text(self._report_text, encoding="utf-8")
-            self.log(f"Report exported to {path}")
-
-    # ---- per-export options (the ⚙ next to each Copy/Export) ----
-    def _edit_plot_export_options(self):
-        eo = self.export_opts
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Plot copy / export options")
-        form = QFormLayout(dlg)
-        dpi = _int_spin(72, 2400, eo.png_dpi, 50)
-        clip_dpi = _int_spin(72, 2400, eo.clip_dpi, 50)
-        clip = QComboBox()
-        clip.addItem("PNG image", "png")
-        clip.addItem("SVG vector", "svg")
-        clip.setCurrentIndex(max(0, clip.findData(eo.clip_format)))
-        form.addRow("PNG file dpi", dpi)
-        form.addRow("Clipboard dpi", clip_dpi)
-        form.addRow("Copy to clipboard as", clip)
-        if _run_dialog(dlg, form):
-            eo.png_dpi, eo.clip_dpi, eo.clip_format = dpi.value(), clip_dpi.value(), clip.currentData()
-            self._save_settings()
-            self.log(f"Plot export options: PNG {eo.png_dpi} dpi, clipboard {eo.clip_dpi} dpi ({eo.clip_format}).")
-
-    def _edit_log_export_options(self):
-        eo = self.export_opts
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Log copy / export options")
-        form = QFormLayout(dlg)
-        ts = QCheckBox("Include [HH:MM:SS] timestamps")
-        ts.setChecked(eo.log_timestamps)
-        form.addRow(ts)
-        if _run_dialog(dlg, form):
-            eo.log_timestamps = ts.isChecked()
-            self._save_settings()
-            self.log("Log export options updated.")
-
-    def _edit_report_export_options(self):
-        eo = self.export_opts
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Report copy / export options")
-        outer = QVBoxLayout(dlg)
-        outer.addWidget(QLabel("Peak-table columns (shown in the report = copied):"))
-        col_chks = {}
-        for key, header, _f in PEAK_COLUMNS:
-            c = QCheckBox(header if key != "num" else "# (row number)")
-            c.setChecked(eo.report_cols.get(key, False))
-            col_chks[key] = c
-            outer.addWidget(c)
-        html = QCheckBox("Copy tables as rich HTML (else plain tab-separated text)")
-        html.setChecked(eo.report_table_html)
-        outer.addWidget(html)
-        allbtn = QPushButton("Export all peak tables (Excel / CSV)…")
-        allbtn.clicked.connect(self._export_all_peaks)
-        outer.addWidget(allbtn)
-        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        box.accepted.connect(dlg.accept)
-        box.rejected.connect(dlg.reject)
-        outer.addWidget(box)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        for key, c in col_chks.items():
-            eo.report_cols[key] = c.isChecked()
-        eo.report_table_html = html.isChecked()
-        self._save_settings()
-        self._update_report()
-        self.log("Report options updated.")
-
+    # ---- Data panel: Export… ----
     def _export_selected(self):
         data = self._selected()
         if not data:
@@ -1645,29 +1533,20 @@ class MainWindow(QMainWindow):
         if data[0] in ("curve", "dataset"):
             self._export_data_gina()
         elif data[0] in ("peaks", "peak"):
-            self._export_peaks(scope="one")
+            self._export_peaks()
 
-    def _export_all_peaks(self):
-        self._export_peaks(scope="all")
-
-    def _export_peaks(self, scope):
-        """Export peak tables as Excel (a sheet per curve) or CSV. scope 'one' = the selected
-        curve, 'all' = every curve with peaks. Columns follow the report options."""
-        if scope == "one":
-            ds, cv = self._sel_curve()
-            items = [(ds, cv)] if cv is not None and cv.peaks else []
-            default = (f"{ds.meta.name}_{cv.name}_peaks" if items else "peaks").replace(" ", "_")
-        else:
-            items = [(ds, cv) for ds in self.datasets for cv in ds.curves() if cv.peaks]
-            default = "peak_tables"
-        if not items:
+    def _export_peaks(self):
+        """The selected curve's peak table, as Excel or CSV, in the report's columns. (Every
+        curve's at once: the report, as a workbook.)"""
+        ds, cv = self._sel_curve()
+        if cv is None or not cv.peaks:
             self.log("Export: no peaks to export.")
             return
-        head, _ = self._peak_rows(items[0][1])
-        if not head:
-            self.log("Export: no peak columns are enabled (Report ⚙).")
+        if not peak_rows(cv)[0]:
+            self.log("Export: no peak columns are ticked (Report window, Peak tables).")
             return
-        path, flt = QFileDialog.getSaveFileName(self, "Export peak table(s)", default,
+        default = self._dir / f"{ds.meta.name}_{cv.name}_peaks".replace(" ", "_")
+        path, flt = QFileDialog.getSaveFileName(self, "Export peak table", str(default),
                                                 "Excel workbook (*.xlsx);;CSV (*.csv)")
         if not path:
             return
@@ -1676,36 +1555,26 @@ class MainWindow(QMainWindow):
             path += ".xlsx"
         elif not xlsx and not path.lower().endswith(".csv"):
             path += ".csv"
-        n = self._write_peaks_xlsx(path, items) if xlsx else self._write_peaks_csv(path, items, scope)
-        self.log(f"Exported {n} peak(s) from {len(items)} curve(s) to {path}")
+        n = self._write_peaks_xlsx(path, cv) if xlsx else self._write_peaks_csv(path, cv)
+        self.log(f"Exported {n} peak(s) of '{cv.name}' to {path}")
 
-    def _write_peaks_csv(self, path, items, scope):
-        head, _ = self._peak_rows(items[0][1])
-        prefix = ("Dataset", "Curve") if scope == "all" else ()
-        lines = [",".join(prefix + head)]
-        n = 0
-        for ds, cv in items:
-            _h, body = self._peak_rows(cv)
-            for r in body:
-                lines.append(",".join(((ds.meta.name, cv.name) if scope == "all" else ()) + r))
-                n += 1
-        Path(path).write_text("\n".join(lines), encoding="utf-8")
-        return n
+    def _write_peaks_csv(self, path, cv):
+        head, body = peak_rows(cv)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows([head] + body)     # quotes a peak name with a comma
+        return len(body)
 
-    def _write_peaks_xlsx(self, path, items):
+    def _write_peaks_xlsx(self, path, cv):
         from openpyxl import Workbook
         wb = Workbook()
-        wb.remove(wb.active)   # drop the default empty sheet
-        used, n = set(), 0
-        for ds, cv in items:
-            head, body = self._peak_rows(cv)
-            ws = wb.create_sheet(_sheet_name(cv.name, used))
-            ws.append(list(head))
-            for r in body:
-                ws.append([_num(c) for c in r])
-                n += 1
+        ws = wb.active
+        ws.title = sheet_name(cv.name, set())
+        head, body = peak_rows(cv)
+        ws.append(list(head))
+        for r in body:
+            ws.append([num(c) for c in r])
         wb.save(path)
-        return n
+        return len(body)
 
     # ---------------- dialogs ----------------
     def _edit_info(self):
@@ -1756,6 +1625,8 @@ class MainWindow(QMainWindow):
                 ("Baseline", "yes" if curve.baseline is not None else "—"),
                 ("Peaks", len(curve.peaks) if curve.peaks else "—"),
                 ("Derived curves", len(curve.children))]
+        if curve.how.get("curve"):
+            rows.insert(2, ("Made by", curve.how["curve"]))
         self._info_dialog(f"Curve info — {curve.name}", rows)
 
     def _baseline_info(self):
@@ -1766,7 +1637,8 @@ class MainWindow(QMainWindow):
         flat = float(np.nanmax(b) - np.nanmin(b)) < 1e-9
         rows = [("Curve", curve.name), ("Type", "constant" if flat else "per-point / drift"),
                 ("Min level", f"{float(np.nanmin(b)):.2f}"), ("Max level", f"{float(np.nanmax(b)):.2f}"),
-                ("Mean level", f"{float(np.nanmean(b)):.2f}")]
+                ("Mean level", f"{float(np.nanmean(b)):.2f}"),
+                ("Method", curve.how.get("baseline", "—"))]
         self._info_dialog(f"Baseline info — {curve.name}", rows)
 
     def _spikes_info(self):
@@ -1775,7 +1647,8 @@ class MainWindow(QMainWindow):
             return
         idxs = curve.spike_indices()
         times = ", ".join(f"{float(curve.x[i]):.2f}" for i in idxs[:12]) + (" …" if len(idxs) > 12 else "")
-        rows = [("Curve", curve.name), ("Count", len(idxs)), ("Times (min)", times)]
+        rows = [("Curve", curve.name), ("Count", len(idxs)), ("Times (min)", times),
+                ("Found by", curve.how.get("spikes", "—"))]
         self._info_dialog(f"Spikes info — {curve.name}", rows)
 
     def _peaks_info(self):
@@ -1784,7 +1657,7 @@ class MainWindow(QMainWindow):
             return
         total = sum(pk.auc for pk in curve.peaks)
         rows = [("Curve", curve.name), ("Count", len(curve.peaks)), ("Total AUC", f"{total:.1f}"),
-                ("Baseline", "local drift" if curve.peak_local_baseline else "curve baseline")]
+                ("Settings", curve.how.get("peaks", "—"))]
         self._info_dialog(f"Peaks info — {curve.name}", rows)
 
     def _edit_dataset_info(self):
@@ -1804,11 +1677,7 @@ class MainWindow(QMainWindow):
         run.setReadOnly(True)
         run.setStyleSheet("color:#888;")
         molecule = QLineEdit(m.molecule)
-        radio = QComboBox()
-        radio.addItem("—", "")
-        for iname, hours in ISOTOPES:
-            radio.addItem(f"{iname}   ({hours:g} h)", iname)
-        radio.setCurrentIndex(max(0, radio.findData(m.radioisotope)))
+        radio = _iso_combo(m.radioisotope)
         for lbl, wdg in [("Dataset name", name), ("Original file", orig), ("Run date/time", run),
                          ("Molecule", molecule), ("Radioisotope", radio)]:
             form.addRow(lbl, wdg)
@@ -2199,7 +2068,6 @@ class MainWindow(QMainWindow):
 
     def _edit_peak_params(self):
         p = self.peak_params
-        eo = self.export_opts
         dlg = QDialog(self)
         dlg.setWindowTitle("Detect peaks — options")
         outer = QVBoxLayout(dlg)
@@ -2216,16 +2084,6 @@ class MainWindow(QMainWindow):
         df.addRow(local)
         outer.addWidget(det)
 
-        # report-building bit: which peak-table columns show (same setting as the Report gear)
-        rep, rf = _section("Report  (peak-table columns, shown = copied/exported)")
-        col_chks = {}
-        for key, header, _f in PEAK_COLUMNS:
-            c = QCheckBox(header if key != "num" else "# (row number)")
-            c.setChecked(eo.report_cols.get(key, False))
-            col_chks[key] = c
-            rf.addRow(c)
-        outer.addWidget(rep)
-
         if _run_dialog(dlg, outer):
             try:
                 h = float(height.text().replace(",", ".")) if height.text().strip() else None
@@ -2233,133 +2091,8 @@ class MainWindow(QMainWindow):
                 h = None
             self.peak_params = PeakParams(min_prominence=prom.value(), min_height=h,
                                           min_distance=dist.value(), local_baseline=local.isChecked())
-            for key, c in col_chks.items():
-                eo.report_cols[key] = c.isChecked()
-            self._save_settings()
-            self._update_report()
             self.log(f"Peak params: prominence={self.peak_params.min_prominence:g}, "
                      f"local baseline={self.peak_params.local_baseline}.")
-
-    def _edit_app_options(self):
-        ao = self.app_opts
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Options")
-        root = QVBoxLayout(dlg)
-        host = QWidget()
-        outer = QVBoxLayout(host)
-
-        # --- Background (collapsed) ---
-        bg = ao.background
-        bgw = QWidget()
-        f = QFormLayout(bgw)
-        chk = QCheckBox("Checkered")
-        chk.setChecked(bg.checkered)
-        ca = _ColorButton(bg.color_a)
-        cb = _ColorButton(bg.color_b)
-        size = _spin(0.2, 20, bg.size_mm, 0.1)
-        f.addRow(chk)
-        f.addRow("Colour A / solid", ca)
-        f.addRow("Colour B (checker)", cb)
-        f.addRow("Checker cell (mm)", size)
-        outer.addWidget(_Collapsible("Background", bgw, expanded=False))
-
-        # --- Export-area border (collapsed) ---
-        bd = ao.export_border
-        bdw = QWidget()
-        fb = QFormLayout(bdw)
-        bd_on = QCheckBox("Show border on screen")
-        bd_on.setToolTip("Marks where the exported image ends. Never copied or exported.")
-        bd_on.setChecked(bd.on)
-        bd_color = _ColorButton(bd.color)
-        bd_style = QComboBox()
-        bd_style.addItems(list(BORDER_STYLES))
-        bd_style.setCurrentText(bd.style)
-        bd_width = _spin(0.1, 3, bd.width, 0.1)
-        fb.addRow(bd_on)
-        fb.addRow("Colour", bd_color)
-        fb.addRow("Style", bd_style)
-        fb.addRow("Width (pt)", bd_width)
-        outer.addWidget(_Collapsible("Export-area guide (screen only)", bdw, expanded=False))
-
-        # --- Plot view (collapsed) ---
-        pvw = QWidget()
-        f2 = QFormLayout(pvw)
-        smax = _int_spin(2, 20, ao.scale_max, 1)
-        f2.addRow("Resolution slider max (×)", smax)
-        outer.addWidget(_Collapsible("Plot view", pvw, expanded=False))
-
-        # --- Data visualization (collapsed) ---
-        dvw = QWidget()
-        fdv = QVBoxLayout(dvw)
-        crop = QCheckBox("Crop fill areas where a curve passes (clean alpha overlaps)")
-        crop.setChecked(self.plot_opts.crop_fills)
-        crop.setToolTip("Cuts AUC/baseline fills around each curve line so overlapping "
-                        "semi-transparent areas read cleanly. Best on an opaque plot background.")
-        fdv.addWidget(crop)
-        outer.addWidget(_Collapsible("Data visualization", dvw, expanded=False))
-
-        # --- Processing features shown (collapsed) ---
-        procw = QWidget()
-        fp = QVBoxLayout(procw)
-        proc_chks = {}
-        for key, label, _gear in PROC_FEATURES:
-            c = QCheckBox(label)
-            c.setChecked(ao.proc_visible.get(key, True))
-            proc_chks[key] = c
-            fp.addWidget(c)
-        outer.addWidget(_Collapsible("Processing features shown", procw, expanded=False))
-
-        # --- Menu windows (collapsed) ---
-        mww = QWidget()
-        fm = QVBoxLayout(mww)
-        fm.addWidget(QLabel("Open by default:"))
-        dock_labels = {"data": "Data", "processing": "Processing", "log": "Log",
-                       "report": "Report", "plot_options": "Plot options"}
-        dock_chks = {}
-        for key, _attr in DOCK_KEYS:
-            c = QCheckBox(dock_labels[key])
-            c.setChecked(ao.docks_open.get(key, True))
-            c.setStyleSheet("margin-left:18px;")   # indent the list so it reads under "Open by default:"
-            if key == "plot_options":
-                c.setToolTip("Plot options opens when the first dataset is loaded.")
-            dock_chks[key] = c
-            fm.addWidget(c)
-        lock = QCheckBox("Lock menu windows (no drag/float)")
-        lock.setChecked(ao.lock_docks)
-        fm.addWidget(lock)
-        outer.addWidget(_Collapsible("Menu windows", mww, expanded=False))
-
-        outer.addStretch(1)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(host)
-        scroll.setMinimumSize(380, 340)
-        root.addWidget(scroll)
-        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        box.accepted.connect(dlg.accept)
-        box.rejected.connect(dlg.reject)
-        root.addWidget(box)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        ao.scale_max = smax.value()
-        self.scale_slider.setMaximum(ao.scale_max * 10)
-        ao.background = Background(checkered=chk.isChecked(), color_a=ca.color,
-                                  color_b=cb.color, size_mm=size.value())
-        ao.export_border = ExportBorder(on=bd_on.isChecked(), color=bd_color.color,
-                                        style=bd_style.currentText(), width=bd_width.value())
-        ao.lock_docks = lock.isChecked()
-        self.plot_opts.crop_fills = crop.isChecked()
-        for key, c in proc_chks.items():
-            ao.proc_visible[key] = c.isChecked()
-        for key, c in dock_chks.items():
-            ao.docks_open[key] = c.isChecked()
-        self.plot_view.set_background(ao.background)
-        self._apply_lock()
-        self._populate_processing()
-        self._save_settings()
-        self._refresh_plot()
-        self.log("Options updated.")
-
 
 # ---------------- small widget helpers ----------------
 class _DataTree(QTreeWidget):
@@ -2425,32 +2158,6 @@ class _Collapsible(QWidget):
         self.toggled.emit(on)
 
 
-class _ColorButton(QPushButton):
-    def __init__(self, color, on_change=None):
-        super().__init__(color)
-        self.color = color
-        self._on_change = on_change
-        self._paint()
-        self.clicked.connect(self._pick)
-
-    def _paint(self):
-        self.setStyleSheet(f"background:{self.color}; padding:4px;")
-        self.setText(self.color)
-
-    def _pick(self):
-        dlg = QColorDialog(QColor(self.color), self)
-        dlg.setOption(QColorDialog.DontUseNativeDialog, True)
-        dlg.setPalette(QApplication.palette())  # dark grey bg + light text, like the app
-        if dlg.exec() != QDialog.Accepted:
-            return
-        c = dlg.currentColor()
-        if c.isValid():
-            self.color = c.name()
-            self._paint()
-            if self._on_change:
-                self._on_change()
-
-
 def _gear(slot):
     b = QPushButton("⚙")
     b.setFixedWidth(30)
@@ -2476,28 +2183,8 @@ def _clear_layout(lay):
             w.deleteLater()
 
 
-def _num(v):
-    """Coerce a formatted cell to a number for Excel (so columns stay summable); else keep text."""
-    try:
-        return float(v)
-    except (ValueError, TypeError):
-        return v
-
-
-def _sheet_name(name, used):
-    """A valid, unique (<=31 char) Excel sheet name."""
-    s = "".join(c for c in str(name) if c not in '[]:*?/\\')[:31] or "Sheet"
-    base, i = s, 1
-    while s in used:
-        suffix = f"_{i}"
-        s = base[:31 - len(suffix)] + suffix
-        i += 1
-    used.add(s)
-    return s
-
-
 class _DockTitleBar(QWidget):
-    """Custom dock title bar: [title] … Copy  Export  ⚙  ✕ — so the log/report get their
+    """Custom dock title bar: [title] … Copy  Export  ⚙  ✕ — so the log gets its
     copy/export tools on the title line instead of a button row at the bottom."""
 
     def __init__(self, dock, tools):
@@ -2576,6 +2263,19 @@ def _pair(left, right):
     h.addWidget(left)
     h.addWidget(right, 1)
     return w
+
+
+def _iso_combo(current):
+    """The Radioisotope list: the isotope table (Options › Isotopes), and the current one
+    even if the table no longer has it, so opening a dialog never drops it."""
+    c = QComboBox()
+    c.addItem("—", "")
+    for name, hours in PREFS["isotopes"]:
+        c.addItem(f"{name}   ({hours:g} h)", name)
+    if current and c.findData(current) < 0:
+        c.addItem(current, current)
+    c.setCurrentIndex(max(0, c.findData(current)))
+    return c
 
 
 def _set_halflife(spin, unit, hl_s):

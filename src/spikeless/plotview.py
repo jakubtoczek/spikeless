@@ -21,6 +21,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView
 
+OPENS = (".txt", ".spikeless")   # what a drop opens: GINA exports, session files
 _PT_PER_MM = 72.0 / 25.4  # matplotlib SVG is 72 dpi, so scene units are points; mm -> points
 
 
@@ -203,7 +204,7 @@ class ZoomableFigureView(QGraphicsView):
 
     # ---------------- drag & drop ----------------
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(".txt")
+        if e.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(OPENS)
                                           for u in e.mimeData().urls()):
             e.acceptProposedAction()
 
@@ -212,7 +213,7 @@ class ZoomableFigureView(QGraphicsView):
 
     def dropEvent(self, e):
         paths = [u.toLocalFile() for u in e.mimeData().urls()
-                 if u.toLocalFile().lower().endswith(".txt")]
+                 if u.toLocalFile().lower().endswith(OPENS)]
         if paths:
             self.filesDropped.emit(paths)
             e.acceptProposedAction()

@@ -6,3 +6,4 @@ venv/
 build/
 dist/
 uv.lock
+spikeless_options.json

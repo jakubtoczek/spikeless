@@ -93,6 +93,10 @@ class Curve:
     peak_local_baseline: bool = False  # drift baseline (line between each peak's bounds); off by default
     annotate: str = "none"             # on-graph labels: none | rt | auc | both
 
+    # how each part was made, in words, for the report and Info: "curve" (this curve, if
+    # derived), "spikes", "baseline", "peaks" — the method and settings used at the time
+    how: dict = field(default_factory=dict)
+
     children: list["Curve"] = field(default_factory=list)
 
     def __post_init__(self):

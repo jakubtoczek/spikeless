@@ -24,22 +24,10 @@ class SpikeParams:
     poisson_floor: bool = True  # floor the noise scale at sqrt(median): correct for cps counting data
 
 
-def _limit_run_width(mask: np.ndarray, max_width: int) -> np.ndarray:
-    """Keep only True-runs no longer than max_width (drops wide excursions = real peaks)."""
-    out = mask.copy()
-    n = len(mask)
-    i = 0
-    while i < n:
-        if mask[i]:
-            j = i
-            while j < n and mask[j]:
-                j += 1
-            if (j - i) > max_width:
-                out[i:j] = False
-            i = j
-        else:
-            i += 1
-    return out
+def _runs(mask: np.ndarray):
+    """(start, stop) of each run of True in mask."""
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], mask.astype(np.int8), [0]))))
+    return zip(edges[::2], edges[1::2])
 
 
 def detect(y: np.ndarray, params: SpikeParams | None = None) -> np.ndarray:
@@ -63,8 +51,18 @@ def detect(y: np.ndarray, params: SpikeParams | None = None) -> np.ndarray:
     sigma = np.maximum(sigma, 1e-9)
     diff = y - med
     excess = diff if p.positive_only else np.abs(diff)
-    candidate = excess > p.n_sigma * sigma
-    return _limit_run_width(candidate, p.max_width)
+    out = np.zeros(len(y), dtype=bool)
+    for i, j in _runs(excess > p.n_sigma * sigma):
+        if j - i > p.max_width:
+            continue                    # a wide excursion is a real peak, not a spike
+        # A spike also stands clear of both its neighbours. The apex of a narrow real peak
+        # sits above the window's median but not far above the points beside it.
+        nb = [y[k] for k in (i - 1, j) if 0 <= k < len(y)]
+        up = y[i:j].min() - max(nb) if nb else np.inf
+        down = min(nb) - y[i:j].max() if nb else np.inf
+        if (up if p.positive_only else max(up, down)) > p.n_sigma * sigma[i:j].max():
+            out[i:j] = True
+    return out
 
 
 def remove(y: np.ndarray, mask: np.ndarray, method: str = "linear") -> np.ndarray:
@@ -116,6 +114,16 @@ def _self_check():
     pch = remove(y, mask, method="pchip")
     assert abs(pch[120] - baseline[120]) < 6, pch[120]      # pchip also restores baseline
     assert pch[200] == y[200], "apex changed by pchip removal"
+
+    # The apex of a narrow real peak is not a spike: this 13-point profile is the one at
+    # 2.55 min in a 2026-06-26 Lu-177 run, whose apex (306) was flagged before 2026.10.14.
+    y2 = rng.poisson(6, 300).astype(float)
+    y2[144:157] = [33, 48, 72, 154, 197, 245, 306, 235, 207, 186, 156, 125, 101]
+    y2[157:165] = [80, 60, 45, 30, 20, 14, 10, 8]
+    y2[60] += 1000                                           # and a spike still is
+    m2 = detect(y2)
+    assert not m2[150], "narrow peak apex flagged as a spike"
+    assert m2[60], "spike next to the narrow peak missed"
     print("spikes self-check OK")
 
 
