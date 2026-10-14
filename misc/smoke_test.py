@@ -198,6 +198,25 @@ assert shown < 200.0, (shown,)                      # the label margins come out
 d["tot_w_auto"].setChecked(True)
 assert d["w_mm"].isEnabled(), "plot width stayed grey after going back to Auto"
 
+# ---- zoomed in, editing the plot keeps it where it is (it crept 1 px down-right per redraw) ----
+v = w.plot_view
+v.scale(1.5, 1.5)
+v._zoomed = True
+
+
+def _at():
+    return v.mapFromScene(v._item.sceneBoundingRect()).boundingRect().topLeft()
+
+
+before = _at()
+for a in (0.5, 0.6, 0.7, 0.8, 0.9):
+    d["bg_a"].setValue(a)
+assert _at() == before, (before, _at())
+d["h_mm"].setValue(60.0)
+d["h_mm"].setValue(40.0)
+assert (_at() - before).manhattanLength() <= 1, (before, _at())
+v._fit()
+
 # ---- a session comes back as it was saved, plot options included ----
 w.d["h_mm"].setValue(55.0)
 ses = TMP / "spikeless_smoke.spikeless"

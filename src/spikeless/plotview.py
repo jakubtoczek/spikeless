@@ -90,13 +90,15 @@ class ZoomableFigureView(QGraphicsView):
             self._axes_origin = QPointF(pos.x0 * w, (1.0 - pos.y0 - pos.height) * h)
         self._scene.setSceneRect(QRectF(-w, -h, 3 * w, 3 * h))
         same_size = prev is not None and abs(prev.width() - w) < 0.5 and abs(prev.height() - h) < 0.5
-        if keep_view and self._zoomed and prev is not None and prev.width() > 0 and prev.height() > 0:
+        if keep_view and same_size:
+            pass  # geometry unchanged (a colour, a font…) → keep the exact view, zoomed or not
+        elif keep_view and self._zoomed and prev is not None and prev.width() > 0 and prev.height() > 0:
             # a resolution/size change grows the figure from its (0,0) top-left; keep the point
-            # that was under the viewport centre there, so the view stays put instead of drifting.
-            c = self.mapToScene(self.viewport().rect().center())
+            # that was under the viewport centre there. The true centre, in floats: QRect.center()
+            # is half a pixel up-left of it, and re-centring on that crept 1 px down-right per redraw.
+            vp = self.viewport()
+            c = self.viewportTransform().inverted()[0].map(QPointF(vp.width() / 2, vp.height() / 2))
             self.centerOn(c.x() / prev.width() * w, c.y() / prev.height() * h)
-        elif keep_view and same_size:
-            pass  # geometry unchanged (a show/hide toggle) → keep the exact view, don't refit
         else:
             self._fit()  # first render, resolution/size change, or explicit fit
         self.viewport().update()
