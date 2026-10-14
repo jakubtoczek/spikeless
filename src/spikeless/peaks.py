@@ -1,161 +1,285 @@
-"""Individual-peak detection and metrics (Rt, AUC, %) for radio-HPLC traces.
+"""Regions (integrated peaks): found by counting statistics, placed by hand, measured.
 
-Detection is scipy.signal.find_peaks (prominence); integration bounds run apex-to-valley
-(the low point between each peak and its neighbour), then trim inward to the peak's feet so
-the bounds hug the real peak rather than the narrow, prominence-truncated peak_widths span.
-Metrics: retention time (apex x), AUC above a baseline, and each peak's % of the group total.
-The baseline under a peak is either a local drift line between the peak's bounds (default) or
-the curve's detected baseline.
+A region is a time window. Its **net counts** are the counts of the trace above what lies
+under it — the run's background, or a straight line between the region's two ends — taken
+by trapezoids (count rate × time). Results follow radio-HPLC practice:
+
+- **% of total**: of all the net counts of the run (Ph. Eur. 0125: the radiochemical purity is
+  relative to the total activity of the radionuclide); the counts outside every region are a
+  row of their own. **% of regions** beside it.
+- **± (1 σ)** = √(gross + background counts), Poisson.
+- **Detection / quantification limits** (Currie 1968, Anal. Chem. 40:586), from the
+  background counts B under the region: L_D = 2.71 + 4.65 √B, L_Q = 50 (1 + √(1 + B/12.5)) —
+  below L_D a region is "n.d.", between L_D and L_Q "< LOQ".
+- **System suitability** (Ph. Eur. 2.2.46): w½ the width at half height, symmetry factor
+  As = w₀.₀₅ / 2d, resolution Rs = 1.18 (t₂ − t₁) / (w½₁ + w½₂) from the region before,
+  S/N = 2H / h with h the range of the background around the region.
+
+Find peaks proposes regions: maxima of the 5-point mean standing 5 σ (Poisson, of that mean)
+above their surroundings, each kept if its net counts pass L_D — a threshold of counting statistics, not a
+fraction of the tallest peak (which missed a 2 % impurity beside a large product).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
-from .dataset import Peak
-
-try:  # NumPy 2 renamed trapz -> trapezoid
-    from numpy import trapezoid as _trapz
-except ImportError:  # NumPy < 2
-    from numpy import trapz as _trapz
+from .run import Region, Run
 
 
-@dataclass
-class PeakParams:
-    min_prominence: float = 0.0    # 0 => auto (5% of signal range)
-    min_height: float | None = None
-    min_distance: int = 1
-    local_baseline: bool = False   # integrate above a local drift line between each peak's bounds (off by default)
+def _trapz(y, x):
+    return float(np.trapezoid(y, x)) * 60.0          # cps × min -> counts
 
 
-def detect_peaks(y: np.ndarray, baseline: np.ndarray | None = None,
-                 params: PeakParams | None = None) -> list[Peak]:
-    p = params or PeakParams()
-    sig = np.asarray(y, dtype=float)
-    if baseline is not None:
-        sig = sig - np.asarray(baseline, dtype=float)
-    n = len(sig)
-    if n < 3:
-        return []
-    from scipy.signal import find_peaks   # 1.3 s to import; nothing needs it until a
-                                         # peak is actually detected, so keep it off startup
-    prom = p.min_prominence
-    if prom <= 0:
-        rng = float(np.nanmax(sig) - np.nanmin(sig))
-        prom = 0.05 * rng if rng > 0 else 1e-9
-    apexes, _ = find_peaks(sig, prominence=max(prom, 1e-9), height=p.min_height,
-                           distance=max(1, int(p.min_distance)))
-    if len(apexes) == 0:
-        return []
-    noise = _noise(sig)
+def limits(b_counts: float) -> tuple[float, float]:
+    """Currie's (L_D, L_Q), in counts, for a background of b_counts under the region."""
+    b = max(b_counts, 0.0)
+    return 2.71 + 4.65 * np.sqrt(b), 50.0 * (1.0 + np.sqrt(1.0 + b / 12.5))
+
+
+def sigma(b_cps: float, dt_s: float) -> float:
+    """Poisson σ of one point of a count rate b_cps measured over dt_s, in cps."""
+    return float(np.sqrt(max(b_cps, 1.0) / dt_s))
+
+
+# ---------------------------------------------------------------- placing
+def snap(x, y, t: float, k: int = 3) -> float:
+    """t moved to the lowest point of y within ±k samples: a rough drag lands in the valley."""
+    i = int(np.clip(np.searchsorted(x, t), 0, len(x) - 1))
+    lo, hi = max(0, i - k), min(len(x), i + k + 1)
+    return float(x[lo + int(np.argmin(y[lo:hi]))])
+
+
+def fit(regions, a: float, b: float, dt_min: float, skip=None):
+    """[a, b] cut back so it overlaps none of the other regions (it may share an edge), or
+    None if under two points remain. `skip`: a region not to test against (the one moved)."""
+    a, b = min(a, b), max(a, b)
+    for o in sorted(regions, key=lambda r: r.start):
+        if o is skip or o.end <= a or o.start >= b:
+            continue
+        if o.start <= a:                 # the start falls inside o: begin at its end
+            a = o.end
+        else:                            # o lies ahead: stop at its start
+            b = o.start
+    return (a, b) if b - a >= 2 * dt_min - 1e-9 else None
+
+
+def _bounds(s, apex, noise, lo, hi, w=5):
+    """Bounds of one peak (s: the trace above background): out from the apex while a w-point
+    mean of s stays 2 σ above the background — its feet — or until the valley (lowest point
+    before the neighbouring apex), where two unresolved peaks share an edge.
+    # ponytail: a fixed 2 σ foot on a 5-point mean; a slow tail past it counts as outside the
+    # region, which the results show — make w follow the peak width if tails matter."""
+    sm = np.convolve(s, np.ones(w) / w, mode="same")
+    thr = 2 * noise / np.sqrt(w)
+    left_v = lo + int(np.argmin(sm[lo:apex + 1]))
+    right_v = apex + int(np.argmin(sm[apex:hi + 1]))
+    i = apex
+    while i > left_v and sm[i - 1] > thr:
+        i -= 1
+    j = apex
+    while j < right_v and sm[j + 1] > thr:
+        j += 1
+    i, j = max(left_v, i - 1), min(right_v, j + 1)      # the foot itself
+    return (i, j) if j - i >= 2 else (max(0, apex - 1), min(len(s) - 1, apex + 1))
+
+
+def find_regions(run: Run) -> list[Region]:
+    """Regions for the peaks no region holds yet (see the module docstring)."""
+    from scipy.signal import find_peaks   # 1.3 s to import: kept off the startup path
+
+    x, y = run.x, run.trace()
+    b, _ = run.background(y)
+    s = y - b
+    noise = sigma(float(np.median(b)), run.dt_s)
+    # on a 5-point mean, 5 σ of that mean: one noisy point on a tail is not a peak
+    sm = np.convolve(s, np.ones(5) / 5, mode="same")
+    apexes, _ = find_peaks(sm, prominence=5 * noise / np.sqrt(5),
+                           distance=max(1, round(10 / run.dt_s)))
+    held = run.in_regions()
+    dtm = run.dt_s / 60.0
     out = []
     for k, a in enumerate(apexes):
-        a = int(a)
-        left, right = _peak_bounds(sig, a, noise,
-                                   lo=0 if k == 0 else int(apexes[k - 1]),
-                                   hi=n - 1 if k == len(apexes) - 1 else int(apexes[k + 1]))
-        out.append(Peak(apex=a, left=left, right=right))
+        if held[a]:
+            continue
+        lo = 0 if k == 0 else int(apexes[k - 1])
+        hi = len(s) - 1 if k == len(apexes) - 1 else int(apexes[k + 1])
+        i, j = _bounds(s, int(a), noise, lo, hi)
+        ab = fit(run.regions + out, float(x[i]), float(x[j]), dtm)
+        if ab is None:
+            continue
+        sel = (x >= ab[0]) & (x <= ab[1])
+        net, bc = _trapz(s[sel], x[sel]), _trapz(b[sel], x[sel])
+        if net > limits(bc)[0]:
+            out.append(Region(*ab))
     return out
 
 
-def _noise(sig):
-    """Robust baseline noise scale (σ) from the median absolute deviation. Most samples are
-    baseline, so this tracks the noise floor, not the peaks."""
-    med = float(np.median(sig))
-    mad = float(np.median(np.abs(sig - med)))
-    return max(1.4826 * mad, 1e-9)
+# ---------------------------------------------------------------- measuring
+@dataclass
+class Row:
+    name: str
+    start: float
+    end: float
+    named: bool = False             # typed or from the method (not "peak N (Rt)")
+    rt: float = 0.0
+    net: float = 0.0                # counts
+    unc: float = 0.0                # ± 1 σ, counts
+    pct: float | None = None        # % of total
+    pct_reg: float | None = None    # % of regions
+    height: float = 0.0             # cps above what lies under the region
+    w_half: float | None = None     # min
+    sym: float | None = None
+    rs: float | None = None
+    sn: float | None = None
+    flags: list = field(default_factory=list)
+    spikes: int = 0                 # excluded spikes inside the region
+    net_with_spikes: float | None = None   # its net counts had they been kept
 
 
-def _peak_bounds(sig, apex, noise, lo, hi, k=3.5, min_frac=0.01):
-    """Integration bounds for one peak: the valley on each side (lowest point between the apex
-    and its neighbouring apex), then the foot found by scanning **from the valley inward** to the
-    first sample rising above a foot level set a few noise-σ above the valley floor. A noise-based
-    (absolute) threshold — not a fraction of peak height — keeps sharp tall peaks from being clipped
-    and short peaks from swallowing baseline noise. Scanning inward means a noise dip on the flank
-    can't stop the bound short, so peaks span their real width."""
-    n = len(sig)
-    left_v = lo + int(np.argmin(sig[lo:apex + 1]))
-    right_v = apex + int(np.argmin(sig[apex:hi + 1]))
-    floor = max(float(sig[left_v]), float(sig[right_v]))
-    thr = floor + max(k * noise, min_frac * (float(sig[apex]) - floor))
-    left = left_v
-    while left < apex and sig[left] <= thr:
-        left += 1
-    left = max(left_v, left - 1)      # step back to include the foot itself
-    right = right_v
-    while right > apex and sig[right] <= thr:
-        right -= 1
-    right = min(right_v, right + 1)
-    if right <= left:
-        left, right = max(0, apex - 1), min(n - 1, apex + 1)
-    return left, right
+@dataclass
+class Results:
+    rows: list                      # a Row per region, in the regions' order
+    outside: float                  # net counts outside every region
+    total: float                    # net counts of the run
+    background: float               # cps (mean, for a drifting one)
+    background_how: str
+    active: bool                    # total above the run's detection limit: % make sense
 
 
-def _local_base(xs, ys):
-    """Linear drift baseline between the two peak bounds."""
-    return np.interp(xs, [xs[0], xs[-1]], [ys[0], ys[-1]])
+def _cross(s, k, level, step):
+    """Where s falls below level going from index k in direction step (±1), interpolated
+    (fractional index), or None if it never does."""
+    i = k
+    while 0 <= i + step < len(s):
+        if s[i + step] < level:
+            return i + step * (s[i] - level) / (s[i] - s[i + step])
+        i += step
+    return None
 
 
-def _skew(xs, w):
-    """Moment skewness of the mass distribution w over positions xs."""
-    tot = float(np.sum(w))
-    if tot <= 0:
-        return 0.0
-    mean = float(np.sum(xs * w) / tot)
-    var = float(np.sum(((xs - mean) ** 2) * w) / tot)
-    if var <= 0:
-        return 0.0
-    m3 = float(np.sum(((xs - mean) ** 3) * w) / tot)
-    return m3 / var ** 1.5
-
-
-def analyze_peaks(x: np.ndarray, y: np.ndarray, peaks: list[Peak],
-                  baseline: np.ndarray | None = None, local: bool = True):
-    """Fill each peak's metrics (rt, bounds, y_max, auc, skew), then pct of the group total."""
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    total = 0.0
-    for pk in peaks:
-        sl = slice(pk.left, pk.right + 1)
-        xs, ys = x[sl], y[sl]
-        pk.rt = float(x[pk.apex])
-        pk.x_start, pk.x_end = float(x[pk.left]), float(x[pk.right])
-        pk.length = pk.x_end - pk.x_start
+def measure(run: Run, method_rows=()) -> Results:
+    """Every region's row (see the module docstring). method_rows: [method, name, from, to]
+    (Options › Methods), naming the regions whose apex falls in a window of the run's method;
+    a region without a typed or method name is "peak N (Rt)"."""
+    x, y = run.x, run.trace()
+    b, how = run.background(y)
+    raw = run.trace(raw=True)
+    ex = run.excluded()
+    total = _trapz(y - b, x)
+    active = total > limits(_trapz(b, x))[0]
+    inside = run.in_regions()
+    wins = [(m[1], m[2], m[3]) for m in method_rows if run.method and m[0] == run.method]
+    dtm = run.dt_s / 60.0
+    rows, prev = [], None
+    for k, r in enumerate(run.regions):
+        sel = (x >= r.start - 1e-9) & (x <= r.end + 1e-9)
+        xs, ys = x[sel], y[sel]
+        row = Row(name=r.name or f"peak {k + 1}", start=r.start, end=r.end)
+        rows.append(row)
         if len(xs) < 2:
-            pk.y_max = float(y[pk.apex])
-            pk.auc = pk.skew = 0.0
             continue
-        if local or baseline is None:
-            base = _local_base(xs, ys)
-            base_apex = float(np.interp(x[pk.apex], [xs[0], xs[-1]], [ys[0], ys[-1]]))
-        else:
-            base = np.asarray(baseline, float)[sl]
-            base_apex = float(np.asarray(baseline, float)[pk.apex])
-        above = np.clip(ys - base, 0, None)
-        pk.y_max = float(y[pk.apex] - base_apex)
-        pk.auc = float(_trapz(above, xs))
-        pk.skew = _skew(xs, above)
-        total += pk.auc
-    for pk in peaks:
-        pk.pct = (pk.auc / total * 100.0) if total > 0 else 0.0
+        bs = (np.interp(xs, [xs[0], xs[-1]], [ys[0], ys[-1]]) if r.under == "line" else b[sel])
+        s = ys - bs
+        gross, bc = _trapz(ys, xs), _trapz(bs, xs)
+        row.net = gross - bc
+        row.unc = float(np.sqrt(max(gross + bc, 0.0)))
+        top = int(np.argmax(s))
+        row.rt, row.height = float(xs[top]), float(s[top])
+        lh, rh = _cross(s, top, row.height / 2, -1), _cross(s, top, row.height / 2, 1)
+        if lh is not None and rh is not None:
+            row.w_half = (rh - lh) * dtm
+        l5, r5 = _cross(s, top, row.height * 0.05, -1), _cross(s, top, row.height * 0.05, 1)
+        if l5 is not None and r5 is not None and top > l5:
+            row.sym = (r5 - l5) / (2 * (top - l5))
+        if row.w_half:
+            win = (x >= r.start - 5 * row.w_half) & (x <= r.end + 5 * row.w_half) & ~inside
+            if win.sum() >= 5 and np.ptp(y[win]) > 0:
+                row.sn = 2 * row.height / float(np.ptp(y[win]))
+            if prev is not None and prev.w_half:
+                row.rs = 1.18 * (row.rt - prev.rt) / (row.w_half + prev.w_half)
+        ld, lq = limits(bc)
+        row.flags = ([r.how] if r.how != "auto" else []) + \
+            (["n.d."] if row.net < ld else ["< LOQ"] if row.net < lq else [])
+        row.spikes = int((ex & sel).sum())
+        if row.spikes:
+            row.flags.append("spike excluded")
+            row.net_with_spikes = _trapz(raw[sel], xs) - bc
+        hit = next((n for n, lo, hi in wins if lo <= row.rt <= hi), None)
+        row.name = r.name or hit or f"peak {k + 1} ({row.rt:.2f} min)"
+        row.named = bool(r.name or hit)
+        prev = row
+    found = sum(r.net for r in rows if "n.d." not in r.flags and r.net > 0)
+    for r in rows:
+        if active and "n.d." not in r.flags:
+            r.pct = 100 * r.net / total
+            r.pct_reg = 100 * r.net / found if found > 0 else None
+    return Results(rows, total - sum(r.net for r in rows), total, float(np.mean(b)), how, active)
 
 
 def _self_check():
-    x = np.arange(1000) / 60.0
-    y = 5.0 + np.zeros(1000)
-    for c in (200, 500, 800):
-        y += 100.0 * np.exp(-0.5 * ((np.arange(1000) - c) / 8.0) ** 2)
-    pks = detect_peaks(y)
-    assert len(pks) == 3, len(pks)
-    analyze_peaks(x, y, pks)
-    assert all(pk.auc > 0 for pk in pks), [pk.auc for pk in pks]
-    assert abs(sum(pk.pct for pk in pks) - 100.0) < 1e-6, sum(pk.pct for pk in pks)
-    assert abs(pks[0].rt - 200 / 60.0) < 0.1, pks[0].rt
-    # bounds must hug the peak, not the truncated tip: sigma=8, so a real peak spans well
-    # over ±2 sigma (~32 samples). Guards the "peaks too narrow" regression.
-    assert all((pk.right - pk.left) >= 24 for pk in pks), [(pk.right - pk.left) for pk in pks]
+    rng = np.random.default_rng(3)
+    n, bg = 900, 7.0
+    t = np.arange(n, dtype=float)                       # s, 1 Hz
+    lam = bg + 1200 * np.exp(-0.5 * ((t - 480) / 6) ** 2) + 30 * np.exp(-0.5 * ((t - 150) / 5) ** 2)
+    y = rng.poisson(lam).astype(float)
+    y[300] += 2500                                      # a spike on the background
+    y[478] += 4000                                      # and one on the big peak
+    run = Run(x=t / 60, y=y, dt_s=1.0)
+    run.detect_spikes()
+    assert run.spike_list() == [300, 478], run.spike_list()
+    true_big = 1200 * 6 * np.sqrt(2 * np.pi)            # counts of each Gaussian
+    true_small = 30 * 5 * np.sqrt(2 * np.pi)
+
+    run.regions = find_regions(run)
+    assert len(run.regions) == 2, [(r.start, r.end) for r in run.regions]
+    res = measure(run)
+    small, big = res.rows
+    assert abs(big.rt - 8.0) < 0.05 and abs(small.rt - 2.5) < 0.05, (small.rt, big.rt)
+    assert abs(big.net - true_big) < 3 * big.unc + 0.01 * true_big, (big.net, true_big)
+    assert abs(small.net - true_small) < 3 * small.unc + 40, (small.net, true_small)
+    assert abs(res.background - bg) < 0.5, res.background
+    assert abs(sum(r.pct for r in res.rows) + 100 * res.outside / res.total - 100) < 1e-9
+    assert abs(big.w_half - 2.3548 * 6 / 60) < 0.02, big.w_half     # FWHM of a Gaussian
+    assert 0.8 < big.sym < 1.25, big.sym                              # symmetric
+    assert big.rs > 10 and big.sn > 100, (big.rs, big.sn)
+    assert big.spikes == 1 and big.net_with_spikes > big.net + 1000, big.net_with_spikes
+    assert small.flags == [] and "spike excluded" in big.flags, (small.flags, big.flags)
+
+    # a spike put back is back in the trace
+    run.kept = [478]
+    assert run.trace()[478] == y[478]
+    run.kept = []
+
+    # names: typed, then the method's window, then "peak N (Rt)"
+    run.method = "M"
+    rows = [["M", "product", 7.5, 8.5], ["other", "x", 2, 3]]
+    name = measure(run, rows).rows[0].name
+    assert name == f"peak 1 ({small.rt:.2f} min)", name
+    assert measure(run, rows).rows[1].name == "product"
+    run.regions[0].name = "free"
+    assert measure(run, rows).rows[0].name == "free"
+
+    # placing by hand: snap to the valley, never overlap, share an edge
+    xm = run.x
+    assert snap(xm, run.trace(), xm[455] + 0.001, k=3) in xm[452:459]
+    r0, r1 = run.regions
+    assert fit(run.regions, r0.start + 0.01, r1.start + 0.05, 1 / 60) == (r0.end, r1.start)
+    assert fit(run.regions, r1.start + 0.01, r1.end - 0.01, 1 / 60) is None   # inside one
+
+    # a drawn region on noise alone is not detected; a blank has no %
+    run.regions.append(Region(12.0, 12.3, how="drawn"))
+    noise_row = measure(run).rows[-1]
+    assert "n.d." in noise_row.flags and noise_row.pct is None, noise_row
+    blank = Run(x=t / 60, y=rng.poisson(bg, n).astype(float), dt_s=1.0)
+    blank.detect_spikes()
+    assert find_regions(blank) == [] and not measure(blank).active
+
+    # a region with a straight line under it
+    run.regions = [Region(7.5, 8.5, under="line")]
+    assert abs(measure(run).rows[0].net - true_big) < 0.05 * true_big
     print("peaks self-check OK")
 
 

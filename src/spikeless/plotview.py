@@ -1,9 +1,9 @@
-"""Image-style zoom/pan view for the plot — rendered as a VECTOR (SVG), no dependency.
+"""Image-style zoom/pan view for the figure preview — rendered as a VECTOR (SVG), no dependency.
 
 The matplotlib figure is exported to SVG and shown in a QGraphicsView via QGraphicsSvgItem,
 so it stays crisp at any zoom. The whole picture (plot, labels, ticks) zooms/pans as one
 image — the mouse **wheel zooms centred on the cursor**, drag with any mouse button pans,
-double-click fits to the window. Files dropped here are loaded.
+double-click fits to the window.
 
 Behind the (possibly semi-transparent) figure sits a selectable app backdrop — a checker whose
 cell is a real **plot dimension** (default 1 mm), so it scales with the plot as you zoom and
@@ -21,7 +21,6 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
 from PySide6.QtWidgets import QGraphicsItem, QGraphicsScene, QGraphicsView
 
-OPENS = (".txt", ".spikeless")   # what a drop opens: GINA exports, session files
 _PT_PER_MM = 72.0 / 25.4  # matplotlib SVG is 72 dpi, so scene units are points; mm -> points
 
 
@@ -38,7 +37,6 @@ class Background:
 
 class ZoomableFigureView(QGraphicsView):
     resized = Signal()
-    filesDropped = Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,7 +58,6 @@ class ZoomableFigureView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setMouseTracking(True)
-        self.setAcceptDrops(True)
 
     # ---------------- public API ----------------
     def set_background(self, bg: Background):
@@ -160,7 +157,7 @@ class ZoomableFigureView(QGraphicsView):
         painter.resetTransform()
         painter.setPen(QColor("#909090"))
         painter.drawText(self.viewport().rect(), Qt.AlignCenter,
-                         "Load a GINA .txt to begin\n(drag it here or use Browse…)")
+                         "Nothing loaded")
         painter.restore()
 
     # ---------------- interaction ----------------
@@ -203,19 +200,3 @@ class ZoomableFigureView(QGraphicsView):
         if not self._zoomed:
             self._fit()
         self.resized.emit()
-
-    # ---------------- drag & drop ----------------
-    def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(OPENS)
-                                          for u in e.mimeData().urls()):
-            e.acceptProposedAction()
-
-    def dragMoveEvent(self, e):
-        e.acceptProposedAction()
-
-    def dropEvent(self, e):
-        paths = [u.toLocalFile() for u in e.mimeData().urls()
-                 if u.toLocalFile().lower().endswith(OPENS)]
-        if paths:
-            self.filesDropped.emit(paths)
-            e.acceptProposedAction()

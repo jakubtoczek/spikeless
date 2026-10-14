@@ -4,7 +4,7 @@ Two layouts, told apart automatically:
 - shared time: column 1 is time, every column after it is one run's count rate (cps);
 - paired: time1, value1, time2, value2, … — recognised when the count of columns is even
   and every second one rises like a time axis, which a count-rate column never does.
-Either way each value column becomes its own Dataset, so one paste can load several runs
+Either way each value column becomes its own run, so one paste can load several runs
 of unequal length (blank cells are simply dropped from that pair).
 
 Separator may be tab, semicolon or any whitespace; decimal comma is accepted; non-numeric
@@ -21,7 +21,7 @@ from collections import Counter
 
 import numpy as np
 
-from .dataset import Curve, Dataset, Meta
+from .run import COLORS, Run, new_run
 
 # integer / decimal / scientific, with '.' or ',' as the decimal mark
 _NUM_RE = re.compile(r"^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:[eE][+-]?\d+)?$")
@@ -93,8 +93,8 @@ def _is_paired(grid, ncols: int) -> bool:
     return True
 
 
-def load_text(text: str, name: str = "Clipboard") -> tuple[list[Dataset], list[str]]:
-    """Build one Dataset per value column of pasted text.
+def load_text(text: str, name: str = "Clipboard") -> tuple[list[Run], list[str]]:
+    """Build one Run per value column of pasted text.
     Returns (datasets, warnings). Raises ValueError on unusable input."""
     grid, titles = _table(text)
     if len(grid) < 3:
@@ -106,7 +106,7 @@ def load_text(text: str, name: str = "Clipboard") -> tuple[list[Dataset], list[s
     cols = ([(j, j + 1) for j in range(0, ncols, 2)] if paired
             else [(0, j) for j in range(1, ncols)])
 
-    out: list[Dataset] = []
+    out: list[Run] = []
     warnings: list[str] = []
     units: list[str] = []
     ragged: list[str] = []
@@ -137,15 +137,9 @@ def load_text(text: str, name: str = "Clipboard") -> tuple[list[Dataset], list[s
         if float(np.nanmax(y)) == 0:
             zeros.append(label)
 
-        root = Curve(x=x / 60.0 if in_seconds else x, y=y, name="original", kind="original",
-                     legend_label=label)
-        out.append(Dataset(
-            root=root,
-            run_name=label,
-            dt_s=dt if in_seconds else dt * 60.0,
-            signal_col=yi,
-            meta=Meta(name=label, original_filename="(clipboard)"),
-        ))
+        out.append(new_run(x / 60.0 if in_seconds else x, y, dt if in_seconds else dt * 60.0,
+                           name=label, file="(clipboard)", signal_col=yi,
+                           color=COLORS[len(out) % len(COLORS)]))
 
     if not out:
         raise ValueError("No usable time/value column pair on the clipboard — the first column "
@@ -172,19 +166,19 @@ def _self_check():
     prism = nl.join(f"{v}{tab}{c}" for v, c in
                     ((0, 7), (0.017, 8), (0.033, 4), (0.05, 4), (0.067, 8), (14.983, 0))) + nl
     (ds,), w = load_text(prism)
-    assert len(ds.root.y) == 6, len(ds.root.y)
-    assert abs(ds.root.x[1] - 0.017) < 1e-12, ds.root.x[1]      # already minutes, untouched
+    assert len(ds.y) == 6, len(ds.y)
+    assert abs(ds.x[1] - 0.017) < 1e-12, ds.x[1]      # already minutes, untouched
     assert abs(ds.dt_s - 0.017 * 60) < 1e-9, ds.dt_s
-    assert ds.meta.name == "Clipboard", ds.meta.name
+    assert ds.name == "Clipboard", ds.name
     assert any("minutes" in s for s in w), w
 
     # same run in seconds, with a header row and decimal commas (French Excel)
     (ds2,), w2 = load_text("Temps;Coups\n0;7\n1,0;8\n2,0;4,5\n3,0;4\n")
-    assert len(ds2.root.y) == 4, len(ds2.root.y)
-    assert abs(ds2.root.x[1] - 1 / 60) < 1e-12, ds2.root.x[1]   # converted to minutes
-    assert abs(ds2.root.y[2] - 4.5) < 1e-12, ds2.root.y[2]
+    assert len(ds2.y) == 4, len(ds2.y)
+    assert abs(ds2.x[1] - 1 / 60) < 1e-12, ds2.x[1]   # converted to minutes
+    assert abs(ds2.y[2] - 4.5) < 1e-12, ds2.y[2]
     assert abs(ds2.dt_s - 1.0) < 1e-9, ds2.dt_s
-    assert ds2.meta.name == "Coups", ds2.meta.name              # column title beats the fallback
+    assert ds2.name == "Coups", ds2.name              # column title beats the fallback
     assert any("seconds" in s for s in w2), w2
 
     # shared time axis: 4 columns -> 3 datasets, named by their titles. 'treated' rises over
@@ -194,9 +188,9 @@ def _self_check():
         ("0", "5", "50", "0"), ("0.5", "6", "63", "0"),
         ("1", "7", "70", "0"), ("1.5", "8", "94", "0"))) + nl
     dss, w3 = load_text(multi)
-    assert [d.meta.name for d in dss] == ["ctrl", "treated", "blank"], [d.meta.name for d in dss]
-    assert list(dss[1].root.y) == [50.0, 63.0, 70.0, 94.0], dss[1].root.y
-    assert all(list(d.root.x) == list(dss[0].root.x) for d in dss), "time axis not shared"
+    assert [d.name for d in dss] == ["ctrl", "treated", "blank"], [d.name for d in dss]
+    assert list(dss[1].y) == [50.0, 63.0, 70.0, 94.0], dss[1].y
+    assert all(list(d.x) == list(dss[0].x) for d in dss), "time axis not shared"
     assert any("shared time axis" in s and "3 datasets" in s for s in w3), w3
     assert any("All zeros: blank" in s for s in w3), w3
 
@@ -206,13 +200,13 @@ def _self_check():
         ("0", "5", "0", "90"), ("0.1", "6", "30", "80"), ("0.2", "7", "60", "70"),
         ("0.3", "8", "90", "60"), ("0.4", "9", "", ""))) + nl
     dsp, w4 = load_text(pairs)
-    assert [d.meta.name for d in dsp] == ["runA", "runB"], [d.meta.name for d in dsp]
-    assert len(dsp[0].root.y) == 5 and len(dsp[1].root.y) == 4, \
-        (len(dsp[0].root.y), len(dsp[1].root.y))                # the blank tail is dropped
+    assert [d.name for d in dsp] == ["runA", "runB"], [d.name for d in dsp]
+    assert len(dsp[0].y) == 5 and len(dsp[1].y) == 4, \
+        (len(dsp[0].y), len(dsp[1].y))                # the blank tail is dropped
     assert abs(dsp[0].dt_s - 6.0) < 1e-9, dsp[0].dt_s            # 0.1 min spacing, read as minutes
     assert abs(dsp[1].dt_s - 30.0) < 1e-9, dsp[1].dt_s           # 30 s spacing, read as seconds
-    assert abs(dsp[0].root.x[-1] - 0.4) < 1e-12, dsp[0].root.x[-1]
-    assert abs(dsp[1].root.x[-1] - 1.5) < 1e-12, dsp[1].root.x[-1]
+    assert abs(dsp[0].x[-1] - 0.4) < 1e-12, dsp[0].x[-1]
+    assert abs(dsp[1].x[-1] - 1.5) < 1e-12, dsp[1].x[-1]
     assert any("time/value pairs" in s for s in w4), w4
     assert any("minutes" in s and "seconds" in s for s in w4), w4   # both units reported
 
@@ -224,22 +218,22 @@ def _self_check():
 
     # untitled columns fall back to their position
     dss4, _ = load_text("0 1 10\n1 2 20\n2 3 30\n", name="Clipboard 7")
-    assert [d.meta.name for d in dss4] == ["Clipboard 7 col 2", "Clipboard 7 col 3"], \
-        [d.meta.name for d in dss4]
+    assert [d.name for d in dss4] == ["Clipboard 7 col 2", "Clipboard 7 col 3"], \
+        [d.name for d in dss4]
 
     # a long run in minutes must not be mistaken for seconds
     (ds5,), _ = load_text("".join(f"{i * 0.1:g} {i}\n" for i in range(300)))
     assert abs(ds5.dt_s - 6.0) < 1e-9, ds5.dt_s                 # 0.1 min spacing
-    assert abs(ds5.root.x[-1] - 29.9) < 1e-9, ds5.root.x[-1]
+    assert abs(ds5.x[-1] - 29.9) < 1e-9, ds5.x[-1]
 
     # one stray wide line must not turn the whole paste into a 3-column table
     dss6, _ = load_text("0 5\n1 6\n2 7 99\n3 8\n4 9\n")
-    assert len(dss6) == 1, [d.meta.name for d in dss6]
-    assert list(dss6[0].root.y) == [5.0, 6.0, 7.0, 8.0, 9.0], dss6[0].root.y
+    assert len(dss6) == 1, [d.name for d in dss6]
+    assert list(dss6[0].y) == [5.0, 6.0, 7.0, 8.0, 9.0], dss6[0].y
 
     # junk lines between rows are skipped
     dss7, _ = load_text("X Y\n0 5\nrubbish\n1 6\n2 7\n\n")
-    assert len(dss7[0].root.y) == 3, len(dss7[0].root.y)
+    assert len(dss7[0].y) == 3, len(dss7[0].y)
 
     for bad in ("", "hello\nworld\n", "only-one-column\n1\n2\n3\n", "0 1\n0 2\n1 3\n"):
         try:

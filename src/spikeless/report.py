@@ -1,9 +1,10 @@
-"""Spikeless - the report: what was loaded, what was done to it, the peak tables, the plot.
+"""Spikeless - the report: what was loaded, what was done to it, the results, the figure.
 
 One HTML text, built from the session as it stands, is both the preview and every format:
-PDF and .odt are Qt's print of it, .md Qt's markdown of it, .html it with the plot inlined;
-the workbook takes the same tables, a sheet each. The Report window picks the format and
-the sections, saved with the options the moment they change.
+PDF and .odt are Qt's print of it, .md Qt's markdown of it, .html it with the figure inlined;
+the workbook takes the same tables, a sheet each. The Report window picks the format, the
+sections and the results' columns (the results table under the plot shows the same columns),
+saved with the options the moment they change.
 """
 
 from __future__ import annotations
@@ -25,112 +26,163 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .options import PREFS, save_prefs
 
-# Peak-table columns (key, header, value(i, pk)): the same spec drives the report, the
-# workbook and the peak exports, so what is shown is what is written.
-PEAK_COLUMNS = [
-    ("num", "#", lambda i, pk: str(i)),
-    ("name", "Peak", lambda i, pk: pk.name or f"peak {i}"),
-    ("rt", "Rt (min)", lambda i, pk: f"{pk.rt:.2f}"),
-    ("x_start", "x start", lambda i, pk: f"{pk.x_start:.2f}"),
-    ("x_end", "x end", lambda i, pk: f"{pk.x_end:.2f}"),
-    ("width", "width", lambda i, pk: f"{pk.length:.2f}"),
-    ("y_max", "y max", lambda i, pk: f"{pk.y_max:.0f}"),
-    ("auc", "AUC", lambda i, pk: f"{pk.auc:.1f}"),
-    ("pct", "%", lambda i, pk: f"{pk.pct:.1f}"),
-    ("skew", "skew", lambda i, pk: f"{pk.skew:.2f}"),
+
+def _n(v, fmt):
+    return "" if v is None else format(v, fmt)
+
+
+def _pct(row, key):
+    v = getattr(row, key)
+    return "n.d." if "n.d." in row.flags else _n(v, ".1f")
+
+
+# The results' columns (key, header, value(row)): the same spec drives the table under the
+# plot, the report and the workbook, so what is shown is what is written.
+COLUMNS = [
+    ("name", "Region", lambda r: r.name),
+    ("start", "Start (min)", lambda r: f"{r.start:.2f}"),
+    ("end", "End (min)", lambda r: f"{r.end:.2f}"),
+    ("rt", "Rt (min)", lambda r: f"{r.rt:.2f}"),
+    ("net", "Net counts", lambda r: f"{r.net:.0f}"),
+    ("unc", "± counts", lambda r: f"{r.unc:.0f}"),
+    ("pct", "% of total", lambda r: _pct(r, "pct")),
+    ("pct_reg", "% of regions", lambda r: _pct(r, "pct_reg")),
+    ("height", "Height (cps)", lambda r: f"{r.height:.0f}"),
+    ("w_half", "w½ (min)", lambda r: _n(r.w_half, ".3f")),
+    ("sym", "Symmetry", lambda r: _n(r.sym, ".2f")),
+    ("rs", "Resolution", lambda r: _n(r.rs, ".1f")),
+    ("sn", "S/N", lambda r: _n(r.sn, ".0f")),
+    ("flags", "Flags", lambda r: ", ".join(r.flags)),
 ]
-SECTIONS = [("plot", "Plot", "The figure, as Export writes it"),
-            ("datasets", "Datasets", "File, run date, molecule, radioisotope, conditions"),
-            ("curves", "Curves", "Each curve, and how it, its spikes, baseline and peaks "
-                                 "were made"),
-            ("spikes", "Spikes", "Time and height of each spike found"),
-            ("peaks", "Peak tables", "One per curve with peaks, with the columns ticked")]
+HELP = {"pct": "% of all the net counts of the run (Ph. Eur.: radiochemical purity)",
+        "pct_reg": "% of the regions' net counts",
+        "unc": "1 σ, counting statistics: √(gross + background counts)",
+        "w_half": "width at half height", "sym": "symmetry factor w₀.₀₅ / 2d (Ph. Eur. 2.2.46)",
+        "rs": "resolution from the region before (Ph. Eur. 2.2.46)",
+        "sn": "2H / h, h the range of the background around the region (Ph. Eur. 2.2.46)",
+        "flags": "drawn / moved / copied: placed by hand · < LOQ: below the quantification "
+                 "limit · n.d.: below the detection limit (Currie) · spike excluded: a spike "
+                 "inside the region was excluded"}
+SECTIONS = [("plot", "Figure", "As Copy / Export make it (Figure window)"),
+            ("runs", "Runs", "File and its SHA-256, run date, isotope, molecule, method, "
+                             "conditions"),
+            ("processing", "Processing", "Spikes excluded, background, decay correction"),
+            ("spikes", "Spikes", "Each spike: time, as recorded, as bridged, in which region"),
+            ("results", "Results", "A row per region, outside the regions, total — in the "
+                                   "columns ticked")]
 FORMATS = [(".pdf", "PDF"), (".odt", "Document (.odt) — opens in Word and LibreOffice"),
            (".xlsx", "Excel workbook — a sheet per table"), (".md", "Markdown text"),
            (".html", "Web page")]
-PLOT = "plot.png"                      # the plot's name inside the report
-_NORM = {"pct_max": "% of max", "pct_total": "% of total"}
+PLOT = "plot.png"                      # the figure's name inside the report
+LEGEND = ("Net counts above the background (or a straight line between a region's ends), "
+          "± 1 σ counting statistics; % of total = of all the net counts of the run. "
+          "Flags: drawn / moved / copied = placed by hand; < LOQ = below the quantification "
+          "limit, n.d. = below the detection limit (Currie 1968); spike excluded = a spike "
+          "inside the region was excluded.")
 
 
-def peak_rows(cv):
-    """Header + value rows of cv's peaks, in the columns ticked for the report."""
-    cols = [(h, f) for k, h, f in PEAK_COLUMNS if PREFS["report_cols"].get(k)]
-    return (tuple(h for h, _ in cols),
-            [tuple(f(i, pk) for _, f in cols) for i, pk in enumerate(cv.peaks or [], 1)])
+def columns():
+    """The Region column, always (it names the row), then the ones ticked."""
+    return [(k, h, f) for k, h, f in COLUMNS if k == "name" or PREFS["report_cols"].get(k)]
 
 
-def curve_paths(ds):
-    """(curve, its name after its ancestors': original › spikeless), in tree order."""
-    def walk(c, trail):
-        name = f"{trail} › {c.name}" if trail else c.name
-        yield c, name
-        for ch in c.children:
-            yield from walk(ch, name)
-    return list(walk(ds.root, ""))
+def rows(res):
+    """The ticked columns of each region, then outside the regions and total."""
+    cols = columns()
+    body = [[f(r) for _, _, f in cols] for r in res.rows]
+    extra = []
+    for name, net, pct in (("Outside the regions", res.outside,
+                            100 * res.outside / res.total if res.active else None),
+                           ("Total", res.total, 100.0 if res.active else None)):
+        extra.append([name if k == "name" else f"{net:.0f}" if k == "net" else
+                      _n(pct, ".1f") if k == "pct" else "" for k, _, _ in cols])
+    return [h for _, h, _ in cols], body, extra
 
 
-def curve_lines(ds, cv) -> list[str]:
-    """What the curve is, and how it and its parts were made: a sentence each."""
-    how = cv.how
-    if cv.kind == "original":
-        out = [f"As loaded: {len(cv.y)} points, one every {ds.dt_s:g} s, "
-               f"{cv.x[0]:.2f}–{cv.x[-1]:.2f} min."]
-    else:
-        out = [f"Made by: {how.get('curve') or cv.kind}."]
-    if cv.has_spikes:
-        out.append(f"Spikes: {len(cv.spike_indices())} found"
-                   + (f" — {how['spikes']}" if how.get("spikes") else "") + ".")
-    if cv.baseline is not None:
-        out.append(f"Baseline: {how.get('baseline') or 'detected'}.")
-    if cv.peaks:
-        out.append(f"Peaks: {len(cv.peaks)}"
-                   + (f" — {how['peaks']}" if how.get("peaks") else "") + ".")
-    if cv.adjust.norm_mode in _NORM:
-        out.append(f"Shown as {_NORM[cv.adjust.norm_mode]}.")
+def spike_rows(run, res):
+    """Each flagged point: time, as recorded, as bridged, region, excluded or kept."""
+    from .spikes import remove
+    clean = remove(run.y, run.excluded())          # before any decay correction, like y
+    names = [(r.start, r.end, row.name) for r, row in zip(run.regions, res.rows)]
+    out = []
+    for i in run.spike_list():
+        t = float(run.x[i])
+        where = next((n for a, b, n in names if a <= t <= b), "")
+        out.append([f"{t:.2f}", f"{run.y[i]:.0f}",
+                    f"{clean[i]:.0f}" if i not in run.kept else "—", where,
+                    "kept (by hand)" if i in run.kept else "excluded"])
     return out
 
 
-def _table(head, rows, border=1) -> str:
+def processing(run, res) -> list[str]:
+    """What was done to the run, a sentence each."""
+    p = run.spike_params
+    n = int(run.excluded().sum())
+    out = [f"Spikes: {n} excluded"
+           + (f", {len(run.kept)} flagged and kept by hand" if run.kept else "")
+           + f" — Hampel filter, {p.window}-point window, {p.n_sigma:g} σ, at most "
+           f"{p.max_width} point(s) wide, clear of both neighbours; each excluded point "
+           "bridged linearly between its neighbours."]
+    for row in res.rows:
+        if row.spikes:
+            d = row.net_with_spikes - row.net
+            out.append(f"{row.name}: {row.net:.0f} counts; with its excluded spike(s) kept, "
+                       f"{row.net_with_spikes:.0f} ({100 * d / row.net:+.1f} %)."
+                       if row.net else f"{row.name}: spike(s) excluded.")
+    out.append(f"Background: {res.background:.2f} cps — {res.background_how}.")
+    out.append(f"Decay: corrected to the run start ({run.isotope}, half-life "
+               f"{run.half_life_s() / 3600:g} h)." if run.decayed() else
+               "Decay: not corrected.")
+    if not res.active:
+        out.append("No activity above background: the run's net counts are below its "
+                   "detection limit, so no % is given.")
+    return out
+
+
+def run_info(run) -> list[tuple[str, str]]:
+    return [(k, v) for k, v in (
+        ("File", run.file), ("SHA-256", run.sha256), ("Run", run.run_datetime),
+        ("Points", f"{len(run.y)}, one every {run.dt_s:g} s, {run.x[-1]:.2f} min"),
+        ("Isotope", run.isotope), ("Molecule", run.molecule), ("Method", run.method),
+        ("Conditions", "; ".join(c for c in run.conditions.splitlines() if c.strip())))
+        if v]
+
+
+def _table(head, body, border=1) -> str:
     h = "<tr>" + "".join(f"<th>{esc(c)}</th>" for c in head) + "</tr>" if head else ""
     return (f"<table border='{border}' cellspacing='0' cellpadding='3'>{h}"
             + "".join("<tr>" + "".join(f"<td>{esc(str(c))}</td>" for c in r) + "</tr>"
-                      for r in rows) + "</table>")
+                      for r in body) + "</table>")
 
 
-def _spike_rows(cv):
-    return [(str(i), f"{cv.x[k]:.2f}", f"{cv.y[k]:.0f}")
-            for i, k in enumerate(cv.spike_indices(), 1)]
-
-
-def html(datasets, plot_width_px: int | None = None) -> str:
-    """The report as HTML. With plot_width_px, the plot is the image named PLOT."""
+def html(main, plot_width_px: int | None = None) -> str:
+    """The report as HTML. With plot_width_px, the figure is the image named PLOT."""
     on = PREFS["report_sections"]
     out = ["<h1>Radio-HPLC report</h1>",
            f"<p>{_dt.datetime.now():%Y-%m-%d %H:%M} · Spikeless {__version__}</p>"]
-    if not datasets:
+    if not main.runs:
         out.append("<p>Nothing loaded.</p>")
-    if on["plot"] and plot_width_px and datasets:
+    if on["plot"] and plot_width_px and main.runs:
         out.append(f"<p><img src='{PLOT}' width='{plot_width_px}'></p>")
-    for ds in datasets:
-        out.append(f"<h2>{esc(ds.meta.name)}</h2>")
-        if on["datasets"]:
-            rows = [(k, v) for k, v in (("File", ds.meta.original_filename),
-                                        ("Run", ds.run_datetime), ("Molecule", ds.meta.molecule),
-                                        ("Radioisotope", ds.meta.radioisotope)) if v]
-            out.append(_table(None, rows + [("Condition", c.text()) for c in ds.conditions],
-                              border=0))
-        for cv, path in curve_paths(ds):
-            parts = []
-            if on["curves"]:
-                parts.append("<p>" + "<br>".join(esc(s) for s in curve_lines(ds, cv)) + "</p>")
-            if on["spikes"] and cv.has_spikes:
-                parts.append(_table(("Spike", "Time (min)", "Height (cps)"), _spike_rows(cv)))
-            if on["peaks"] and cv.peaks:
-                head, rows = peak_rows(cv)
-                if head:
-                    parts.append(_table(head, rows))
-            if parts:
-                out.append(f"<h3>{esc(path)}</h3>" + "".join(parts))
+    for run in main.runs:
+        res = main.results[run.id]
+        out.append(f"<h2>{esc(run.name)}</h2>")
+        if on["runs"]:
+            out.append(_table(None, run_info(run), border=0))
+        if on["processing"]:
+            out.append("<p>" + "<br>".join(esc(s) for s in processing(run, res)) + "</p>")
+        if on["spikes"] and run.spike_list():
+            out.append(_table(("Time (min)", "Recorded (cps)", "Bridged (cps)", "Region",
+                               "Status"), spike_rows(run, res)))
+        if on["results"]:
+            head, body, extra = rows(res)
+            if head:
+                out.append("<h3>Results</h3>" + _table(head, body + extra))
+            notes = [f"{row.name}: {r.note}" for r, row in zip(run.regions, res.rows) if r.note]
+            if notes:
+                out.append("<p>" + "<br>".join(esc(s) for s in notes) + "</p>")
+    if on["results"] and main.runs:
+        out.append(f"<p><small>{esc(LEGEND)}</small></p>")
     return "".join(out)
 
 
@@ -142,63 +194,49 @@ def num(v):
         return v
 
 
-def sheet_name(name, used):
-    """A valid, unique (<=31 char) Excel sheet name."""
-    s = "".join(c for c in str(name) if c not in '[]:*?/\\')[:31] or "Sheet"
-    base, i = s, 1
-    while s in used:
-        suffix = f"_{i}"
-        s = base[:31 - len(suffix)] + suffix
-        i += 1
-    used.add(s)
-    return s
-
-
-def to_xlsx(datasets, path, png: bytes | None = None, width_px: int | None = None) -> None:
-    """The report as a workbook: the datasets and curves on one sheet, the spikes on one,
-    each peak table on its own, the plot on its own."""
+def to_xlsx(main, path, png: bytes | None = None, width_px: int | None = None) -> None:
+    """The report as a workbook: runs and processing on one sheet, the results of every run on
+    one, the spikes on one, the figure on its own."""
     from openpyxl import Workbook
 
     on = PREFS["report_sections"]
     wb = Workbook()
     ws = wb.active
     ws.title = "Report"
-    used = {"Report"}
     ws.append(["Radio-HPLC report", f"{_dt.datetime.now():%Y-%m-%d %H:%M}",
                f"Spikeless {__version__}"])
-    if on["datasets"] or on["curves"]:
+    for run in main.runs:
+        res = main.results[run.id]
         ws.append([])
-        ws.append(["Dataset"] + (["File", "Run", "Molecule", "Radioisotope", "Conditions"]
-                                 if on["datasets"] else []) + (["Curve", "About"]
-                                                                if on["curves"] else []))
-        for ds in datasets:
-            info = [ds.meta.original_filename, ds.run_datetime, ds.meta.molecule,
-                    ds.meta.radioisotope, "; ".join(c.text() for c in ds.conditions)]
-            for cv, p in (curve_paths(ds) if on["curves"] else [(None, None)]):
-                ws.append([ds.meta.name] + (info if on["datasets"] else [])
-                          + ([p, " ".join(curve_lines(ds, cv))] if cv else []))
+        ws.append([run.name])
+        if on["runs"]:
+            for k, v in run_info(run):
+                ws.append([k, v])
+        if on["processing"]:
+            for s in processing(run, res):
+                ws.append([s])
+    if on["results"] and columns():
+        rs = wb.create_sheet("Results")
+        head = [h for _, h, _ in columns()]
+        rs.append(["Run"] + head)
+        for run in main.runs:
+            _, body, extra = rows(main.results[run.id])
+            for r in body + extra:
+                rs.append([run.name] + [num(c) for c in r])
+        rs.append([])
+        rs.append([LEGEND])
     if on["spikes"]:
-        sp = wb.create_sheet(sheet_name("Spikes", used))
-        sp.append(["Dataset", "Curve", "Spike", "Time (min)", "Height (cps)"])
-        for ds in datasets:
-            for cv, p in curve_paths(ds):
-                for r in (_spike_rows(cv) if cv.has_spikes else []):
-                    sp.append([ds.meta.name, p] + [num(c) for c in r])
-    if on["peaks"]:
-        for ds in datasets:
-            for cv, p in curve_paths(ds):
-                head, rows = peak_rows(cv)
-                if cv.peaks and head:
-                    pk = wb.create_sheet(sheet_name(cv.name, used))
-                    pk.append([f"{ds.meta.name} — {p}"])
-                    pk.append(list(head))
-                    for r in rows:
-                        pk.append([num(c) for c in r])
+        sp = wb.create_sheet("Spikes")
+        sp.append(["Run", "Time (min)", "Recorded (cps)", "Bridged (cps)", "Region",
+                   "Status"])
+        for run in main.runs:
+            for r in spike_rows(run, main.results[run.id]):
+                sp.append([run.name] + [num(c) for c in r])
     if on["plot"] and png:
         from openpyxl.drawing.image import Image as XLImage
         img = XLImage(BytesIO(png))
         img.height, img.width = round(img.height * width_px / img.width), width_px
-        wb.create_sheet(sheet_name("Plot", used)).add_image(img, "A1")
+        wb.create_sheet("Figure").add_image(img, "A1")
     wb.save(path)
 
 
@@ -211,7 +249,7 @@ def png_bytes(img) -> bytes:
 
 
 class ReportWindow(QMainWindow):
-    """Pick the format and the sections, see the report, save it as one file."""
+    """Pick the format, the sections and the results' columns, see the report, save it."""
 
     def __init__(self, main):
         super().__init__(main)
@@ -232,12 +270,13 @@ class ReportWindow(QMainWindow):
         v.addWidget(QLabel("<b>Sections</b>"))
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
-        self.tree.setToolTip("Tick what goes in; the peak tables' columns are under them")
+        self.tree.setToolTip("Tick what goes in; the results' columns are under Results (the "
+                             "table under the plot shows the same)")
         self.tree.itemChanged.connect(self._ticked)
         v.addWidget(self.tree, 1)
         h = QHBoxLayout()
         b = QPushButton("Copy")
-        b.setToolTip("The report's text and tables, to paste into a document (the plot has "
+        b.setToolTip("The report's text and tables, to paste into a document (the figure has "
                      "its own Copy)")
         b.clicked.connect(self.copy)
         h.addWidget(b)
@@ -268,9 +307,10 @@ class ReportWindow(QMainWindow):
         for key, label, tip in SECTIONS:
             it = self._tick(self.tree, label, "report_sections", key)
             it.setToolTip(0, tip)
-            if key == "peaks":
-                for ck, head, _ in PEAK_COLUMNS:
-                    self._tick(it, "# (row number)" if ck == "num" else head, "report_cols", ck)
+            if key == "results":
+                for ck, head, _ in COLUMNS[1:]:          # Region: always there
+                    c = self._tick(it, head, "report_cols", ck)
+                    c.setToolTip(0, HELP.get(ck, ""))
                 it.setExpanded(True)
         self.tree.blockSignals(False)
         self.refresh_later()
@@ -288,6 +328,8 @@ class ReportWindow(QMainWindow):
         PREFS[key][sub] = it.checkState(0) == Qt.Checked
         save_prefs()
         self.refresh()
+        if key == "report_cols":
+            self.main.refresh()          # the results table shows the same columns
 
     def _format_set(self, i):
         PREFS["report_format"] = FORMATS[i][0]
@@ -300,16 +342,17 @@ class ReportWindow(QMainWindow):
         self.refresh()
 
     def refresh_later(self):
-        """After a change to the data or the plot: redrawn once things settle, if shown."""
+        """After a change to the data or the figure: redrawn once things settle, if shown."""
         if self.isVisible():
             self._timer.start()
 
     def _plot(self):
-        """(QImage, width in px at 96 dpi) of the plot as the report shows it, or (None, None)."""
-        if not (PREFS["report_sections"]["plot"] and self.main.datasets):
+        """(QImage, width in px at 96 dpi) of the figure as the report shows it, or (None, None)."""
+        if not (PREFS["report_sections"]["plot"] and self.main.runs):
             return None, None
-        fig = self.main._export_fig()
-        return self.main._render_qimage(fig, 300), round(fig.get_figwidth() * 96)
+        from .figure import figure, render
+        fig = figure(self.main)
+        return render(fig, 300), round(fig.get_figwidth() * 96)
 
     def refresh(self):
         img, w = self._plot()
@@ -317,25 +360,25 @@ class ReportWindow(QMainWindow):
             self.view.document().addResource(QTextDocument.ImageResource, QUrl(PLOT), img)
         sb = self.view.verticalScrollBar()
         pos = sb.value()
-        self.view.setHtml(html(self.main.datasets, w))
+        self.view.setHtml(html(self.main, w))
         sb.setValue(min(pos, sb.maximum()))
 
     def copy(self):
-        text = html(self.main.datasets)
+        text = html(self.main)
         doc = QTextDocument()
         doc.setHtml(text)
         md = QMimeData()
         md.setHtml(text)
         md.setText(doc.toMarkdown())
         QApplication.clipboard().setMimeData(md)
-        self.statusBar().showMessage("Copied (the plot has its own Copy)", 5000)
+        self.statusBar().showMessage("Copied (the figure has its own Copy)", 5000)
 
     def write(self, path: Path) -> None:
         ext = path.suffix.lower()
         img, w = self._plot()
         if ext == ".xlsx":
-            return to_xlsx(self.main.datasets, path, png_bytes(img) if img else None, w)
-        text = html(self.main.datasets, w)
+            return to_xlsx(self.main, path, png_bytes(img) if img else None, w)
+        text = html(self.main, w)
         if ext == ".html":
             if img is not None:
                 b64 = base64.b64encode(png_bytes(img)).decode("ascii")
@@ -354,7 +397,7 @@ class ReportWindow(QMainWindow):
             doc.print_(pdf)
         elif ext == ".md":
             md = doc.toMarkdown()
-            if img is not None:                       # the plot beside it, as <name>_plot.png
+            if img is not None:                       # the figure beside it, as <name>_plot.png
                 beside = path.with_name(f"{path.stem}_plot.png")
                 beside.write_bytes(png_bytes(img))
                 md = md.replace(f"]({PLOT})", f"]({beside.name})")
@@ -366,10 +409,10 @@ class ReportWindow(QMainWindow):
         ext, lab = FORMATS[self.c_format.currentIndex()]
         m = self.main
         stem = m._session_path.stem if m._session_path else \
-            (m.datasets[0].meta.name if m.datasets else "spikeless")
+            (m.runs[0].name if m.runs else "spikeless")
         stem = "".join("_" if c in '\\/:*?"<>|' else c for c in stem)
-        path, _ = QFileDialog.getSaveFileName(self, "Save report", str(m._dir / f"{stem}_report"
-                                                                        f"{ext}"),
+        path, _ = QFileDialog.getSaveFileName(self, "Save report",
+                                              str(m._dir / f"{stem}_report{ext}"),
                                               f"{lab} (*{ext})")
         if not path:
             return

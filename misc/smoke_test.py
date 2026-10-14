@@ -1,265 +1,275 @@
 """Headless smoke test for the Spikeless UI. QT_QPA_PLATFORM=offscreen.
 
-Drives one synthetic GINA export through the whole chain the way a click would:
-load -> detect spikes -> baseline -> peaks -> decay, then report (every format), CSV export,
-undo / redo, Del, a session saved and opened again, and the Options window.
-Run it after touching app.py:  python misc/smoke_test.py
+Drives a synthetic GINA export through the four steps the way the mouse would — spikes
+excluded on load and one put back, the background three ways, regions found, drawn, moved
+and removed, a shared edge, decay, method names — then the results table, the report in every
+format, the figure, a session saved and opened again, the Options window, undo / redo; and the
+reference values on the example runs in C:\\Code\\Spikeless\\data when that folder is there.
+Run it after touching anything:  python misc/smoke_test.py
 """
-import os, tempfile, time, zipfile
+import json
+import os
+import tempfile
+import zipfile
 from pathlib import Path
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import numpy as np
-from PySide6.QtWidgets import QApplication, QMessageBox
+import numpy as np  # noqa: E402
+from PySide6.QtCore import QEvent, Qt  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QCheckBox, QMessageBox,  # noqa: E402
+                               QTableWidget)
 
-from spikeless import options, report, session
-from spikeless.adjust import HALF_LIFE_S
-from spikeless.app import MainWindow
+from spikeless import figure, options, report, session  # noqa: E402
+from spikeless.adjust import decay_on, lookup_half_life_s  # noqa: E402
 
 TMP = Path(tempfile.gettempdir())
 options.OPTIONS_FILE = TMP / "_spikeless_smoke_options.json"   # the shipped defaults,
 options.OPTIONS_FILE.unlink(missing_ok=True)                    # not the user's file
+QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+QMessageBox.warning = staticmethod(lambda *a, **k: None)
 
-# ---- a GINA export with a sloping baseline, two peaks and three single-point spikes ----
-n, dt = 600, 1.0
-t = np.arange(n) * dt
-y = 50 + 0.05 * t                                   # drift, so the baseline step has work to do
-for centre, height, width in ((150, 900, 12), (380, 400, 18)):
-    y += height * np.exp(-0.5 * ((t - centre) / width) ** 2)
-y += np.random.default_rng(7).normal(0, 3, n)       # seeded: the assertions below are fixed
-spike_at = [60, 250, 500]
+from spikeless.app import MainWindow  # noqa: E402
+
+# ---- a GINA export: 7 cps background, two peaks, three single-point spikes (one on a peak) ----
+n = 900
+t = np.arange(n, dtype=float)
+lam = 7 + 1500 * np.exp(-0.5 * ((t - 480) / 7) ** 2) + 120 * np.exp(-0.5 * ((t - 200) / 8) ** 2)
+y = np.random.default_rng(7).poisson(lam).astype(float)   # seeded: the assertions are fixed
+spike_at = [100, 476, 700]                                # 476: on the big peak's rising edge
 y[spike_at] += 4000
-
-lines = ["Smoke Run, 07/07/2026 14:17", '"Time, s"\t"Taux comptage du canal A, cps"']
+lines = ["Interval Values Smoke Run, 07/07/2026 14:17", '"Time, s"\t"Taux comptage du canal A, cps"']
 lines += ['"%02d\\"00"\t"%s"' % (i, ("%.3f" % v).replace(".", ",")) if i < 60 else
           '"%02d\'%02d"\t"%s"' % (i // 60, i % 60, ("%.3f" % v).replace(".", ","))
           for i, v in enumerate(y)]
-src = os.path.join(tempfile.gettempdir(), "spikeless_smoke.txt")
-open(src, "wb").write(("\n".join(lines) + "\n").encode("cp1252"))
+src = TMP / "spikeless_smoke.txt"
+src.write_bytes(("\n".join(lines) + "\n").encode("cp1252"))
 
 app = QApplication([])
 w = MainWindow()
-assert not w.datasets, "starts empty"
+assert not w.runs, "starts empty"
 
-def pump(ms):
-    """Let the queued half of an action story (the ones behind a delay) actually run."""
-    end = time.time() + ms / 1000
-    while time.time() < end:
-        app.processEvents()
-        time.sleep(0.01)
 
-# ---- load ----
-w._load(src)
-assert len(w.datasets) == 1, f"expected 1 dataset, got {len(w.datasets)}"
-ds = w.datasets[0]
-root = ds.root
-assert ds.meta.name == "Smoke Run", ds.meta.name
-assert ds.run_datetime == "07/07/2026 14:17", ds.run_datetime
-assert len(root.y) == n and abs(ds.dt_s - 1.0) < 1e-9, (len(root.y), ds.dt_s)
-assert w.data_tree.topLevelItemCount() == 1, "the dataset did not reach the tree"
-assert w._sel_curve()[1] is root, "loading should select the new curve"
+def last_log():
+    return w.log_view.toPlainText().rstrip().splitlines()[-1]
 
-# ---- spikes: the story detects, flashes the overlay, then swaps to the clean curve ----
-w._run_feature("spikes")
-assert root.has_spikes, "the three planted spikes were not found"
-found = set(root.spike_indices().tolist())
-assert found == set(spike_at), f"wrong spikes: {sorted(found)}"
-clean = next(c for c in root.children if c.kind == "spikeless")
-assert abs(clean.y[250] - y[250]) > 3000, "the spikeless curve still carries the spike"
-assert clean.y[150] > 800, "removal flattened the real peak"
-assert root.spikes_group_shown and not clean.shown, "the overlay comes first, on its own"
-pump(900)                                          # the story has a 500 ms delay in the middle
-assert clean.shown and not root.shown and not root.spikes_group_shown, \
-    "after the pause the clean curve should be the one on screen, alone"
 
-# ---- baseline on the clean curve ----
-w._select_id(("curve", ds.id, clean.id))
-w._run_feature("baseline")
-assert clean.baseline is not None, "no baseline"
-corr = next(c for c in clean.children if c.kind == "baseline-corrected")
-assert abs(float(np.median(corr.y))) < 30, f"baseline not removed: {np.median(corr.y)}"
+# ---- ① load: spikes excluded at once, the "Interval Values" prefix dropped ----
+w._load(str(src))
+run = w.sel
+assert len(w.runs) == 1 and run.name == "Smoke Run", run.name
+assert run.spike_list() == spike_at, run.spike_list()
+assert "3 spike(s) excluded" in w.log_view.toPlainText()
+assert len(run.sha256) == 64
+assert w.spike_list.count() == 3 and w.step["spikes"]._btn.text() == "② Spikes — 3 excluded"
 
-# ---- peaks ----
-w._select_id(("curve", ds.id, corr.id))
-w._run_feature("peaks")
-assert corr.peaks and len(corr.peaks) == 2, f"expected 2 peaks, got {corr.peaks and len(corr.peaks)}"
-rts = sorted(p.rt for p in corr.peaks)
-assert abs(rts[0] - 150 / 60) < 0.2 and abs(rts[1] - 380 / 60) < 0.2, rts
-assert abs(sum(p.pct for p in corr.peaks) - 100) < 0.5, "percentages must add up"
-big = max(corr.peaks, key=lambda p: p.auc)
-assert abs(big.rt - 150 / 60) < 0.2 and big.pct > 50, "the tall peak should dominate the AUC"
+# ---- ④ Find peaks: both peaks, % of total with the outside row adding to 100 ----
+w._find()
+res = w.results[run.id]
+assert len(res.rows) == 2, [(r.start, r.end) for r in res.rows]
+small, big = res.rows
+assert abs(small.rt - 200 / 60) < 0.05 and abs(big.rt - 8.0) < 0.05, (small.rt, big.rt)
+assert abs(sum(r.pct for r in res.rows) + 100 * res.outside / res.total - 100) < 1e-9
+true_big = 1500 * 7 * np.sqrt(2 * np.pi)
+assert abs(big.net - true_big) < 3 * big.unc + 0.02 * true_big, (big.net, true_big)
+assert big.spikes == 1 and big.net_with_spikes > big.net + 2000, big
+assert abs(res.background - 7) < 0.5, res.background
+assert w.table.rowCount() == 4, w.table.rowCount()     # 2 regions + outside + total
+heads = [w.table.horizontalHeaderItem(c).text() for c in range(w.table.columnCount())]
+assert heads[:1] == ["Region"] and "% of total" in heads and "Net counts" in heads, heads
 
-# ---- decay correction grows the tail, never the reference point ----
-ds.half_life_s = HALF_LIFE_S["¹⁸F"]
-w._run_feature("decay")
-dec = next(c for c in corr.children if "decay" in c.kind)
-assert abs(dec.y[0] - corr.y[0]) < 1e-6, "t=0 is the reference: it must not move"
-assert dec.y[-1] > corr.y[-1], "later samples should be scaled up, not down"
+# ---- ② a spike put back is back; the list's tick is the switch; undo ----
+it = w.spike_list.item(1)                                  # the one on the big peak
+it.setCheckState(Qt.Unchecked)
+assert run.kept == [476] and run.trace()[476] == y[476], "unticking did not put it back"
+assert w.results[run.id].rows[1].net > big.net + 2000, "the area did not take the spike back"
+w._undo_step()
+run = w.sel
+assert run.kept == [] and last_log() .endswith("Undone: keep the spike at 7.93 min.")
+w._redo_step()
+assert w.sel.kept == [476]
+w._undo_step()
+run = w.sel
 
-# ---- each processed curve says how it was made ----
-assert "Hampel" in root.how["spikes"] and "Hampel" in clean.how["curve"], (root.how, clean.how)
-assert clean.how.get("baseline") and corr.how["curve"].startswith("baseline of"), corr.how
-assert "prominence" in corr.how["peaks"], corr.how
-assert "decay-corrected" in dec.how["curve"], dec.how
+# ---- ② the threshold: higher finds fewer, undo restores ----
+w.sens.setValue(30)                                         # 15 σ
+assert run.spike_params.n_sigma == 15 and len(run.spike_list()) == 3   # 4000 cps: still spikes
+w._undo_step()
+run = w.sel
+assert run.spike_params.n_sigma == 5
 
-# ---- the report: the preview and every format carry the same numbers ----
-rep = report.html(w.datasets)
-assert "Smoke Run" in rep and "Spikes: 3 found" in rep and "Peaks: 2" in rep, rep[:600]
-assert "Hampel" in rep, "the report does not say how the spikes were found"
+# ---- ③ background: a stretch, a drift, back to auto ----
+w._stretch(0.5, 1.5)
+run = w.sel
+sel = (run.x >= 0.5) & (run.x <= 1.5)
+assert run.bg_mode == "stretch" and abs(w.results[run.id].background
+                                        - run.trace()[sel].mean()) < 1e-9
+w.bg_radio["drift"].setChecked(True)
+assert run.bg_mode == "drift" and "SNIP" in w.results[run.id].background_how
+w.bg_radio["auto"].setChecked(True)
+assert run.bg_mode == "auto"
+
+# ---- ④ drawing: snapped, clipped against neighbours, n.d. on noise; edges; Del ----
+r0, r1 = run.regions
+w._drawn(11.0, 11.6, False)                                 # noise only
+k = w.sel_region
+row = w.results[run.id].rows[k]
+assert run.regions[k].how == "drawn" and "n.d." in row.flags and row.pct is None, row
+w._delete_region()
+assert len(run.regions) == 2
+w._drawn(r1.start - 0.3, r1.start + 0.2, True)              # overlaps the big one: cut at its start
+k = w.sel_region
+assert abs(run.regions[k].end - r1.start) < 1e-9, (run.regions[k], r1)
+# that edge is now shared: moving it moves both
+shared = run.regions[k].end
+w._edge_moved(k, "end", shared - 0.05, True)
+assert abs(run.regions[k].end - (shared - 0.05)) < 1e-9
+assert abs(run.regions[k + 1].start - (shared - 0.05)) < 1e-9
+assert run.regions[k + 1].how == "moved", run.regions[k + 1].how
+w._undo_step()
+w._undo_step()                                              # the edge, then the drawn region
+run = w.sel
+assert len(run.regions) == 2 and run.regions[1].how == "auto"
+# ← → nudge the last-touched edge one point
+w.canvas._edge = (1, "end")
+end0 = run.regions[1].end
+w.canvas.keyPressEvent(type("K", (), {"key": lambda self: Qt.Key_Right})())
+assert abs(w.sel.regions[1].end - end0 - 1 / 60) < 1e-9
+w._undo_step()
+run = w.sel
+# a region's line under it, its note, its name typed in the table
+w.sel_region = 1
+w.refresh()
+w.r_under.setCurrentIndex(1)
+w.r_under.activated.emit(1)
+assert run.regions[1].under == "line"
+w._undo_step()
+run = w.sel
+w.table.item(1, 0).setText("product")
+assert run.regions[1].name == "product" and w.results[run.id].rows[1].name == "product"
+
+# ---- methods name regions; decay per isotope ----
+options.PREFS["methods"] = [["M", "free", 3.0, 3.6], ["M", "product", 7.5, 8.5]]
+run.method = "M"
+w.refresh()
+assert w.results[run.id].rows[0].name == "free" and w.results[run.id].rows[0].named
+base = run.trace()
+options.PREFS["isotopes"][6][2] = True                      # ⁶⁸Ga: decay-corrected
+options.set_half_lives(options.PREFS["isotopes"])
+run.isotope = "⁶⁸Ga"
+w.refresh()
+k = run.trace()[600] / base[600]                            # 10 min after the run start
+assert run.decayed() and abs(k - 2 ** (10 / (1.12782 * 60))) < 1e-9, k
+assert "decay-corrected" in w.summary.text()
+options.PREFS["isotopes"][6][2] = False
+options.set_half_lives(options.PREFS["isotopes"])
+w.refresh()
+assert not run.decayed()
+
+# ---- the report: preview and every format carry the same numbers ----
+rep = report.html(w)
+assert "Smoke Run" in rep and "Spikes: 3 excluded" in rep and "Hampel" in rep, rep[:800]
+assert "with its excluded spike(s) kept" in rep, "the spike-kept area is missing"
 w._report()
 rw = w.report_win
-assert "Smoke Run" in rw.view.toPlainText(), "the preview is empty"
+assert "Smoke Run" in rw.view.toPlainText()
 for ext in (".pdf", ".odt", ".xlsx", ".md", ".html"):
     out = TMP / f"spikeless_smoke_report{ext}"
     rw.write(out)
     assert out.stat().st_size > 1000, (ext, out.stat().st_size)
-assert f"{rts[0]:.2f}" in (TMP / "spikeless_smoke_report.md").read_text(encoding="utf-8")
-assert (TMP / "spikeless_smoke_report_plot.png").exists(), "the markdown's plot is not beside it"
-assert any(n.startswith("Pictures/") for n in
-           zipfile.ZipFile(TMP / "spikeless_smoke_report.odt").namelist()), "no plot in the .odt"
+rt = f"{w.results[run.id].rows[1].rt:.2f}"
+assert rt in (TMP / "spikeless_smoke_report.md").read_text(encoding="utf-8")
+assert (TMP / "spikeless_smoke_report_plot.png").exists(), "the markdown's figure is not beside it"
+assert any(nm.startswith("Pictures/") for nm in
+           zipfile.ZipFile(TMP / "spikeless_smoke_report.odt").namelist()), "no figure in the .odt"
 assert "data:image/png;base64" in (TMP / "spikeless_smoke_report.html").read_text("utf-8")
-from openpyxl import load_workbook
+from openpyxl import load_workbook  # noqa: E402
 wb = load_workbook(TMP / "spikeless_smoke_report.xlsx")
-assert "Plot" in wb.sheetnames and wb["Plot"]._images, wb.sheetnames
-pk = wb[next(n for n in wb.sheetnames if "baseline" in n)]
-head = [c.value for c in pk[2]]
-assert pk.cell(3, head.index("Rt (min)") + 1).value == float(f"{rts[0]:.2f}"), list(pk.values)
+assert {"Report", "Results", "Spikes", "Figure"} <= set(wb.sheetnames), wb.sheetnames
+rs = list(wb["Results"].values)
+assert rs[0][:2] == ("Run", "Region") and rs[2][1] == "product", rs[:3]
+assert rs[2][rs[0].index("Rt (min)")] == float(rt), rs[2]
+assert len(list(wb["Spikes"].values)) == 4                  # header + 3 spikes
+# a section unticked leaves the report and is saved; a column unticked leaves the table too
+tree = rw.tree
+results_item = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+                    if tree.topLevelItem(i).text(0) == "Results")
+unc = next(results_item.child(i) for i in range(results_item.childCount())
+           if results_item.child(i).text(0) == "± counts")
+unc.setCheckState(0, Qt.Unchecked)
+assert "± counts" not in report.html(w)
+assert "± counts" not in [w.table.horizontalHeaderItem(c).text() for c in range(w.table.columnCount())]
+assert json.loads(options.OPTIONS_FILE.read_text("utf-8"))["report_cols"]["unc"] is False
+unc.setCheckState(0, Qt.Checked)
 
-# a section unticked in the window leaves the report, and the choice is saved
-import json
-from PySide6.QtCore import Qt
-tables = next(rw.tree.topLevelItem(i) for i in range(rw.tree.topLevelItemCount())
-              if rw.tree.topLevelItem(i).text(0) == "Peak tables")
-tables.setCheckState(0, Qt.Unchecked)
-assert "Rt (min)" not in report.html(w.datasets) and "Rt (min)" not in rw.view.toPlainText()
-assert json.loads(options.OPTIONS_FILE.read_text("utf-8"))["report_sections"]["peaks"] is False
-tables.setCheckState(0, Qt.Checked)
+# ---- the figure: its size in mm, presets, copy ----
+fig = figure.figure(w)
+assert all(abs(a - b) < 0.5 for a, b in zip(fig.plot_area_mm, (80, 40))), fig.plot_area_mm
+w._figure()
+fw = w.figure_win
+fw._preset(3)                                               # Slide
+assert w.plot_opts.plot_w_mm == 160 and w.plot_opts.x.tick_font_size == 14
+assert abs(figure.figure(w).plot_area_mm[0] - 160) < 0.5
+figure.copy_figure(w)
+assert not QApplication.clipboard().image().isNull(), "nothing on the clipboard"
+texts = [t.get_text() for t in figure.figure(w).axes[0].texts]
+assert any("product" in s for s in texts), texts            # named regions labelled
+next(c for c in fw.side.widget().findChildren(QCheckBox)
+     if c.text() == "Regions (shaded)").setChecked(False)
+assert not figure.figure(w).axes[0].collections, "regions still shaded"
+w.plot_opts.show_regions = True
 
-# ---- CSV carries the report's numbers ----
-csv = os.path.join(tempfile.gettempdir(), "spikeless_smoke_peaks.csv")
-assert w._write_peaks_csv(csv, corr) == 2
-rows = [r.split(",") for r in open(csv, encoding="utf-8").read().splitlines()]
-assert len(rows) == 3, rows                         # header + one line per peak
-rt_col = rows[0].index("Rt (min)")
-assert rows[1][rt_col] == f"{rts[0]:.2f}", (rows[1], rts)
-
-
-# ---- undo says what it took back, and takes back exactly that; redo brings it back ----
-def decay_kids():
-    c = next(c for c in w.datasets[0].root.walk() if c.kind == "baseline-corrected")
-    return [k for k in c.children if "decay" in k.kind]
-
-
-w._undo()
-assert w.log_view.toPlainText().rstrip().endswith("Undone: Apply decay."), \
-    w.log_view.toPlainText()[-120:]
-assert not decay_kids(), "the decay curve survived undo"
-w._redo()
-assert w.log_view.toPlainText().rstrip().endswith("Redone: Apply decay.")
-assert len(decay_kids()) == 1, "redo did not bring the decay curve back"
-w._undo()
-ds = w.datasets[0]                                  # undo restores a deep copy: re-find everything
-corr2 = next(c for c in ds.root.walk() if c.kind == "baseline-corrected")
-assert not decay_kids() and len(corr2.peaks) == 2, "undo went one step too far"
-
-# ---- Del removes what ✖ removes, undoably; the original curve has no ✖ ----
-w._select_id(("peaks", ds.id, corr2.id))
-w._delete_selected()
-assert w.datasets[0].root.find(corr2.id).peaks is None, "Del did not remove the peaks"
-w._undo()
-assert len(w.datasets[0].root.find(corr2.id).peaks) == 2, "undo did not bring the peaks back"
-w._select_id(("curve", ds.id, ds.root.id))
-w._delete_selected()
-assert len(w.datasets) == 1, "Del removed the dataset through its original curve"
-
-# ---- the export-area border shows on screen but is never rendered into an export ----
-from matplotlib.patches import Rectangle
-assert options.PREFS["export_border"]["on"], "border option off — the next check proves nothing"
-
-
-def _frames(fig):
-    return [a for a in fig.artists if isinstance(a, Rectangle)]
-
-
-assert len(_frames(w._fig)) == 1, "screen figure lost its export-area guide"
-assert _frames(w._export_fig()) == [], "the guide leaked into the exported/copied figure"
-
-# ---- a fixed total size drives the plot area: the field greys out and reports the result ----
-d = w.d
-assert d["w_mm"].isEnabled() and d["h_mm"].isEnabled(), "plot size not editable while total is Auto"
-d["tot_w_auto"].setChecked(False)
-d["tot_w"].setValue(200.0)
-assert not d["w_mm"].isEnabled(), "plot width still editable under a fixed total"
-assert d["h_mm"].isEnabled(), "plot height greyed out by a fixed total WIDTH"
-shown = d["w_mm"].value()
-real = w._fig.plot_area_mm[0]
-assert abs(shown - real) <= 0.51, (shown, real)   # the mm fields show whole mm, like Total does
-assert shown < 200.0, (shown,)                      # the label margins come out of the total
-d["tot_w_auto"].setChecked(True)
-assert d["w_mm"].isEnabled(), "plot width stayed grey after going back to Auto"
-
-# ---- zoomed in, editing the plot keeps it where it is (it crept 1 px down-right per redraw) ----
-v = w.plot_view
-v.scale(1.5, 1.5)
-v._zoomed = True
-
-
-def _at():
-    return v.mapFromScene(v._item.sceneBoundingRect()).boundingRect().topLeft()
-
-
-before = _at()
-for a in (0.5, 0.6, 0.7, 0.8, 0.9):
-    d["bg_a"].setValue(a)
-assert _at() == before, (before, _at())
-d["h_mm"].setValue(60.0)
-d["h_mm"].setValue(40.0)
-assert (_at() - before).manhattanLength() <= 1, (before, _at())
-v._fit()
-
-# ---- a session comes back as it was saved, plot options included ----
-w.d["h_mm"].setValue(55.0)
+# ---- a session comes back as it was saved ----
 ses = TMP / "spikeless_smoke.spikeless"
-ses.write_text(session.dumps(w.datasets, w.plot_opts), encoding="utf-8")
-names = [c.name for c in w.datasets[0].root.walk()]
-w.d["h_mm"].setValue(40.0)
-w._remove_node(("dataset", w.datasets[0].id))
-QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)   # "replace?" — yes
-w._load(src)                                       # something for the session to replace
+ses.write_text(session.dumps(w.runs, w.plot_opts), encoding="utf-8")
+before = [(r.start, r.end, r.name, r.how) for r in w.sel.regions]
+w._remove_run()
+assert not w.runs
+w._load(str(src))                                           # something for it to replace
 w._open_session(str(ses))
-assert [c.name for c in w.datasets[0].root.walk()] == names, "the curve tree changed"
-assert len(next(c for c in w.datasets[0].root.walk() if c.peaks).peaks) == 2
-assert w.plot_opts.plot_h_mm == 55.0 and w.d["h_mm"].value() == 55.0, "plot options lost"
-assert ses.name in w.windowTitle()
-w._undo()
-assert w.datasets[0].root.children == [], "undo did not give back what the session replaced"
+assert [(r.start, r.end, r.name, r.how) for r in w.sel.regions] == before
+assert w.sel.method == "M" and w.plot_opts.plot_w_mm == 160 and ses.name in w.windowTitle()
+w._undo_step()
+assert w.sel.regions == [] and w.sel.name == "Smoke Run", "undo did not give back what was replaced"
+w._redo_step()
 
 # ---- the Options window: saved as changed, followed at once, reset ----
-from PySide6.QtWidgets import QCheckBox, QPushButton, QTableWidget
-from spikeless.adjust import lookup_half_life_s
-w._options("Screen")
-ow = w.options_win
-assert ow.topics.currentItem().text() == "Screen"
-next(c for c in ow.pages.currentWidget().findChildren(QCheckBox)
-     if c.text() == "Checkered").setChecked(False)
-assert w.plot_view._bg.checkered is False, "the plot did not follow the option"
-assert json.loads(options.OPTIONS_FILE.read_text("utf-8"))["background"]["checkered"] is False
-w._options("Processing")
-next(c for c in ow.pages.currentWidget().findChildren(QCheckBox)
-     if c.text() == "Apply decay").setChecked(True)
-assert any(b.text() == "Apply decay" for b in w._proc_body.findChildren(QPushButton))
 w._options("Isotopes")
-t = ow.pages.currentWidget().findChildren(QTableWidget)[0]
-t.item(0, 1).setText("7")
-assert lookup_half_life_s(t.item(0, 0).text()) == 7 * 3600, "the isotope table was not taken"
-ow._apply(None)                                     # Reset to defaults
-from PySide6.QtCore import QEvent
-QApplication.sendPostedEvents(None, QEvent.DeferredDelete)   # the old buttons, gone
-assert w.plot_view._bg.checkered and lookup_half_life_s("⁹⁹ᵐTc") == 6.00718 * 3600
-assert not any(b.text() == "Apply decay" for b in w._proc_body.findChildren(QPushButton))
+ow = w.options_win
+assert ow.topics.currentItem().text() == "Isotopes"
+tab = ow.pages.currentWidget().findChildren(QTableWidget)[0]
+tab.item(0, 1).setText("7")
+assert lookup_half_life_s(tab.item(0, 0).text()) == 7 * 3600
+tab.item(9, 2).setCheckState(Qt.Checked)                    # ¹⁷⁷Lu decay-corrected
+assert decay_on("¹⁷⁷Lu")
+w._options("Methods")
+mt = ow.pages.currentWidget().findChildren(QTableWidget)[0]
+assert mt.rowCount() == 2 and mt.item(1, 1).text() == "product"
+ow._apply(None)                                             # Reset to defaults
+QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+assert lookup_half_life_s("⁹⁹ᵐTc") == 6.00718 * 3600 and not decay_on("¹⁷⁷Lu")
+assert options.PREFS["methods"] == [] and w.results[w.sel.id].rows[0].name.startswith("peak 1")
+
+# ---- the example runs: reference values (devlog) ----
+data = Path(__file__).resolve().parents[2] / "data"
+if data.is_dir():
+    def ref(stem):
+        w._load(str(next(data.glob(f"Interval_Values_{stem}*.txt"))))
+        w._find()
+        return w.sel, w.results[w.sel.id]
+    r, res = ref("HOPO-1")
+    assert r.spike_list() == [587, 700] and len(res.rows) == 2, (r.spike_list(), res.rows)
+    assert [round(x.pct, 1) for x in res.rows] == [14.3, 85.7], [x.pct for x in res.rows]
+    r, res = ref("Imathera2")
+    assert r.spike_list() == [778, 786], r.spike_list()
+    imp = next(x for x in res.rows if abs(x.rt - 2.55) < 0.05)
+    prod = next(x for x in res.rows if abs(x.rt - 7.90) < 0.05)
+    assert abs(imp.pct - 2.2) < 0.15 and abs(prod.pct - 97.7) < 0.15, (imp.pct, prod.pct)
+    r, res = ref("TestOnduleur")
+    assert r.spike_list() == [1314, 4696, 5660] and res.rows == [] and not res.active
 
 w.close()
-for f in [src, csv, ses, options.OPTIONS_FILE, TMP / "spikeless_smoke_report_plot.png"] + \
+for p in [src, ses, options.OPTIONS_FILE, TMP / "spikeless_smoke_report_plot.png"] + \
         [TMP / f"spikeless_smoke_report{e}" for e in (".pdf", ".odt", ".xlsx", ".md", ".html")]:
-    os.unlink(f)
+    p.unlink(missing_ok=True)
 print("spikeless smoke OK")

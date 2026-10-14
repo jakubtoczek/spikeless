@@ -65,29 +65,18 @@ def detect(y: np.ndarray, params: SpikeParams | None = None) -> np.ndarray:
     return out
 
 
-def remove(y: np.ndarray, mask: np.ndarray, method: str = "linear") -> np.ndarray:
-    """Return a copy of y with masked points replaced by interpolation of clean neighbors.
-
-    method:
-      "linear" — straight line between the nearest clean points (for a single-point spike
-                 that is exactly n-1 -> n+1). Safe: cannot overshoot.
-      "pchip"  — monotone cubic (PCHIP). Smoother across multi-point gaps and, unlike a plain
-                 cubic spline, will not overshoot into ringing on a peak flank.
-    """
+def remove(y: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """A copy of y with the masked points excluded and bridged: the straight line between
+    their nearest kept neighbours (n-1 -> n+1 for a single point). Drawn, that is the curve
+    without the point; integrated, the same area as trapezoids across the gap. It cannot
+    overshoot. (PCHIP was offered until 2026.10.14: a curve assumption for nothing gained.)"""
     y = np.asarray(y, dtype=float)
     mask = np.asarray(mask, dtype=bool)
-    if not mask.any():
-        return y.copy()
     out = y.copy()
+    if not mask.any() or (~mask).sum() < 2:
+        return out  # nothing to exclude, or nothing to bridge from
     idx = np.arange(len(y))
-    clean = ~mask
-    if clean.sum() < 2:
-        return out  # nothing reliable to interpolate from
-    if method == "pchip":
-        from scipy.interpolate import PchipInterpolator
-        out[mask] = PchipInterpolator(idx[clean], y[clean], extrapolate=True)(idx[mask])
-    else:
-        out[mask] = np.interp(idx[mask], idx[clean], y[clean])
+    out[mask] = np.interp(idx[mask], idx[~mask], y[~mask])
     return out
 
 
@@ -111,9 +100,9 @@ def _self_check():
     assert abs(cleaned[205] - peak[205]) < 15, (cleaned[205], peak[205])  # back near peak level
     assert cleaned[200] == y[200], "apex changed by removal"
 
-    pch = remove(y, mask, method="pchip")
-    assert abs(pch[120] - baseline[120]) < 6, pch[120]      # pchip also restores baseline
-    assert pch[200] == y[200], "apex changed by pchip removal"
+    # bridging = dropping the point: trapezoids across the gap give the same area
+    keep = ~mask
+    assert abs(np.trapezoid(cleaned) - np.trapezoid(y[keep], np.arange(n)[keep])) < 1e-9
 
     # The apex of a narrow real peak is not a spike: this 13-point profile is the one at
     # 2.55 min in a 2026-06-26 Lu-177 run, whose apex (306) was flagged before 2026.10.14.

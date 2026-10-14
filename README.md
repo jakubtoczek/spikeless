@@ -26,20 +26,21 @@ removes it: the whole private folder, or only Spikeless's part of the shared one
 
 ## Use
 
-1. **Drop** a GINA `.txt` on the window (or **Open…**, or **Ctrl+V** columns copied from Excel
-   or Prism). It plots at once.
-2. **Detect spikes** — the spikes are marked in red, then a **spikeless** curve replaces the
-   original on the plot.
-3. Click the **spikeless** curve in the **Data** panel (processing acts on the curve selected
-   there), then **Detect baseline** and **Detect peaks**: retention time, area and % of each
-   peak, shaded on the plot. Set their two ⚙ first, as the guide's
-   [step by step](GUIDE.md#a-run-step-by-step) says — the defaults miss small peaks.
-4. **Report** — pick the sections, see it, save it as PDF, Word-compatible `.odt`, Excel,
-   Markdown or web page. **Copy / Export** on the plot gives the figure at its exact size in mm.
-5. **Save…** (Ctrl+S) keeps the whole analysis in a `.spikeless` file, to open it again later.
+One screen: the chromatogram, its results under it, four steps on the right.
 
-Each processing button has a **⚙** for its settings; **Options** holds the preferences (plot
-export, isotopes, panels). Ctrl+Z / Ctrl+Y undo and redo each step.
+1. **Drop** a GINA `.txt` on the window (or **Open…**, or **Ctrl+V** columns copied from Excel
+   or Prism). Its **spikes** are excluded at once — red on the plot, listed in **② Spikes**,
+   where one can be put back.
+2. **③ Background**: the detector's background, shown dashed — nothing to do.
+3. **④ Peaks**: **Find peaks**, or **drag across a peak on the plot**; drag an edge to adjust
+   it. The table under the plot gives each region's **net counts ± σ** and **% of total** (the
+   radiochemical purity).
+4. **Report** — pick the sections, see it, save it as PDF, Word-compatible `.odt`, Excel,
+   Markdown or web page. **Figure…** sets what **Copy / Export** make, at its size in mm.
+5. **Save…** (Ctrl+S) keeps the whole analysis in a `.spikeless` file.
+
+**Options**: export resolution, the isotopes (and which are decay-corrected), region names per
+HPLC method. Ctrl+Z / Ctrl+Y undo and redo every change.
 
 Every panel and setting, how the numbers are made, and how to report spike removal in a
 publication: **[the user guide](GUIDE.md)**.
@@ -57,7 +58,9 @@ uv run python misc/make_icon.py         # redraw the icon (needs Pillow)
 bash misc/root_test.sh                  # where the launcher decides to install
 ```
 
-Layers: `io_gina.py`, `io_paste.py` readers · `spikes.py`, `peaks.py`, `adjust.py` the maths
-(no Qt) · `dataset.py` the model · `session.py` the session file · `plotting.py` the figure ·
-`plotview.py` the zoomable view · `options.py`, `report.py` their windows · `app.py` the main
-window. scipy is imported inside the functions that need it, to keep it off the startup path.
+Layers: `io_gina.py`, `io_paste.py` readers · `run.py` the model (a run, its spikes,
+background, regions) · `spikes.py`, `peaks.py`, `adjust.py` the maths (no Qt) · `session.py`
+the session file · `plotting.py` the chromatogram as a matplotlib figure · `canvas.py` it on
+screen, with the mouse · `figure.py`, `report.py`, `options.py` their windows (`plotview.py`
+the figure preview) · `app.py` the main window. scipy is imported inside the functions that
+need it, to keep it off the startup path.

@@ -1,9 +1,10 @@
-"""Publication-quality matplotlib figure builder.
+"""The chromatogram as a matplotlib figure: the screen plot and the exported one.
 
-The plot AREA is sized exactly in mm; the figure is that plus computed label margins. The same
-Figure is rasterised on-screen (plotview) and used for export. Every dataset's curve tree is
-walked and each Curve draws (when shown) its trace plus its artifacts — baseline, spike overlay,
-peak markers/labels — through the Curve's Adjust transform.
+draw() puts the runs on an axes — each shown run's trace (spikes excluded and bridged), and
+as asked its regions (shaded between the trace and what lies under them, labelled), its
+background, its excluded spikes, its trace as recorded. The screen canvas calls it on an axes
+the size of the window; build_figure() on a figure sized in mm for export, where the plot AREA
+is exactly the size asked and the figure is that plus the label margins.
 """
 
 from __future__ import annotations
@@ -14,33 +15,13 @@ from dataclasses import dataclass, field
 import numpy as np
 from matplotlib.colors import to_hex, to_rgb, to_rgba
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
 from matplotlib.ticker import FixedLocator, MultipleLocator
-
-from .adjust import apply_adjust
-from .dataset import Curve, Dataset
 
 _MAX_TICKS = 2000
 PT_PER_MM = 2.834645669
-
-BORDER_STYLES = {"long dash": (0, (5, 3)), "dash": (0, (3, 2)), "dot": (0, (1, 2)), "solid": "solid"}
-
-
-@dataclass
-class ExportBorder:
-    on: bool = True
-    color: str = "#808080"
-    style: str = "long dash"
-    width: float = 0.5
-
-
-def _desaturate(hexcolor: str, factor: float = 0.4) -> str:
-    try:
-        r, g, b = to_rgb(hexcolor)
-    except ValueError:
-        return "#888888"
-    h, li, s = colorsys.rgb_to_hls(r, g, b)
-    return to_hex(colorsys.hls_to_rgb(h, min(1.0, li * 1.1), s * factor))
+Y_TITLE = "Count rate (cps)"
+LABELS = {"none": "None", "name": "Name", "pct": "% of total", "both": "Name and %"}
+# (a region with no name of its own — no typed name, no method window — shows only its %)
 
 
 def _rel_lum(rgb) -> float:
@@ -124,20 +105,33 @@ class AxisOptions:
 
 @dataclass
 class PlotOptions:
+    """The figure as exported (Figure window). stack, pct_max and region_labels apply on
+    screen too, so the screen shows what the figure will."""
+
     plot_w_mm: float = 80.0
     plot_h_mm: float = 40.0
     total_w_mm: float | None = None   # None = auto (plot area + label margins); else fixes figure width
     total_h_mm: float | None = None   # (plot area then shrinks to fit the total)
-    crop_fills: bool = False          # erase fill areas where a curve passes (clean alpha overlaps)
     bg_color: str = "#ffffff"
     bg_alpha: float = 1.0
     outside_color: str = "#ffffff"
     outside_alpha: float = 0.0
+    legend: bool = True               # run names, when more than one run is shown
     legend_loc: str = "upper right"
     legend_font_family: str = "sans-serif"
     legend_font_size: float = 7.0
+    line_width_pt: float = 0.75
+    show_regions: bool = True
+    region_labels: str = "both"       # a key of LABELS
+    label_size: float = 7.0
+    region_alpha: float = 0.3
+    show_background: bool = False
+    show_spikes: bool = False
+    show_raw: bool = False
+    stack: bool = False               # overlays one above the other, background subtracted
+    pct_max: bool = False             # each run as % of its highest point above background
     x: AxisOptions = field(default_factory=lambda: AxisOptions(title="Time (min)"))
-    y: AxisOptions = field(default_factory=lambda: AxisOptions(title="Counts (cps)", unit="cps"))
+    y: AxisOptions = field(default_factory=lambda: AxisOptions(title=Y_TITLE, unit="cps"))
 
 
 _X_MAJOR_CANDIDATES = [0.25, 0.5, 1, 2, 5, 10, 15, 20, 30, 60]
@@ -168,55 +162,137 @@ def _minor_n(major, axis):
     return axis.minor_n or _MINOR_BY_MAJOR.get(major, 5)
 
 
-# ---------------------------------------------------------------- curve helpers
-def _y_adj(curve: Curve):
-    return apply_adjust(curve.x, curve.y, curve.adjust, baseline=curve.baseline)
+# ---------------- runs
+def _scales(runs, opts):
+    """Per shown run: (background, multiplier, offset) so that the drawn value is
+    (y - b) * k + off when stacked or in % of max, else y as is (b drawn as its own line)."""
+    out, off = {}, 0.0
+    shown = [r for r in runs if r.shown]
+    step = 0.0
+    if opts.stack:
+        step = 1.1 * max((float(np.nanmax(r.trace() - r.background()[0])) for r in shown),
+                         default=1.0)
+        if opts.pct_max:
+            step = 110.0
+    for r in reversed(shown):                     # the first run on top
+        b = r.background()[0]
+        if opts.stack or opts.pct_max:
+            top = float(np.nanmax(r.trace() - b)) or 1.0
+            k = 100.0 / top if opts.pct_max else 1.0
+            out[r.id] = (b, k, off)
+            off += step
+        else:
+            out[r.id] = (b, 1.0, 0.0)
+    return out
 
 
-def _base_adj(curve: Curve):
-    if curve.baseline is None:
-        return None
-    return apply_adjust(curve.x, curve.baseline, curve.adjust, baseline=curve.baseline)[0]
+def _f(v, b, k, off, flat):
+    return v if flat else (v - b) * k + off
 
 
-def _curve_needs(curve: Curve) -> bool:
-    return (curve.shown or (curve.has_spikes and curve.spikes_group_shown)
-            or (curve.peaks and curve.peaks_group_shown))
+def visible_range(runs, opts, x0=None, x1=None):
+    """(ymin, ymax) of the shown runs' traces (and background lines) between x0 and x1."""
+    sc = _scales(runs, opts)
+    flat = not (opts.stack or opts.pct_max)
+    lo, hi = 0.0, 1.0
+    for r in runs:
+        if not r.shown:
+            continue
+        sel = np.ones(len(r.x), bool)
+        if x0 is not None:
+            sel = (r.x >= x0) & (r.x <= x1)
+        if not sel.any():
+            continue
+        b, k, off = sc[r.id]
+        v = _f(r.trace(), b, k, off, flat)[sel]
+        lo, hi = min(lo, float(np.nanmin(v))), max(hi, float(np.nanmax(v)))
+    return lo, hi
 
 
-def _all_curves(datasets):
-    for ds in datasets:
-        yield from ds.curves()
+def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, only=None,
+         sel=None, sel_region=None, edges=False, bg="#ffffff"):
+    """Every shown run on ax. results: {run.id: peaks.Results}. raw / spikes / background:
+    draw the trace as recorded, the excluded spikes, the background line — for every shown run,
+    or only for `only`. sel: the selected run (its regions' edges drawn when `edges`,
+    sel_region highlighted)."""
+    sc = _scales(runs, opts)
+    flat = not (opts.stack or opts.pct_max)
+    lw = opts.line_width_pt
+    x_end = max((float(r.x[-1]) for r in runs if r.shown), default=1.0)
+    y_top = visible_range(runs, opts)[1] * 1.05
+    for r in runs:
+        if not r.shown:
+            continue
+        b, k, off = sc[r.id]
+        y = r.trace()
+        v = _f(y, b, k, off, flat)
+        extra = only is None or r is only
+        if raw and extra:
+            ax.plot(r.x, _f(r.trace(raw=True), b, k, off, flat), color="#b0b0b0", lw=lw * 0.8,
+                    zorder=1)
+        ax.plot(r.x, v, color=r.color, lw=lw, zorder=3, label=r.name)
+        if background and extra:
+            ax.plot(r.x, _f(b, b, k, off, flat), color="#808080", lw=lw * 0.8, ls="--", zorder=2)
+        if spikes and extra:
+            ex = r.excluded()
+            for i in np.flatnonzero(ex):
+                ax.plot([r.x[i], r.x[i]], [v[i], _f(r.y[i], b[i], k, off, flat)],
+                        color="#e02020", lw=lw, zorder=4)
+            for i in r.kept:                      # flagged, put back: a ring on the point
+                ax.plot([r.x[i]], [v[i]], "o", mfc="none", mec="#e02020", ms=5, zorder=4)
+        res = results.get(r.id)
+        if not (opts.show_regions and res):
+            continue
+        for j, (reg, row) in enumerate(zip(r.regions, res.rows)):
+            m = (r.x >= reg.start - 1e-9) & (r.x <= reg.end + 1e-9)
+            if m.sum() < 2:
+                continue
+            xs, ys = r.x[m], y[m]
+            under = (np.interp(xs, [xs[0], xs[-1]], [ys[0], ys[-1]]) if reg.under == "line"
+                     else b[m])
+            col = reg.color or r.color
+            ax.fill_between(xs, _f(ys, b[m], k, off, flat), _f(under, b[m], k, off, flat),
+                            color=col, alpha=opts.region_alpha, lw=0, zorder=2.5)
+            if edges and r is sel:
+                hl = j == sel_region
+                for t in (reg.start, reg.end):
+                    ax.axvline(t, color=col, lw=1.6 if hl else 0.6, alpha=0.9 if hl else 0.5,
+                               zorder=5)
+            txt = _label(row, opts.region_labels)
+            if txt:
+                top = int(np.argmax(ys - under))
+                px, py = xs[top], _f(ys[top], b[m][top], k, off, flat)
+                dx, dy, ha, va = _label_placement(px, py, 0.0, x_end, 0.0, y_top, "auto")
+                ax.annotate(txt, (px, py), textcoords="offset points", xytext=(dx, dy),
+                            ha=ha, va=va, fontsize=opts.label_size,
+                            color=_readable(col, bg), zorder=6)
 
 
-def _curve_arrays(curve: Curve):
-    arrs = []
-    if _curve_needs(curve):
-        arrs.append(_y_adj(curve)[0])
-    if curve.baseline is not None and curve.baseline_shown:
-        arrs.append(_base_adj(curve))
-    return arrs
+def _label(row, mode):
+    """A region's label: its name if it has one (typed or the method's), its % of total.
+    None below the quantification limit: those are in the results, not on the figure, where
+    small neighbours' labels would only pile up."""
+    if "n.d." in row.flags or "< LOQ" in row.flags:
+        return ""
+    parts = []
+    if mode in ("name", "both") and row.named:
+        parts.append(row.name)
+    if mode in ("pct", "both") and row.pct is not None:
+        parts.append(f"{row.pct:.1f} %")
+    return "\n".join(parts)
 
 
-def _y_unit_label(datasets, opts):
-    units = {_y_adj(c)[1] for c in _all_curves(datasets) if c.shown and len(c.y)}
-    non_cps = units - {"Counts (cps)"}
-    return next(iter(non_cps)) if (len(non_cps) == 1 and len(units) == 1) else opts.y.title
+def y_title(opts):
+    return "% of max" if opts.pct_max and opts.y.title == Y_TITLE else opts.y.title
 
 
-def _data_extents(datasets):
-    curves = [c for c in _all_curves(datasets) if len(c.x) and _curve_arrays(c)]
-    x_max = max((float(c.x[-1]) for c in curves), default=1.0)
-    y_max = max((float(np.nanmax(a)) for c in curves for a in _curve_arrays(c)), default=1.0)
-    return x_max, y_max
-
-
-def resolve_limits(datasets, opts):
-    x_max_data, y_max_data = _data_extents(datasets)
+def resolve_limits(runs, opts):
+    x_max = max((float(r.x[-1]) for r in runs if r.shown and len(r.x)), default=1.0)
+    lo, hi = visible_range(runs, opts)
     xmin = 0.0 if opts.x.vmin is None else opts.x.vmin
-    xmax = x_max_data if opts.x.vmax is None else opts.x.vmax
-    ymin = 0.0 if opts.y.vmin is None else opts.y.vmin
-    ymax = (y_max_data * 1.05) if opts.y.vmax is None else opts.y.vmax
+    xmax = x_max if opts.x.vmax is None else opts.x.vmax
+    ymin = (lo * 1.05 if lo < 0 else 0.0) if opts.y.vmin is None else opts.y.vmin
+    ymax = hi * 1.05 if opts.y.vmax is None else opts.y.vmax
     if xmax <= xmin:
         xmax = xmin + 1.0
     if ymax <= ymin:
@@ -224,8 +300,8 @@ def resolve_limits(datasets, opts):
     return xmin, xmax, ymin, ymax
 
 
-def auto_extents(datasets, opts):
-    xmin, xmax, ymin, ymax = resolve_limits(datasets, opts)
+def auto_extents(runs, opts):
+    xmin, xmax, ymin, ymax = resolve_limits(runs, opts)
     return {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax,
             "xmajor": _auto_x_major(xmax - xmin, opts.plot_w_mm),
             "ymajor": _nice_major(ymax - ymin, opts.plot_h_mm)}
@@ -276,173 +352,55 @@ def _apply_axis(ax, which, axis, vmin, vmax, span_mm):
                 linestyle=axis.grid_style, linewidth=axis.grid_width, zorder=0)
 
 
-class _LegendState:
-    def __init__(self):
-        self.show = False
-        self.spike = False
-        self.peak = False
-
-
-def _draw_curve(ax, curve: Curve, limits, leg: _LegendState, crop=False, bg="#ffffff"):
-    xmin, xmax, ymin, ymax = limits
-    st = curve.style
-    y_adj = _y_adj(curve)[0]
-    base_adj = _base_adj(curve)
-    # When cropping, the curve line rides ABOVE every fill (incl. peak AUC at z=3), and a same-shape
-    # halo in the plot-background colour is drawn just beneath it, erasing any fill under the stroke
-    # so alpha overlaps read cleanly (3.png). Otherwise the line keeps its normal z=2.
-    line_z = 3.6 if crop else 2
-
-    if curve.shown and st.fill and base_adj is not None:
-        ax.fill_between(curve.x, y_adj, base_adj, color=st.fill_color, alpha=st.fill_alpha,
-                        linewidth=0, zorder=1)
-    if base_adj is not None and curve.baseline_shown:
-        bcol = curve.baseline_viz.color or _desaturate(st.color)
-        ax.plot(curve.x, base_adj, color=bcol, alpha=curve.baseline_viz.alpha, lw=st.line_width_pt,
-                linestyle=curve.baseline_viz.linestyle, zorder=1.5)
-        if len(curve.x) and float(np.nanmax(base_adj) - np.nanmin(base_adj)) < 1e-9:
-            c = float(np.nanmin(base_adj))  # flat baseline → annotate its level as y = c
-            ax.annotate(f"y = {c:.4g}", (curve.x[-1], c), textcoords="offset points",
-                        xytext=(-2, 2), ha="right", va="bottom", fontsize=6.0, color=bcol, zorder=1.6)
-    if curve.shown:
-        if crop:  # opaque halo the width of the stroke (+ a hair) cuts the fill around the line
-            ax.plot(curve.x, y_adj, color=to_rgba(bg, 1.0), lw=st.line_width_pt + 0.8,
-                    linestyle="solid", solid_capstyle="round", zorder=line_z - 0.1)
-        lbl = (curve.legend_label or curve.name) if curve.show_legend else "_nolegend_"
-        ax.plot(curve.x, y_adj, color=st.color, alpha=st.alpha, lw=st.line_width_pt,
-                linestyle=st.linestyle, zorder=line_z, label=lbl)
-        leg.show = leg.show or curve.show_legend
-
-    if curve.has_spikes and curve.spikes_group_shown:
-        idxs = curve.spike_indices()
-        mask = curve.spike_shown if curve.spike_shown is not None else np.ones(len(idxs), bool)
-        vis = idxs[mask[:len(idxs)]]
-        v = curve.spike_viz
-        lbl = "Spikes" if (v.in_legend and not leg.spike) else "_nolegend_"
-        if v.mode == "segment":
-            for k, i in enumerate(vis):
-                sl = slice(max(0, i - 1), min(len(curve.x), i + 2))
-                ax.plot(curve.x[sl], y_adj[sl], color=v.color, lw=st.line_width_pt, zorder=4,
-                        label=lbl if k == 0 else "_nolegend_")
-        elif v.mode == "vline" and len(vis):
-            clean = np.ones(len(curve.x), bool)
-            clean[idxs] = False                     # ignore every spike when interpolating the base
-            if clean.sum() >= 2:
-                # base = the linear interpolated point (matches spikes.remove "linear"; pchip only visually)
-                base_v = np.interp(curve.x[vis], curve.x[clean], y_adj[clean])
-                for k, i in enumerate(vis):
-                    ax.plot([curve.x[i], curve.x[i]], [base_v[k], y_adj[i]], color=v.color,
-                            lw=st.line_width_pt, zorder=4, label=lbl if k == 0 else "_nolegend_")
-        elif v.mode == "points" and len(vis):
-            ax.plot(curve.x[vis], y_adj[vis], linestyle="none", marker="o", ms=3,
-                    mfc=v.color, mec=v.color, zorder=4, label=lbl)
-        if v.in_legend and len(vis):
-            leg.spike = True
-            leg.show = True
-
-    if curve.peaks and curve.peaks_group_shown:
-        v = curve.peak_viz
-        vis = [pk for pk in curve.peaks if pk.shown]
-        if v.mode == "markers":
-            first = True
-            for pk in vis:  # per-peak so pk.color can override the group colour
-                col = pk.color or v.color
-                lbl = "Peaks" if (v.in_legend and not leg.peak and first) else "_nolegend_"
-                ax.plot([curve.x[pk.apex]], [y_adj[pk.apex]], linestyle="none", marker=v.marker,
-                        ms=5, mfc=col, mec=col, zorder=5, label=lbl)
-                first = False
-            if v.in_legend and vis:
-                leg.peak, leg.show = True, True
-        else:  # fill each peak's AUC region (curve ↔ its local/curve baseline)
-            first = True
-            for pk in vis:
-                sl = slice(pk.left, pk.right + 1)
-                xs, ys = curve.x[sl], y_adj[sl]
-                if curve.peak_local_baseline or base_adj is None:
-                    b = np.interp(xs, [xs[0], xs[-1]], [ys[0], ys[-1]])
-                else:
-                    b = base_adj[sl]
-                lbl = "Peaks" if (v.in_legend and not leg.peak and first) else "_nolegend_"
-                ax.fill_between(xs, ys, b, color=(pk.color or v.color), alpha=v.alpha, linewidth=0,
-                                zorder=3, label=lbl)
-                first = False
-            if v.in_legend and vis:
-                leg.peak, leg.show = True, True
-        for pk in vis:
-            txt = _peak_label(curve, pk)
-            if txt:
-                px, py = curve.x[pk.apex], y_adj[pk.apex]
-                col = v.label_color or _readable(pk.color or v.color, bg)
-                dx, dy, ha, va = _label_placement(px, py, xmin, xmax, ymin, ymax, v.label_pos)
-                ax.annotate(txt, (px, py), textcoords="offset points", xytext=(dx, dy),
-                            ha=ha, va=va, fontsize=v.label_size, color=col, zorder=6)
-
-
-def _peak_label(curve, pk):
-    mode = curve.annotate if pk.annotate is None else pk.annotate  # per-peak overrides the group
-    parts = []
-    if mode in ("rt", "both"):
-        parts.append(f"Rt {pk.rt:.2f}")
-    if mode in ("auc", "both"):
-        parts.append(f"{pk.pct:.0f}%")
-    return "\n".join(parts)
-
-
-def build_figure(datasets: list[Dataset], opts: PlotOptions | None = None,
-                 border: ExportBorder | None = None) -> Figure:
-    opts = opts or PlotOptions()
-    xmin, xmax, ymin, ymax = resolve_limits(datasets, opts)
-
+def build_figure(runs, opts: PlotOptions, results) -> Figure:
+    """The figure for export: plot area exactly opts' size in mm, plus the label margins."""
+    xmin, xmax, ymin, ymax = resolve_limits(runs, opts)
     left, bottom, right, top = _margins_mm(opts, ymax)
-    # total size = plot area + label margins (auto); or the user fixes the total and the plot area
-    # shrinks to fit inside it.
     plot_w = opts.plot_w_mm if opts.total_w_mm is None else max(5.0, opts.total_w_mm - left - right)
     plot_h = opts.plot_h_mm if opts.total_h_mm is None else max(5.0, opts.total_h_mm - bottom - top)
-    fig_w = plot_w + left + right
-    fig_h = plot_h + bottom + top
+    fig_w, fig_h = plot_w + left + right, plot_h + bottom + top
     fig = Figure(figsize=(fig_w / 25.4, fig_h / 25.4))
     fig.plot_area_mm = (plot_w, plot_h)   # what the size fields report back when a total is fixed
     fig.patch.set_facecolor(to_rgba(opts.outside_color, opts.outside_alpha))
-    if border is not None and border.on:
-        ins_x, ins_y = 1.0 / fig_w, 1.0 / fig_h
-        fig.add_artist(Rectangle((ins_x, ins_y), 1 - 2 * ins_x, 1 - 2 * ins_y,
-                                 transform=fig.transFigure, fill=False, edgecolor=border.color,
-                                 linestyle=BORDER_STYLES.get(border.style, "solid"),
-                                 linewidth=border.width, zorder=10))
     ax = fig.add_axes([left / fig_w, bottom / fig_h, plot_w / fig_w, plot_h / fig_h])
     ax.set_facecolor(to_rgba(opts.bg_color, opts.bg_alpha))
-
-    leg = _LegendState()
-    for c in _all_curves(datasets):
-        _draw_curve(ax, c, (xmin, xmax, ymin, ymax), leg, crop=opts.crop_fills, bg=opts.bg_color)
-
+    draw(ax, runs, opts, results, raw=opts.show_raw, spikes=opts.show_spikes,
+         background=opts.show_background, bg=opts.bg_color)
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_linewidth(opts.x.lw_pt if side == "bottom" else opts.y.lw_pt)
+    ax.spines["bottom"].set_linewidth(opts.x.lw_pt)
+    ax.spines["left"].set_linewidth(opts.y.lw_pt)
     _apply_axis(ax, "x", opts.x, xmin, xmax, plot_w)
     _apply_axis(ax, "y", opts.y, ymin, ymax, plot_h)
     ax.set_xlabel(opts.x.title, fontfamily=opts.x.title_font_family,
                   fontsize=opts.x.title_font_size, labelpad=opts.x.title_pad_mm * PT_PER_MM)
-    ax.set_ylabel(_y_unit_label(datasets, opts), fontfamily=opts.y.title_font_family,
+    ax.set_ylabel(y_title(opts), fontfamily=opts.y.title_font_family,
                   fontsize=opts.y.title_font_size, labelpad=opts.y.title_pad_mm * PT_PER_MM)
-    if leg.show:
+    if opts.legend and sum(r.shown for r in runs) > 1:
         ax.legend(loc=opts.legend_loc, frameon=False,
                   prop={"family": opts.legend_font_family, "size": opts.legend_font_size})
     return fig
 
 
 def _self_check():
-    x = np.arange(600) / 60.0
-    y = 8 + 100 * np.exp(-0.5 * ((np.arange(600) - 300) / 20) ** 2)
-    ds = Dataset(root=Curve(x=x, y=y))
-    fig = build_figure([ds])
+    from .peaks import find_regions, measure
+    from .run import Run
+
+    t = np.arange(600, dtype=float)
+    y = 8 + 400 * np.exp(-0.5 * ((t - 300) / 8) ** 2)
+    run = Run(x=t / 60, y=y)
+    run.detect_spikes()
+    run.regions = find_regions(run)
+    fig = build_figure([run], PlotOptions(), {run.id: measure(run)})
     ax = fig.axes[0]
     bb = ax.get_position()
     assert abs(bb.width * fig.get_figwidth() * 25.4 - 80) < 0.5
     assert abs(bb.height * fig.get_figheight() * 25.4 - 40) < 0.5
+    assert len(ax.collections) == 1 and "100.0 %" in ax.texts[0].get_text()   # the region
+    o = PlotOptions(pct_max=True)
+    assert y_title(o) == "% of max" and abs(visible_range([run], o)[1] - 100) < 1e-9
     print("plotting self-check OK")
 
 

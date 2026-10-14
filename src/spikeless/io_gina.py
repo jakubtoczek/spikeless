@@ -14,12 +14,13 @@ Format (reverse-engineered from real exports):
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
 import numpy as np
 
-from .dataset import Curve, Dataset, Meta
+from .run import Run, new_run
 
 _DATE_RE = re.compile(r"\d{2}/\d{2}/\d{4}")
 
@@ -83,11 +84,12 @@ def _infer_dt(time_raw: list[str]) -> float:
     return dt if dt > 0 else 1.0
 
 
-def load(path: str | Path, signal_col: int = 1) -> tuple[Dataset, list[str]]:
-    """Load a GINA export. Returns (Dataset, warnings). Warnings are non-fatal."""
+def load(path: str | Path, signal_col: int = 1) -> tuple[Run, list[str]]:
+    """Load a GINA export. Returns (Run, warnings). Warnings are non-fatal."""
     path = Path(path)
     warnings: list[str] = []
-    text = path.read_bytes().decode("cp1252", errors="replace")
+    data = path.read_bytes()
+    text = data.decode("cp1252", errors="replace")
     lines = text.splitlines()
 
     if len(lines) < 3:
@@ -135,18 +137,12 @@ def load(path: str | Path, signal_col: int = 1) -> tuple[Dataset, list[str]]:
     if np.nan_to_num(y).max() == 0:
         warnings.append(f"Signal column '{headers[signal_col]}' is all zeros — wrong channel?")
 
-    name = run_name.strip() or path.stem
-    root = Curve(x=x, y=y, name="original", kind="original", legend_label=name)
-    ds = Dataset(
-        root=root,
-        run_name=run_name.strip(),
-        run_datetime=run_datetime.strip(),
-        dt_s=dt,
-        headers=headers,
-        signal_col=signal_col,
-        meta=Meta(name=name, original_filename=path.name),
-    )
-    return ds, warnings
+    # every GINA export's title starts with its type, "Interval Values": not part of the name
+    name = re.sub(r"^Interval Values\s+", "", run_name.strip()) or path.stem
+    run = new_run(x, y, dt, name=name, file=path.name,
+                  sha256=hashlib.sha256(data).hexdigest(), run_datetime=run_datetime.strip(),
+                  headers=headers, signal_col=signal_col)
+    return run, warnings
 
 
 def _render_time(sec: float) -> str:
@@ -165,27 +161,24 @@ def _render_time(sec: float) -> str:
     return f"{h:02d}:{m:02d}"
 
 
-def save(ds, curve, path: str | Path) -> Path:
-    """Write a curve's signal back to a GINA-style .txt.
+def save(run: Run, path: str | Path) -> Path:
+    """Write a run's trace — spikes excluded and bridged, decay-corrected if its isotope is
+    ticked for it — back to a GINA-style .txt.
 
     cp1252, tab-separated, double-quoted fields, decimal comma, reconstructed time column —
     the same format our loader reads, so it round-trips (GINA X compatibility is best-effort,
     since we cannot re-emit channels we never read). Two columns: time + signal.
     """
     path = Path(path)
-    name = ds.run_name or ds.meta.name
-    header1 = f"{name}, {ds.run_datetime}" if ds.run_datetime else name
-    if ds.headers and len(ds.headers) >= 2 and ds.signal_col < len(ds.headers):
-        h_time, h_sig = ds.headers[0], ds.headers[ds.signal_col]
+    header1 = f"{run.name}, {run.run_datetime}" if run.run_datetime else run.name
+    if run.headers and len(run.headers) >= 2 and run.signal_col < len(run.headers):
+        h_time, h_sig = run.headers[0], run.headers[run.signal_col]
     else:
         h_time, h_sig = "Time, s", "Taux comptage du canal A, cps"
     lines = [header1, f'"{h_time}"\t"{h_sig}"']
-    dt = ds.dt_s
-    y = np.asarray(curve.y, dtype=float)
-    for i, v in enumerate(y):
-        t = _render_time(i * dt)
+    for i, v in enumerate(run.trace()):
         vs = ("%.3f" % float(v)).replace(".", ",")
-        lines.append(f'"{t}"\t"{vs}"')
+        lines.append(f'"{_render_time(i * run.dt_s)}"\t"{vs}"')
     path.write_bytes(("\n".join(lines) + "\n").encode("cp1252", errors="replace"))
     return path
 
@@ -203,22 +196,23 @@ def _self_check():
     p = Path(tempfile.gettempdir()) / "_spikeless_iotest.txt"
     p.write_bytes(sample.encode("cp1252"))
     ds, warns = load(p)
-    assert ds.run_name == "Interval Values Demo", ds.run_name
+    assert ds.name == "Demo", ds.name
     assert ds.run_datetime == "07/07/2026 14:17", ds.run_datetime
-    assert len(ds.root.y) == 3, len(ds.root.y)
-    assert abs(ds.root.y[1] - 2.5) < 1e-9, ds.root.y
+    assert len(ds.y) == 3, len(ds.y)
+    assert abs(ds.y[1] - 2.5) < 1e-9, ds.y
     assert abs(ds.dt_s - 1.0) < 1e-9, ds.dt_s
-    assert abs(ds.root.x[2] - 2 / 60) < 1e-9, ds.root.x
+    assert abs(ds.x[2] - 2 / 60) < 1e-9, ds.x
+    assert len(ds.sha256) == 64
     assert _time_to_seconds('"01:18"') == 4680
     assert _time_to_seconds('"01\'07"') == 67
     assert _time_to_seconds('"05"00"') == 5
 
     # save round-trips through our own loader
     out = Path(tempfile.gettempdir()) / "_spikeless_savetest.txt"
-    save(ds, ds.root, out)
+    save(ds, out)
     ds2, _ = load(out)
-    assert len(ds2.root.y) == len(ds.root.y), (len(ds2.root.y), len(ds.root.y))
-    assert abs(ds2.root.y[1] - ds.root.y[1]) < 1e-3, (ds2.root.y[1], ds.root.y[1])
+    assert len(ds2.y) == len(ds.y), (len(ds2.y), len(ds.y))
+    assert abs(ds2.y[1] - ds.y[1]) < 1e-3, (ds2.y[1], ds.y[1])
     assert abs(ds2.dt_s - ds.dt_s) < 1e-9, ds2.dt_s
     out.unlink(missing_ok=True)
 

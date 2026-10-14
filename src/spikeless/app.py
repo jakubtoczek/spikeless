@@ -1,1100 +1,840 @@
-"""Spikeless main window (PySide6 + matplotlib)."""
+"""Spikeless main window: one screen, four steps.
+
+The chromatogram in the middle, its results under it (the log in a tab beside them), and the
+steps on the right, top to bottom — ① Runs, ② Spikes, ③ Background, ④ Peaks — each acting on
+the selected run. Every change to a run is one undo step (Ctrl+Z / Ctrl+Y), named in the log.
+"""
 
 from __future__ import annotations
 
 import copy
-import csv
 import datetime as _dt
-import io
+import re
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QByteArray, QEvent, QMimeData, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtCore import QMimeData, Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox,
-    QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QRadioButton, QScrollArea,
-    QSlider, QSpinBox, QToolBar, QToolButton, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPlainTextEdit, QPushButton, QRadioButton, QScrollArea, QSlider, QSpinBox, QSplitter,
+    QTableWidget, QTableWidgetItem, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
-from . import io_gina, io_paste, session
-from .adjust import BASELINE_LABELS, AdjustParams, decay_factor, estimate_baseline, \
-    lookup_half_life_s
-from .dataset import Condition, Dataset, new_curve_from, new_id
-from .options import PREFS, PROC_LABELS, OptionsWindow, guard_fields, load_prefs
-from .options import ColorButton as _ColorButton
-from .peaks import PeakParams, analyze_peaks, detect_peaks
-from .plotting import ExportBorder, PlotOptions, auto_extents, build_figure
-from .plotview import OPENS, Background, ZoomableFigureView
-from .report import ReportWindow, num, peak_rows, sheet_name
-from .spikes import SpikeParams, detect, remove
-from .viz import BaselineViz, PeakViz, SpikeViz
-from . import __version__
+from . import __version__, io_gina, io_paste, session
+from .canvas import ChromCanvas
+from .figure import FigureWindow, _Collapsible, copy_figure, export_figure
+from .options import PREFS, ColorButton, OptionsWindow, guard_fields, load_prefs, method_names
+from .peaks import find_regions, fit, measure, snap
+from .plotting import PlotOptions
+from .report import HELP, ReportWindow, columns, rows as result_rows
+from .run import COLORS, Region
+from .spikes import remove
 
 APP_NAME = "Spikeless"
-
-_UNIT_S = {"s": 1.0, "min": 60.0, "h": 3600.0, "d": 86400.0}
-_LEGEND_LOCS = ["upper right", "upper left", "lower right", "lower left", "center right", "best"]
-_INTERP_METHODS = [("linear", "Linear (n-1 → n+1)"), ("pchip", "PCHIP monotone cubic")]
-_LINESTYLES = ["solid", "dotted", "dashed", "dashdot"]
-_MARKERS = ["v", "^", "o", "s", "D", "x", "+", "*"]
-_ANNOT = [("none", "None"), ("rt", "Rt"), ("auc", "%"), ("both", "Rt + %")]
-
-
-def _parse_run_dt(s):
-    for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S"):
-        try:
-            return _dt.datetime.strptime(s.strip(), fmt)
-        except ValueError:
-            continue
-    return None
-
-
-# Processing features (key, button label, gear-slot name) in PIPELINE order. Clicking a button
-# runs its action list via _run_feature(key); the gear opens that feature's parameter dialog.
-# Spikes first (electronic artefact, unrelated to activity → must precede decay); then decay
-# (activity correction) before baseline & peaks so AUC/% reflect the corrected signal.
-PROC_FEATURES = [(k, PROC_LABELS[k], gear) for k, gear in (
-    ("spikes", "_edit_spike_params"), ("decay", "_edit_decay_options"),
-    ("baseline", "_edit_baseline_params"), ("peaks", "_edit_peak_params"))]
-# Each Processing button runs an ordered, user-editable list of actions (its "story"): the pinned
-# process step (the detection itself — reorderable, not removable), show/hide of a target, and
-# delays. Defaults below reproduce the classic behaviour; edited live in each button's collapsible.
-# Action shapes: {"type":"process"} | {"type":"vis","show":bool,"target":str} | {"type":"delay","ms":int}
-PROC_ACTIONS = {
-    "spikes": [
-        {"type": "process"},
-        {"type": "vis", "show": True, "target": "spikes"},
-        {"type": "delay", "ms": 500},
-        {"type": "vis", "show": True, "target": "result"},
-        {"type": "vis", "show": False, "target": "original"},
-        {"type": "vis", "show": False, "target": "spikes"},
-    ],
-    "decay": [{"type": "process"}, {"type": "vis", "show": True, "target": "result"}],
-    "baseline": [
-        {"type": "process"},
-        {"type": "vis", "show": True, "target": "baseline"},
-        {"type": "vis", "show": True, "target": "result"},
-    ],
-    "peaks": [{"type": "process"}, {"type": "vis", "show": True, "target": "peaks"}],
-}
-
-# Show/hide targets available per feature: target key -> menu/combo label. "result" is the child
-# curve the process step builds (spikeless / decay / baseline-corrected).
-PROC_TARGETS = {
-    "spikes": {"original": "original curve", "spikes": "spikes overlay", "result": "spikeless curve"},
-    "decay": {"original": "original curve", "result": "decay curve"},
-    "baseline": {"baseline": "baseline line", "result": "corrected curve"},
-    "peaks": {"peaks": "peaks"},
-}
-_ACTION_LABEL = PROC_LABELS
-
-# Panels (options key, attribute name) — for Options › Panels, "open when Spikeless starts".
-DOCK_KEYS = [("data", "data_dock"), ("processing", "processing_dock"),
-             ("log", "log_dock"), ("plot_options", "display_dock")]
+OPENS = (".txt", session.EXT)       # what Open… and a drop take
+GREY = "color:#8d8d8d;"
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self._title = f"{APP_NAME} {__version__} — radio-HPLC plotting, spike removal & analysis"
+        self._title = f"{APP_NAME} {__version__} — radio-HPLC: spikes, peaks, report"
         self.setWindowTitle(self._title)
-        self.resize(1200, 800)
+        self.resize(1400, 880)
         self.setAcceptDrops(True)
         icon = _app_icon()
         if icon is not None:
             self.setWindowIcon(icon)
-
-        self.datasets: list[Dataset] = []
-        self.plot_opts = PlotOptions()
-        self.spike_params = SpikeParams()
-        self.interp_method = "linear"
-        self.baseline_method = "min"
-        self.baseline_n = 20
-        self.baseline_clip = False   # clip the baseline-corrected curve at 0 (no negatives)
-        self.peak_params = PeakParams()
-        # per-feature action lists (session state; edited via each button's collapsible)
-        self.proc_actions = {k: copy.deepcopy(v) for k, v in PROC_ACTIONS.items()}
-        self._proc_child = None  # last child a process step made, for a following show/hide "result"
         load_prefs()
-        self.options_win: OptionsWindow | None = None    # built when first opened
-        self.report_win: ReportWindow | None = None
+        self.runs: list = []
+        self.sel = None                  # the run the steps act on
+        self.sel_region = -1             # its selected region, or -1
+        self.results: dict = {}          # run.id -> peaks.Results
+        self.plot_opts = PlotOptions()   # the figure (Figure window); saved with the session
+        self.view = {"raw": False, "spikes": True, "background": True}   # screen only
+        self._undo: list = []
+        self._redo: list = []
         self._session_path: Path | None = None
-        self._dir = Path.home()      # where file dialogs open: the last file's folder
-        self.view_scale = 1.0        # resolution slider (× plot size, on-screen)
-        self.scale_export = False    # also apply the slider to exports/clipboard
-        self._fig = None
-        self.d: dict = {}
-        self._loading_disp = False
-        self._plot_opts_shown_once = False
-        self._paste_n = 0            # how many clipboard pastes this session, for dataset names
-        self._undo_stack: list = []
-        self._redo_stack: list = []
-        self._pen = _pen_icon()
-
-        self._build_ui()
-        for key, slot in ((QKeySequence.Undo, self._undo), (QKeySequence.Redo, self._redo),
+        self._dir = Path.home()          # where file dialogs open: the last file's folder
+        self._paste_n = 0
+        self._filling = False
+        self.options_win = self.report_win = self.figure_win = None
+        self._build()
+        for key, slot in ((QKeySequence.Undo, self._undo_step), (QKeySequence.Redo, self._redo_step),
                           (QKeySequence.Copy, self._copy), (QKeySequence.Paste, self._paste),
-                          (QKeySequence.Save, self._save_session)):
+                          (QKeySequence.Save, self._save_session), (QKeySequence.Open, self._browse)):
             QShortcut(key, self, activated=slot)
-        QShortcut(QKeySequence.Delete, self.data_tree, activated=self._delete_selected,
-                  context=Qt.WidgetShortcut)   # not while a name is being typed
-        self._apply_lock()
-        self._apply_default_docks()
-        self._update_enabled()
-        self._position_overlay()
-        self.log(f"{APP_NAME} ready. Drag a GINA .txt file or a saved session here, use Open…, "
-                 "or paste two columns (time, cps) with Ctrl+V.")
+        for w, slot in ((self.canvas, self._delete_region), (self.table, self._delete_region),
+                        (self.run_list, self._remove_run)):
+            QShortcut(QKeySequence.Delete, w, activated=slot, context=Qt.WidgetShortcut)
+        self.refresh()
+        self.log(f"{APP_NAME} ready. Drop a GINA .txt export or a saved session, use Open…, or "
+                 "paste columns (time, count rate) with Ctrl+V.")
 
-    # ---------------- options ----------------
-    def apply_prefs(self):
-        """The options changed (Options window): everything that shows them follows."""
-        self.plot_view.set_background(Background(**PREFS["background"]))
-        self.scale_slider.setMaximum(PREFS["scale_max"] * 10)
-        self._apply_lock()
-        if PREFS["proc_visible"] != self._proc_shown:
-            self._populate_processing()
-        if self.report_win is not None:
-            self.report_win.sync()
-        self._refresh_plot()
-
-    def _options(self, topic=None):
-        if self.options_win is None:
-            self.options_win = OptionsWindow(self)
-        self.options_win.open(topic)
-
-    def _report(self):
-        if self.report_win is None:
-            self.report_win = ReportWindow(self)
-        self.report_win.open()
-
-    def _apply_default_docks(self):
-        for key, attr in DOCK_KEYS:
-            dock = getattr(self, attr)
-            if key == "plot_options":
-                continue  # plot options stays hidden until data is loaded (see _update_enabled)
-            dock.setVisible(PREFS["docks_open"].get(key, True))
-
-    def closeEvent(self, e):
-        for w in (self.options_win, self.report_win):   # or the app stays up with them
-            if w is not None:
-                w.close()
-        super().closeEvent(e)
-
-    # ---------------- UI construction ----------------
-    def _build_ui(self):
-        self.plot_view = ZoomableFigureView()
-        self.plot_view.set_background(Background(**PREFS["background"]))
-        self.plot_view.filesDropped.connect(self._load_paths)
-        self.plot_view.resized.connect(self._position_overlay)
-        self.setCentralWidget(self.plot_view)
-
-        # Overlays live on the VIEWPORT (not the frame) so scrollbars can't shove them
-        # into the neighbouring dock when data loads.
-        vp = self.plot_view.viewport()
-
-        # top-right cluster: Copy, Export, gear — mirrors the Log's title-bar tools
-        self.plot_tools = QWidget(vp)
-        self.plot_tools.setObjectName("plotTools")
-        self.plot_tools.setStyleSheet(
-            "QWidget#plotTools{background:#3c3f41;border:1px solid #555;border-radius:3px;}"
-            "QToolButton{color:#e0e0e0;border:none;padding:3px 7px;}"
-            "QToolButton:hover{background:#4a4d4f;} QToolButton:disabled{color:#777;}")
-        ht = QHBoxLayout(self.plot_tools)
-        ht.setContentsMargins(2, 1, 2, 1)
-        ht.setSpacing(0)
-        self.plot_copy_btn = _tool("⧉ Copy", "Copy plot to clipboard", self._copy_plot)
-        self.plot_export_btn = _tool("⭳ Export", "Export plot to PNG/SVG", self._export_plot)
-        gear = _tool("⚙", "Copy / export options (Options › Plot)",
-                     lambda: self._options("Plot"))
-        for b in (self.plot_copy_btn, self.plot_export_btn, gear):
-            ht.addWidget(b)
-        self.plot_tools.adjustSize()
-        vp.installEventFilter(self)   # keep overlays inset when scrollbars resize the viewport
-
-        # resolution slider (× plot size on screen; optionally applied to export)
-        self.scale_bar = QWidget(vp)
-        self.scale_bar.setStyleSheet(
-            "QWidget{background:#2b2b2b;color:#e0e0e0;border:1px solid #555;border-radius:3px;}")
-        hb = QHBoxLayout(self.scale_bar)
-        hb.setContentsMargins(6, 2, 6, 2)
-        hb.setSpacing(4)
-        self.scale_slider = QSlider(Qt.Horizontal)
-        self.scale_slider.setMinimum(10)
-        self.scale_slider.setMaximum(PREFS["scale_max"] * 10)
-        self.scale_slider.setValue(10)
-        self.scale_slider.setFixedWidth(90)
-        self.scale_slider.valueChanged.connect(self._on_scale)
-        self.scale_label = QLabel("1.0×")
-        self.scale_export_chk = QCheckBox("export")
-        self.scale_export_chk.toggled.connect(self._on_scale_export)
-        hb.addWidget(QLabel("res"))
-        hb.addWidget(self.scale_slider)
-        hb.addWidget(self.scale_label)
-        hb.addWidget(self.scale_export_chk)
-        self.scale_bar.adjustSize()
-
-        self.setCorner(Qt.BottomLeftCorner, Qt.BottomDockWidgetArea)
-        self.setCorner(Qt.BottomRightCorner, Qt.BottomDockWidgetArea)
-
-        self._build_data_dock()
-        self._build_processing_dock()
-        self._build_display_dock()
-        self._build_log_dock()
-        self.display_dock.hide()
-        self._build_toolbar()
-
-        self.resizeDocks([self.log_dock], [150], Qt.Vertical)
-        self.resizeDocks([self.data_dock, self.processing_dock], [380, 110], Qt.Vertical)
-        self.resizeDocks([self.display_dock], [300], Qt.Horizontal)
-        self._refresh_plot()
-
-    def _build_toolbar(self):
+    # ================================================================ building
+    def _build(self):
         tb = QToolBar("Main")
         tb.setMovable(False)
         self.addToolBar(tb)
-        for text, tip, slot in (
-                ("Open…", "A GINA .txt export, or a saved session (.spikeless)", self._browse),
-                ("Paste (Ctrl+V)", "Import columns from the clipboard (Prism, Excel, any text): "
-                 "time then count rate. Extra value columns, or time/value pairs, load one "
-                 "dataset each. Time unit is guessed — minutes, or seconds if they look like it.",
-                 self._paste),
-                ("Save…", "Save the session — datasets, curves, peaks, plot options — to open "
-                 "it again later (Ctrl+S)", self._save_session)):
-            b = QPushButton(text)
-            b.setToolTip(tip)
-            b.clicked.connect(slot)
-            tb.addWidget(b)
-        tb.addSeparator()
-        for dock in (self.display_dock, self.data_dock, self.processing_dock, self.log_dock):
-            tb.addWidget(self._dock_button(dock))
-        tb.addSeparator()
-        for text, tip, slot in (("Report", "The report: pick its sections, see it, save it",
-                                 self._report),
-                                ("Options", "How the plot is shown, copied and exported; the "
-                                 "panels; the isotopes", self._options)):
-            b = QPushButton(text)
-            b.setToolTip(tip)
-            b.clicked.connect(lambda _=False, f=slot: f())
-            tb.addWidget(b)
-
-    def _dock_button(self, dock):
-        btn = QToolButton()
-        act = dock.toggleViewAction()
-        act.setText(dock.windowTitle())
-        btn.setDefaultAction(act)
-        btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
-        return btn
-
-    def _build_data_dock(self):
-        self.data_dock = QDockWidget("Data", self)
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        self.data_tree = _DataTree()
-        self.data_tree.setColumnCount(2)
-        self.data_tree.setHeaderHidden(True)
-        self.data_tree.header().setStretchLastSection(False)
-        self.data_tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.data_tree.header().setSectionResizeMode(1, QHeaderView.Fixed)
-        self.data_tree.setColumnWidth(1, 26)
-        self.data_tree.setDragDropMode(QAbstractItemView.InternalMove)  # drag to reorder (z-order)
-        self.data_tree.setDropIndicatorShown(True)
-        self.data_tree.currentItemChanged.connect(lambda *_: self._on_tree_select())
-        self.data_tree.itemChanged.connect(self._on_tree_item_changed)
-        self.data_tree.reordered.connect(self._reorder)
-        lay.addWidget(self.data_tree)
-        row = QHBoxLayout()
-        self.btn_info = QPushButton("Info")
-        self.btn_info.clicked.connect(self._edit_info)
-        self.btn_adjust = QPushButton("Adjust")
-        self.btn_adjust.clicked.connect(self._edit_adjust)
-        self.btn_disp = QPushButton("Display…")
-        self.btn_disp.clicked.connect(self._edit_node_display)
-        self.btn_dup = QPushButton("Duplicate")
-        self.btn_dup.clicked.connect(self._duplicate_curve)
-        self.btn_export = QPushButton("Export…")
-        self.btn_export.setToolTip("Export the selection (curve → GINA X; peaks → CSV)")
-        self.btn_export.clicked.connect(self._export_selected)
-        for b in (self.btn_info, self.btn_adjust, self.btn_disp, self.btn_dup, self.btn_export):
-            row.addWidget(b)
-        lay.addLayout(row)
-        self.data_dock.setWidget(w)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.data_dock)
-
-    def _build_processing_dock(self):
-        self.processing_dock = QDockWidget("Processing", self)
-        self._proc_body = QWidget()
-        self._proc_lay = QVBoxLayout(self._proc_body)
-        self.processing_dock.setWidget(self._proc_body)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.processing_dock)
-        self._populate_processing()
-
-    def _populate_processing(self):
-        """(Re)build the Processing buttons, showing only the features enabled in Options.
-        Each button carries a collapsible, editable action list (hidden by default)."""
-        _clear_layout(self._proc_lay)
-        self._proc_shown = dict(PREFS["proc_visible"])
-        for key, label, gear_name in PROC_FEATURES:
-            if not PREFS["proc_visible"].get(key, True):
+        for item in (("Open…", "A GINA .txt export, or a saved session (.spikeless) — Ctrl+O",
+                      self._browse),
+                     ("Paste", "Columns copied from Excel or Prism: time, then count rate — "
+                      "Ctrl+V", self._paste),
+                     ("Save…", "The session: runs, spikes, background, regions, figure — "
+                      "Ctrl+S", self._save_session), None,
+                     ("Figure…", "What Copy and Export make: its settings and a preview",
+                      self._figure),
+                     ("Report", "Pick its sections and columns, see it, save it", self._report),
+                     ("Options", "Export resolution, isotopes, methods, log", self._options)):
+            if item is None:
+                tb.addSeparator()
                 continue
-            box = QWidget()
-            col = QVBoxLayout(box)
-            col.setContentsMargins(0, 0, 0, 0)
-            col.setSpacing(1)
-            r = QHBoxLayout()
-            r.setContentsMargins(0, 0, 0, 0)
-            toggle = QToolButton()
-            toggle.setText("▸")
-            toggle.setAutoRaise(True)
-            toggle.setToolTip("Edit what shows/hides (and when) as this runs")
-            b = QPushButton(label)
-            b.clicked.connect(lambda _=False, k=key: self._run_feature(k))
-            r.addWidget(toggle)
-            r.addWidget(b, 1)
-            r.addWidget(_gear(getattr(self, gear_name)))
-            col.addLayout(r)
-            body = self._build_action_editor(key)
-            body.setVisible(False)
-            toggle.clicked.connect(lambda _=False, bd=body, tg=toggle:
-                                   (bd.setVisible(not bd.isVisible()),
-                                    tg.setText("▾" if bd.isVisible() else "▸")))
-            col.addWidget(body)
-            self._proc_lay.addWidget(box)
-        self._proc_lay.addStretch(1)
+            b = QPushButton(item[0])
+            b.setToolTip(item[1])
+            b.clicked.connect(lambda _=False, f=item[2]: f())
+            tb.addWidget(b)
 
-    # ---------------- editable action list (per Processing feature) ----------------
-    # ponytail: session-state only (matches the old proc_steps); persist with the options if users ask.
-    def _build_action_editor(self, key):
-        """A drag-reorderable list of this feature's actions + a '＋ add' button. Edits write
-        straight back to self.proc_actions[key] (session state)."""
-        body = QWidget()
-        bl = QVBoxLayout(body)
-        bl.setContentsMargins(20, 0, 3, 3)
-        bl.setSpacing(1)
-        lst = _ReorderList()
-        lst._on_drop = lambda k=key, w=lst: self._reorder_actions(k, w)
-        lst.setStyleSheet("QListWidget{border:none;} QListWidget::item{border:none;}")
-        self._reload_actions(key, lst)
-        bl.addWidget(lst)
-        add = QToolButton()
-        add.setText("＋ add")
-        add.setAutoRaise(True)
-        add.setPopupMode(QToolButton.InstantPopup)
-        menu = QMenu(add)
-        menu.addAction("show / hide …", lambda k=key, w=lst: self._add_action(
-            k, w, {"type": "vis", "show": True, "target": next(iter(PROC_TARGETS[k]))}))
-        menu.addAction("delay …", lambda k=key, w=lst: self._add_action(
-            k, w, {"type": "delay", "ms": 500}))
-        add.setMenu(menu)
-        bl.addWidget(add, 0, Qt.AlignLeft)
-        return body
+        # the plot, its view ticks and Copy / Export above it
+        self.canvas = ChromCanvas()
+        self.canvas.regionDrawn.connect(self._drawn)
+        self.canvas.edgeMoved.connect(self._edge_moved)
+        self.canvas.regionPicked.connect(self._pick_region)
+        self.canvas.stretchDrawn.connect(self._stretch)
+        self.canvas.dragging.connect(self._dragging)
+        top = QWidget()
+        tv = QVBoxLayout(top)
+        tv.setContentsMargins(0, 0, 0, 0)
+        bar = QHBoxLayout()
+        self.ticks = {}
+        for key, text, tip in (
+                ("raw", "Trace as recorded", "The selected run before spikes were excluded, grey"),
+                ("spikes", "Spikes", "The selected run's excluded spikes in red; a ring on one "
+                                     "put back"),
+                ("background", "Background", "The selected run's background, dashed"),
+                ("stack", "Stack", "Runs one above the other, background subtracted (the "
+                                   "figure too)"),
+                ("pct_max", "% of max", "Each run as % of its highest point above background "
+                                        "(the figure too)")):
+            c = QCheckBox(text)
+            c.setToolTip(tip)
+            c.toggled.connect(lambda on, k=key: self._view(k, on))
+            self.ticks[key] = c
+            bar.addWidget(c)
+        bar.addStretch(1)
+        for text, tip, slot in (("⧉ Copy", "The figure to the clipboard, at its size in mm "
+                                           "(Ctrl+C)", lambda: copy_figure(self)),
+                                ("⭳ Export…", "The figure as PNG or SVG, at its size in mm",
+                                 lambda: export_figure(self)),
+                                ("⚙ Figure…", "What the figure shows, its size, fonts, axes",
+                                 self._figure)):
+            b = QToolButton()
+            b.setText(text)
+            b.setToolTip(tip)
+            b.setAutoRaise(True)
+            b.clicked.connect(lambda _=False, f=slot: f())
+            bar.addWidget(b)
+        tv.addLayout(bar)
+        tv.addWidget(self.canvas, 1)
 
-    def _reload_actions(self, key, lst):
-        """Rebuild every row from self.proc_actions[key]. Each item carries its list index as a
-        token (Qt.UserRole int, which survives a drag) so a drop's new order can be read back —
-        the inline row widgets are dropped by the move, so we recreate them all."""
-        lst.blockSignals(True)
-        lst.clear()
-        for idx, act in enumerate(self.proc_actions[key]):
-            it = QListWidgetItem(lst)
-            it.setData(Qt.UserRole, idx)
-            row = self._action_row(key, act, lst)
-            it.setSizeHint(row.sizeHint())
-            lst.setItemWidget(it, row)
-        lst.blockSignals(False)
-        h = sum(lst.sizeHintForRow(i) for i in range(lst.count())) + 2 * lst.frameWidth() + 2
-        lst.setFixedHeight(max(h, 8))
-
-    def _reorder_actions(self, key, lst):
-        order = [lst.item(i).data(Qt.UserRole) for i in range(lst.count())]
-        if any(t is None for t in order):
-            return  # token lost (shouldn't happen) → leave the model untouched
-        old = self.proc_actions[key]
-        self.proc_actions[key] = [old[t] for t in order]
-        self._reload_actions(key, lst)
-
-    def _add_action(self, key, lst, act):
-        self.proc_actions[key].append(act)
-        self._reload_actions(key, lst)
-
-    def _del_action(self, key, lst, act):
-        self.proc_actions[key] = [a for a in self.proc_actions[key] if a is not act]
-        self._reload_actions(key, lst)
-
-    def _action_row(self, key, act, lst):
-        """One editable row; combos/spin write straight into the act dict."""
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(3)
-        h.addWidget(QLabel("⋮⋮"))   # drag affordance (the whole row drags)
-        t = act.get("type")
-        if t == "process":
-            lab = QLabel(f"● {_ACTION_LABEL.get(key, key)} (runs here)")
-            lab.setStyleSheet("font-weight:600;")
-            h.addWidget(lab, 1)
-            return w   # no delete: the process step cannot be removed
-        if t == "vis":
-            sh = QComboBox()
-            sh.addItems(["show", "hide"])
-            sh.setCurrentIndex(0 if act.get("show", True) else 1)
-            sh.currentIndexChanged.connect(lambda i, a=act: a.__setitem__("show", i == 0))
-            tgt = QComboBox()
-            keys = list(PROC_TARGETS[key])
-            for tk in keys:
-                tgt.addItem(PROC_TARGETS[key][tk], tk)
-            tgt.setCurrentIndex(keys.index(act["target"]) if act.get("target") in keys else 0)
-            tgt.currentIndexChanged.connect(
-                lambda _i, a=act, c=tgt: a.__setitem__("target", c.currentData()))
-            h.addWidget(sh)
-            h.addWidget(tgt, 1)
-        elif t == "delay":
-            h.addWidget(QLabel("delay"))
-            spin = QDoubleSpinBox()
-            spin.setRange(0.0, 10.0)
-            spin.setSingleStep(0.1)
-            spin.setDecimals(2)
-            spin.setSuffix(" s")
-            spin.setValue(act.get("ms", 500) / 1000.0)
-            spin.valueChanged.connect(lambda v, a=act: a.__setitem__("ms", int(round(v * 1000))))
-            h.addWidget(spin)
-            h.addStretch(1)
-        x = QToolButton()
-        x.setText("✕")
-        x.setAutoRaise(True)
-        x.setToolTip("Delete this step")
-        x.clicked.connect(lambda _=False, k=key, w2=lst, a=act: self._del_action(k, w2, a))
-        h.addWidget(x)
-        return w
-
-    def _build_log_dock(self):
-        self.log_dock = QDockWidget("Log", self)
+        # results and log
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        self.summary.setStyleSheet(GREY)
+        self.table = QTableWidget()
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.itemChanged.connect(self._renamed)
+        self.table.currentCellChanged.connect(lambda r, *_: self._pick_row(r))
+        self.table.setToolTip("Double-click a region's name to rename it; Del removes the "
+                              "selected region; Ctrl+C copies the table. Columns: Report window.")
+        res = QWidget()
+        rv = QVBoxLayout(res)
+        rv.setContentsMargins(4, 4, 4, 4)
+        rv.addWidget(self.summary)
+        rv.addWidget(self.table, 1)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(5000)
-        self.log_dock.setWidget(self.log_view)
-        self.log_dock.setTitleBarWidget(_DockTitleBar(self.log_dock, [
-            ("copy", "Copy", "Copy the log to the clipboard", self._copy_log),
-            ("export", "Export", "Export the log to a .txt file", self._export_log),
-            ("gear", "⚙", "Log copy / export options (Options › Log)",
-             lambda: self._options("Log")),
-        ]))
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
-
-    def _copy_log(self):
-        QApplication.clipboard().setText(self._log_text())
-        self.log("Log copied to clipboard.")
-
-    def _log_text(self):
-        text = self.log_view.toPlainText()
-        if not PREFS["log_timestamps"]:
-            import re
-            text = re.sub(r"^\[\d\d:\d\d:\d\d\] ", "", text, flags=re.MULTILINE)
-        return text
-
-    # ---------------- Display options dock ----------------
-    def _build_display_dock(self):
-        self.display_dock = QDockWidget("Plot options", self)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.display_dock)
-        self._load_display()
-
-    def _load_display(self):
-        """(Re)build the Plot options panel from self.plot_opts: at start, and when a session
-        brings its own."""
-        old = self.display_dock.widget()
-        self.d = {}
-        host = QWidget()
-        outer = QVBoxLayout(host)
-        o = self.plot_opts
-
-        pa = QWidget()
-        f1 = _cform(pa)
-        self.d["w_mm"] = _spin(10, 400, o.plot_w_mm, 1)
-        self.d["h_mm"] = _spin(10, 400, o.plot_h_mm, 1)
-        self.d["bg"] = _ColorButton(o.bg_color, self._apply_display)
-        self.d["bg_a"] = _spin(0, 1, o.bg_alpha, 0.05)
-        f1.addRow("Width (mm)", self.d["w_mm"])
-        f1.addRow("Height (mm)", self.d["h_mm"])
-        f1.addRow("Background", self.d["bg"])
-        f1.addRow("Background alpha", self.d["bg_a"])
-
-        mg = QWidget()
-        f2 = _cform(mg)
-        # total figure size = plot area + these label margins; Auto shows the computed value
-        tw = _spin(20, 800, o.total_w_mm if o.total_w_mm else o.plot_w_mm, 1)
-        tw_auto = QCheckBox("Auto")
-        tw_auto.setChecked(o.total_w_mm is None)
-        tw.setEnabled(o.total_w_mm is not None)
-        th = _spin(20, 800, o.total_h_mm if o.total_h_mm else o.plot_h_mm, 1)
-        th_auto = QCheckBox("Auto")
-        th_auto.setChecked(o.total_h_mm is None)
-        th.setEnabled(o.total_h_mm is not None)
-        self.d["tot_w"], self.d["tot_w_auto"] = tw, tw_auto
-        self.d["tot_h"], self.d["tot_h_auto"] = th, th_auto
-        # a fixed total owns the plot area: grey its field out and report what it works out to
-        for auto, spin in ((tw_auto, self.d["w_mm"]), (th_auto, self.d["h_mm"])):
-            spin.setEnabled(auto.isChecked())
-            auto.toggled.connect(spin.setEnabled)
-        tw_auto.toggled.connect(tw.setDisabled)
-        tw_auto.toggled.connect(self._apply_display)
-        th_auto.toggled.connect(th.setDisabled)
-        th_auto.toggled.connect(self._apply_display)
-        tw.valueChanged.connect(self._apply_display)
-        th.valueChanged.connect(self._apply_display)
-        f2.addRow("Total width (mm)", _pair(tw_auto, tw))
-        f2.addRow("Total height (mm)", _pair(th_auto, th))
-        self.d["out"] = _ColorButton(o.outside_color, self._apply_display)
-        self.d["out_a"] = _spin(0, 1, o.outside_alpha, 0.05)
-        f2.addRow("Background", self.d["out"])
-        f2.addRow("Background alpha", self.d["out_a"])
-
         lg = QWidget()
-        f3 = _cform(lg)
-        self.d["leg_loc"] = QComboBox()
-        self.d["leg_loc"].addItems(_LEGEND_LOCS)
-        self.d["leg_loc"].setCurrentText(o.legend_loc)
-        self.d["leg_font"] = QLineEdit(o.legend_font_family)
-        self.d["leg_size"] = _spin(4, 24, o.legend_font_size, 0.5)
-        f3.addRow("Legend position", self.d["leg_loc"])
-        f3.addRow("Legend font", self.d["leg_font"])
-        f3.addRow("Legend size", self.d["leg_size"])
-        self.d["leg_loc"].currentIndexChanged.connect(self._apply_display)
-        self.d["leg_font"].editingFinished.connect(self._apply_display)
-        self.d["leg_size"].valueChanged.connect(self._apply_display)
+        lv = QVBoxLayout(lg)
+        lv.setContentsMargins(4, 4, 4, 4)
+        lh = QHBoxLayout()
+        lh.addStretch(1)
+        for text, fn in (("Copy", self._copy_log), ("Export…", self._export_log)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            lh.addWidget(b)
+        lv.addLayout(lh)
+        lv.addWidget(self.log_view, 1)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(res, "Results")
+        self.tabs.addTab(lg, "Log")
+        left = QSplitter(Qt.Vertical)
+        left.addWidget(top)
+        left.addWidget(self.tabs)
+        left.setSizes([580, 250])
 
-        for k in ("w_mm", "h_mm", "bg_a", "out_a"):
-            self.d[k].valueChanged.connect(self._apply_display)
+        # the steps
+        steps = QWidget()
+        sv = QVBoxLayout(steps)
+        self.step = {}
+        for key, title, body in (("runs", "① Runs", self._runs_step()),
+                                 ("spikes", "② Spikes", self._spikes_step()),
+                                 ("background", "③ Background", self._bg_step()),
+                                 ("peaks", "④ Peaks", self._peaks_step())):
+            self.step[key] = _Collapsible(title, body, expanded=True)
+            sv.addWidget(self.step[key])
+        sv.addStretch(1)
+        guard_fields(steps)
+        scroll = QScrollArea(widgetResizable=True)
+        scroll.setWidget(steps)
+        split = QSplitter(Qt.Horizontal)
+        split.addWidget(left)
+        split.addWidget(scroll)
+        split.setStretchFactor(0, 1)
+        split.setSizes([1030, 370])
+        self.setCentralWidget(split)
+        self.statusBar()
 
-        outer.addWidget(_Collapsible("Plot area", pa, expanded=True))
-        outer.addWidget(_Collapsible("Margins", mg, expanded=False))
-        outer.addWidget(_Collapsible("Legend", lg, expanded=False))
-        outer.addWidget(_Collapsible("Y axis", self._axis_group("y", o.y), expanded=False))
-        outer.addWidget(_Collapsible("X axis", self._axis_group("x", o.x), expanded=False))
-        outer.addStretch(1)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(host)
-        guard_fields(host)
-        self.display_dock.setWidget(scroll)
-        if old is not None:
-            old.deleteLater()
-
-    def _axis_group(self, pfx, ax):
-        g = QWidget()
-        f = _cform(g)
-        t = QLineEdit(ax.title)
-        self.d[f"{pfx}_title"] = t
-        f.addRow("Axis title", t)
-        t.editingFinished.connect(self._apply_display)
-        self._auto_field(f, "Min", pfx, "min", ax.vmin, -1e9, 1e9, 1)
-        self._auto_field(f, "Max", pfx, "max", ax.vmax, -1e9, 1e9, 1)
-        self._auto_field(f, "Major interval", pfx, "maj", ax.major, 0, 1e9, 0.25)
-        self._auto_field(f, "Graduation start", pfx, "gstart", ax.grad_start, -1e9, 1e9, 1)
-        self._auto_field(f, "Graduation end", pfx, "gend", ax.grad_end, -1e9, 1e9, 1)
-        minor = QCheckBox()
-        minor.setChecked(ax.minor_on)
-        self.d[f"{pfx}_minor"] = minor
-        f.addRow("Minor ticks", minor)
-        minor.toggled.connect(self._apply_display)
-        for key, lbl, lo, hi, step in [("lw", "Axis thickness (pt)", 0.1, 3, 0.1),
-                                       ("majlen", "Major tick length (mm)", 0, 20, 0.5),
-                                       ("minlen", "Minor tick length (mm)", 0, 20, 0.5),
-                                       ("tick", "Tick font size", 4, 24, 0.5),
-                                       ("tf", "Title font size", 4, 24, 0.5)]:
-            val = {"lw": ax.lw_pt, "majlen": ax.major_len_mm, "minlen": ax.minor_len_mm,
-                   "tick": ax.tick_font_size, "tf": ax.title_font_size}[key]
-            s = _spin(lo, hi, val, step)
-            self.d[f"{pfx}_{key}"] = s
-            f.addRow(lbl, s)
-            s.valueChanged.connect(self._apply_display)
-        tlw = _spin(0.1, 3, ax.tick_lw_pt, 0.1)
-        tlw_auto = QCheckBox("Auto (= axis)")
-        tlw_auto.setChecked(ax.tick_lw_auto)
-        tlw.setEnabled(not ax.tick_lw_auto)
-        self.d[f"{pfx}_ticklw"] = tlw
-        self.d[f"{pfx}_ticklw_auto"] = tlw_auto
-        tlw_auto.toggled.connect(tlw.setDisabled)
-        tlw_auto.toggled.connect(self._apply_display)
-        tlw.valueChanged.connect(self._apply_display)
-        f.addRow("Tick thickness (pt)", _pair(tlw_auto, tlw))
-        f.addRow(_Collapsible("Advanced", self._axis_advanced(pfx, ax), expanded=False))
-        return g
-
-    def _axis_advanced(self, pfx, ax):
-        g = QWidget()
-        f = _cform(g)
+    def _runs_step(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(6, 2, 6, 6)
+        self.run_list = QListWidget()
+        self.run_list.setMaximumHeight(110)
+        self.run_list.setToolTip("Tick to show; click to work on it; Del removes it")
+        self.run_list.itemChanged.connect(self._run_ticked)
+        self.run_list.currentRowChanged.connect(self._run_picked)
+        v.addWidget(self.run_list)
+        self.run_form = QWidget()
+        f = QFormLayout(self.run_form)
         f.setContentsMargins(0, 0, 0, 0)
-        tp = _spin(0, 20, ax.title_pad_mm, 0.1)
-        lp = _spin(0, 20, ax.tick_label_pad_mm, 0.1)
-        self.d[f"{pfx}_titlepad"] = tp
-        self.d[f"{pfx}_lblpad"] = lp
-        f.addRow("Title ↔ labels (mm)", tp)
-        f.addRow("Labels ↔ axis (mm)", lp)
-        grid = QCheckBox()
-        grid.setChecked(ax.grid_on)
-        gstyle = QComboBox()
-        gstyle.addItems(_LINESTYLES)
-        gstyle.setCurrentText(ax.grid_style)
-        gcolor = _ColorButton(ax.grid_color, self._apply_display)
-        gwidth = _spin(0.1, 3, ax.grid_width, 0.1)
-        self.d[f"{pfx}_grid"] = grid
-        self.d[f"{pfx}_gridstyle"] = gstyle
-        self.d[f"{pfx}_gridcolor"] = gcolor
-        self.d[f"{pfx}_gridwidth"] = gwidth
-        f.addRow("Grid", grid)
-        f.addRow("Grid style", gstyle)
-        f.addRow("Grid colour", gcolor)
-        f.addRow("Grid width (pt)", gwidth)
-        for wdg in (tp, lp, gwidth):
-            wdg.valueChanged.connect(self._apply_display)
-        grid.toggled.connect(self._apply_display)
-        gstyle.currentIndexChanged.connect(self._apply_display)
-        return g
+        self.f_name = QLineEdit()
+        self.f_name.editingFinished.connect(
+            lambda: self._meta("name", self.f_name.text().strip() or self.sel.name))
+        self.f_iso = QComboBox()
+        self.f_iso.setToolTip("Its half-life and whether it is decay-corrected: Options › "
+                              "Isotopes")
+        self.f_iso.activated.connect(lambda _: self._meta("isotope", self.f_iso.currentData(),
+                                                          undo=True))
+        self.f_method = QComboBox()
+        self.f_method.setToolTip("Names the regions by retention time: Options › Methods")
+        self.f_method.activated.connect(
+            lambda _: self._meta("method", self.f_method.currentData(), undo=True))
+        self.f_mol = QLineEdit()
+        self.f_mol.editingFinished.connect(lambda: self._meta("molecule", self.f_mol.text()))
+        self.f_cond = QPlainTextEdit()
+        self.f_cond.setMaximumHeight(52)
+        self.f_cond.setPlaceholderText("one per line, e.g. pH: 7")
+        self.f_cond.textChanged.connect(
+            lambda: self._meta("conditions", self.f_cond.toPlainText(), refresh=False))
+        self.f_color = ColorButton(COLORS[0], lambda: self._meta("color", self.f_color.color))
+        for label, wdg in (("Name", self.f_name), ("Isotope", self.f_iso),
+                           ("Method", self.f_method), ("Molecule", self.f_mol),
+                           ("Conditions", self.f_cond), ("Colour", self.f_color)):
+            f.addRow(label, wdg)
+        v.addWidget(self.run_form)
+        self.f_info = QLabel()
+        self.f_info.setWordWrap(True)
+        self.f_info.setStyleSheet(GREY)
+        self.f_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v.addWidget(self.f_info)
+        h = QHBoxLayout()
+        for text, tip, fn in (("Export trace…", "The trace as used (spikes excluded, decay-"
+                               "corrected if so) as a GINA-style .txt", self._export_trace),
+                              ("Remove", "Remove this run (Del in the list)", self._remove_run)):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            h.addWidget(b)
+        v.addLayout(h)
+        return w
 
-    def _auto_field(self, form, label, pfx, name, value, lo, hi, step):
-        chk = QCheckBox("Auto")
-        chk.setChecked(value is None)
-        spin = _spin(lo, hi, value if value is not None else 0.0, step)
-        spin.setEnabled(value is not None)
-        self.d[f"{pfx}_{name}"] = spin
-        self.d[f"{pfx}_{name}_auto"] = chk
-        chk.toggled.connect(spin.setDisabled)
-        chk.toggled.connect(self._apply_display)
-        spin.valueChanged.connect(self._apply_display)
-        form.addRow(label, _pair(chk, spin))
+    def _spikes_step(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(6, 2, 6, 6)
+        g = QLabel("A spike is one point far above the points on both sides of it — an "
+                   "electronic artefact of the detector, not activity. Each is excluded and "
+                   "bridged by a straight line between its neighbours (the same as leaving the "
+                   "point out). Untick one to keep it.")
+        g.setWordWrap(True)
+        g.setStyleSheet(GREY)
+        v.addWidget(g)
+        self.spike_list = QListWidget()
+        self.spike_list.setMaximumHeight(120)
+        self.spike_list.itemChanged.connect(self._spike_ticked)
+        v.addWidget(self.spike_list)
+        h = QHBoxLayout()
+        h.addWidget(QLabel("Threshold"))
+        self.sens = QSlider(Qt.Horizontal)
+        self.sens.setRange(6, 30)                   # n σ × 2: 3 … 15 σ by 0.5
+        self.sens.setToolTip("How far above the points around it a point must be: lower finds "
+                             "more spikes, higher fewer")
+        self.sens.sliderPressed.connect(lambda: self._push("spike threshold"))
+        self.sens.valueChanged.connect(self._threshold)
+        self.sens_lab = QLabel()
+        h.addWidget(self.sens, 1)
+        h.addWidget(self.sens_lab)
+        v.addLayout(h)
+        more = QWidget()
+        fm = QFormLayout(more)
+        self.f_window = QSpinBox()
+        self.f_window.setRange(3, 101)
+        self.f_window.setSingleStep(2)
+        self.f_window.setToolTip("Points in the moving median a point is compared with (odd)")
+        self.f_width = QSpinBox()
+        self.f_width.setRange(1, 10)
+        self.f_width.setToolTip("Widest run of points that can be a spike; wider is signal")
+        for wdg, key in ((self.f_window, "window"), (self.f_width, "max_width")):
+            wdg.valueChanged.connect(lambda val, k=key: self._spike_param(k, val))
+        fm.addRow("Window (points)", self.f_window)
+        fm.addRow("Max width (points)", self.f_width)
+        v.addWidget(_Collapsible("More", more, expanded=False))
+        return w
 
-    def _apply_display(self, *_):
-        if self._loading_disp or not self.d:
-            return
-        o, d = self.plot_opts, self.d
-        o.plot_w_mm, o.plot_h_mm = d["w_mm"].value(), d["h_mm"].value()
-        o.total_w_mm = None if d["tot_w_auto"].isChecked() else d["tot_w"].value()
-        o.total_h_mm = None if d["tot_h_auto"].isChecked() else d["tot_h"].value()
-        o.bg_color, o.bg_alpha = d["bg"].color, d["bg_a"].value()
-        o.outside_color, o.outside_alpha = d["out"].color, d["out_a"].value()
-        o.legend_loc = d["leg_loc"].currentText()
-        o.legend_font_family = d["leg_font"].text() or "sans-serif"
-        o.legend_font_size = d["leg_size"].value()
-        for ax, pfx in ((o.x, "x"), (o.y, "y")):
-            ax.title = d[f"{pfx}_title"].text()
-            ax.vmin = None if d[f"{pfx}_min_auto"].isChecked() else d[f"{pfx}_min"].value()
-            ax.vmax = None if d[f"{pfx}_max_auto"].isChecked() else d[f"{pfx}_max"].value()
-            ax.major = None if d[f"{pfx}_maj_auto"].isChecked() else d[f"{pfx}_maj"].value()
-            ax.grad_start = None if d[f"{pfx}_gstart_auto"].isChecked() else d[f"{pfx}_gstart"].value()
-            ax.grad_end = None if d[f"{pfx}_gend_auto"].isChecked() else d[f"{pfx}_gend"].value()
-            ax.minor_on = d[f"{pfx}_minor"].isChecked()
-            ax.lw_pt = d[f"{pfx}_lw"].value()
-            ax.major_len_mm = d[f"{pfx}_majlen"].value()
-            ax.minor_len_mm = d[f"{pfx}_minlen"].value()
-            ax.tick_lw_auto = d[f"{pfx}_ticklw_auto"].isChecked()
-            ax.tick_lw_pt = d[f"{pfx}_ticklw"].value()
-            ax.tick_font_size = d[f"{pfx}_tick"].value()
-            ax.title_font_size = d[f"{pfx}_tf"].value()
-            ax.title_pad_mm = d[f"{pfx}_titlepad"].value()
-            ax.tick_label_pad_mm = d[f"{pfx}_lblpad"].value()
-            ax.grid_on = d[f"{pfx}_grid"].isChecked()
-            ax.grid_style = d[f"{pfx}_gridstyle"].currentText()
-            ax.grid_color = d[f"{pfx}_gridcolor"].color
-            ax.grid_width = d[f"{pfx}_gridwidth"].value()
-        self._refresh_plot()
-
-    def _fill_auto_fields(self):
-        if not self.datasets or not self.d:
-            return
-        ex = auto_extents(self.datasets, self.plot_opts)
-        self._loading_disp = True
-        for k, v in (("x_min", ex["xmin"]), ("x_max", ex["xmax"]), ("x_maj", ex["xmajor"]),
-                     ("x_gstart", ex["xmin"]), ("x_gend", ex["xmax"]),
-                     ("y_min", ex["ymin"]), ("y_max", ex["ymax"]), ("y_maj", ex["ymajor"]),
-                     ("y_gstart", ex["ymin"]), ("y_gend", ex["ymax"])):
-            if self.d[f"{k}_auto"].isChecked():
-                self.d[k].setValue(v)
-        if self._fig is not None:   # show the computed total size while Auto is ticked
-            if self.d["tot_w_auto"].isChecked():
-                self.d["tot_w"].setValue(self._fig.get_figwidth() * 25.4)
-            if self.d["tot_h_auto"].isChecked():
-                self.d["tot_h"].setValue(self._fig.get_figheight() * 25.4)
-            # and the mirror: with the total fixed, show the plot area it leaves
-            pw, ph = getattr(self._fig, "plot_area_mm", (None, None))
-            if pw is not None and not self.d["tot_w_auto"].isChecked():
-                self.d["w_mm"].setValue(pw)
-            if ph is not None and not self.d["tot_h_auto"].isChecked():
-                self.d["h_mm"].setValue(ph)
-        self._loading_disp = False
-
-    # ---------------- Data tree ----------------
-    def _add_cross(self, item, data):
-        b = QPushButton("✖")
-        b.setFixedSize(20, 18)
-        b.setStyleSheet("QPushButton{color:#ff5555;border:none;font-weight:bold;}")
-        b.clicked.connect(lambda _=False, dd=data: self._remove_node(dd))
-        self.data_tree.setItemWidget(item, 1, b)
-
-    def _mk(self, parent, text, data, *, checkable=False, checked=True, editable=False,
-            cross=True, draggable=False):
-        it = QTreeWidgetItem([text])
-        it.setData(0, Qt.UserRole, data)
-        flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-        if checkable:
-            flags |= Qt.ItemIsUserCheckable
-        if editable:
-            flags |= Qt.ItemIsEditable
-        if draggable:
-            flags |= Qt.ItemIsDragEnabled | Qt.ItemIsDropEnabled
-        it.setFlags(flags)
-        if editable:
-            it.setIcon(0, self._pen)
-        if checkable:
-            it.setCheckState(0, Qt.Checked if checked else Qt.Unchecked)
-        (parent.addChild(it) if isinstance(parent, QTreeWidgetItem)
-         else self.data_tree.addTopLevelItem(it))
-        if cross:
-            self._add_cross(it, data)
-        return it
-
-    def _build_curve_item(self, parent_item, ds, curve, is_root):
-        cit = self._mk(parent_item, curve.name, ("curve", ds.id, curve.id),
-                       checkable=True, checked=curve.shown, editable=True, cross=not is_root,
-                       draggable=True)
-        if curve.has_spikes:
-            sit = self._mk(cit, "spikes", ("spikes", ds.id, curve.id),
-                           checkable=True, checked=curve.spikes_group_shown)
-            idxs = curve.spike_indices()
-            shown = curve.spike_shown
-            for i, si in enumerate(idxs):
-                sh = True if shown is None else bool(shown[i])
-                self._mk(sit, f"spike @ {curve.x[si]:.2f} min  y={curve.y[si]:.0f}",
-                         ("spike", ds.id, curve.id, i), checkable=True, checked=sh)
-            sit.setExpanded(True)
-        if curve.baseline is not None:
-            self._mk(cit, "baseline", ("baseline", ds.id, curve.id),
-                     checkable=True, checked=curve.baseline_shown)
-        if curve.peaks:
-            pit = self._mk(cit, "peaks", ("peaks", ds.id, curve.id),
-                           checkable=True, checked=curve.peaks_group_shown)
-            for i, pk in enumerate(curve.peaks):
-                lbl = pk.name or (f"peak {i + 1}: Rt {pk.rt:.2f}  y {pk.y_max:.0f}  "
-                                  f"AUC {pk.auc:.0f}  {pk.pct:.0f}%")
-                self._mk(pit, lbl, ("peak", ds.id, curve.id, i),
-                         checkable=True, checked=pk.shown, editable=True)
-            pit.setExpanded(True)
-        for child in curve.children:
-            self._build_curve_item(cit, ds, child, is_root=False)
-        cit.setExpanded(True)
-
-    def _rebuild_tree(self):
-        target = self._selected()
-        self.data_tree.blockSignals(True)
-        self.data_tree.clear()
-        for ds in self.datasets:
-            any_shown = any(c.shown for c in ds.curves())
-            dit = self._mk(None, ds.meta.name, ("dataset", ds.id),
-                           checkable=True, checked=any_shown, editable=True, draggable=True)
-            self._build_curve_item(dit, ds, ds.root, is_root=True)
-            dit.setExpanded(True)
-        self.data_tree.blockSignals(False)
-        self._select_id(target)
-        self._on_tree_select()
-
-    def _select_id(self, target):
-        if target is None:
-            return
-        stack = [self.data_tree.topLevelItem(i) for i in range(self.data_tree.topLevelItemCount())]
-        while stack:
-            item = stack.pop()
-            if item is None:
-                continue
-            if item.data(0, Qt.UserRole) == target:
-                self.data_tree.setCurrentItem(item)
-                return
-            stack.extend(item.child(c) for c in range(item.childCount()))
-
-    def _selected(self):
-        item = self.data_tree.currentItem()
-        return item.data(0, Qt.UserRole) if item else None
-
-    def _ds(self, ds_id):
-        return next((d for d in self.datasets if d.id == ds_id), None)
-
-    def _sel_curve(self):
-        data = self._selected()
-        if not data:
-            return None, None
-        ds = self._ds(data[1])
-        if ds is None:
-            return None, None
-        if data[0] == "dataset":
-            return ds, ds.root
-        return ds, ds.find_curve(data[2])
-
-    def _on_tree_item_changed(self, item, _col):
-        data = item.data(0, Qt.UserRole)
-        if not data:
-            return
-        self.data_tree.blockSignals(True)
-        if bool(item.flags() & Qt.ItemIsUserCheckable):
-            state = item.checkState(0)
-            self._set_shown(data, state == Qt.Checked)
-            self._cascade(item, state)  # unticking a parent unticks its children
-            # ticking a single spike/peak while its group is hidden turns the group on
-            # (its siblings keep their own state — only this one becomes visible)
-            if data[0] in ("spike", "peak") and state == Qt.Checked:
-                grp = item.parent()
-                gd = grp.data(0, Qt.UserRole) if grp is not None else None
-                if gd and grp.checkState(0) != Qt.Checked:
-                    grp.setCheckState(0, Qt.Checked)
-                    self._set_shown(gd, True)
-        if bool(item.flags() & Qt.ItemIsEditable):
-            self._set_name(data, item.text(0))
-        self.data_tree.blockSignals(False)
-        self._refresh_plot()
-
-    def _cascade(self, item, state):
-        for i in range(item.childCount()):
-            ch = item.child(i)
-            if bool(ch.flags() & Qt.ItemIsUserCheckable):
-                ch.setCheckState(0, state)
-                d = ch.data(0, Qt.UserRole)
-                if d:
-                    self._set_shown(d, state == Qt.Checked)
-            self._cascade(ch, state)
-
-    def _set_shown(self, data, shown):
-        ds = self._ds(data[1])
-        if ds is None:
-            return
-        kind = data[0]
-        if kind == "curve":
-            ds.find_curve(data[2]).shown = shown
-        elif kind == "spikes":
-            ds.find_curve(data[2]).spikes_group_shown = shown
-        elif kind == "baseline":
-            ds.find_curve(data[2]).baseline_shown = shown
-        elif kind == "peaks":
-            ds.find_curve(data[2]).peaks_group_shown = shown
-        elif kind == "spike":
-            c = ds.find_curve(data[2])
-            n = len(c.spike_indices())
-            if c.spike_shown is None:
-                c.spike_shown = np.ones(n, bool)
-            c.spike_shown[data[3]] = shown
-        elif kind == "peak":
-            ds.find_curve(data[2]).peaks[data[3]].shown = shown
-
-    def _set_name(self, data, text):
-        ds = self._ds(data[1])
-        if ds is None:
-            return
-        if data[0] == "dataset":
-            ds.meta.name = text
-        elif data[0] == "curve":
-            c = ds.find_curve(data[2])
-            c.name = text
-            c.legend_label = text
-        elif data[0] == "peak":
-            ds.find_curve(data[2]).peaks[data[3]].name = text
-
-    def _remove_node(self, data):
-        ds = self._ds(data[1])
-        if ds is None:
-            return
-        self._push_undo(f"remove {data[0]}")
-        kind = data[0]
-        if kind == "dataset":
-            self.datasets.remove(ds)
-        elif kind == "curve":
-            parent = ds.parent_of(data[2])
-            if parent is not None:
-                parent.children = [c for c in parent.children if c.id != data[2]]
+    def _bg_step(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(6, 2, 6, 6)
+        self.bg_value = QLabel()
+        self.bg_value.setWordWrap(True)
+        v.addWidget(self.bg_value)
+        self.bg_group = QButtonGroup(w)
+        self.bg_radio = {}
+        for mode, text, tip in (
+                ("auto", "Mean outside the regions", "The detector's background: the mean of "
+                 "every point no region holds (points 4 σ above it left out)"),
+                ("stretch", "Mean of a stretch", "The mean of a peak-free stretch you drag on "
+                 "the plot"),
+                ("drift", "Follows a drift", "For a trace whose background drifts: SNIP or "
+                 "arPLS")):
+            rb = QRadioButton(text)
+            rb.setToolTip(tip)
+            self.bg_group.addButton(rb)
+            self.bg_radio[mode] = rb
+            rb.toggled.connect(lambda on, m=mode: on and self._bg_mode(m))
+            if mode == "stretch":
+                self.bg_pick = QPushButton("Drag on the plot")
+                self.bg_pick.setToolTip("Then drag across a stretch with no peak")
+                self.bg_pick.clicked.connect(self._arm_stretch)
+                v.addWidget(_row(rb, self.bg_pick))
+            elif mode == "drift":
+                self.bg_method = QComboBox()
+                self.bg_method.addItems(["SNIP", "arPLS"])
+                self.bg_method.activated.connect(
+                    lambda i: self._bg_set("bg_drift", ("snip", "arpls")[i]))
+                self.bg_n = QSpinBox()
+                self.bg_n.setRange(2, 1000)
+                self.bg_n.setToolTip("SNIP: about a peak's half-width, in points")
+                self.bg_n.valueChanged.connect(lambda val: self._bg_set("bg_n", val))
+                v.addWidget(_row(rb, self.bg_method, self.bg_n))
             else:
-                self.datasets.remove(ds)  # removing the root removes the dataset
-        elif kind in ("spikes", "baseline", "peaks"):
-            c = ds.find_curve(data[2])
-            c.how.pop(kind, None)
-            if kind == "spikes":
-                c.spike_mask = None
-                c.spike_shown = None
-            elif kind == "baseline":
-                c.baseline = None
-                c.style.fill = False
-            else:
-                c.peaks = None
-        elif kind == "spike":
-            c = ds.find_curve(data[2])
-            idxs = c.spike_indices()
-            c.spike_mask[idxs[data[3]]] = False
-            c.spike_shown = None
-        elif kind == "peak":
-            c = ds.find_curve(data[2])
-            del c.peaks[data[3]]
-            analyze_peaks(c.x, c.y, c.peaks, c.baseline, c.peak_local_baseline)
-        self.log(f"Removed {kind}.")
-        self._rebuild_tree()
-        self._update_enabled()
-        self._refresh_plot()
-        self._update_report()
+                v.addWidget(rb)
+        g = QLabel("A radio-detector's background is flat: its count rate, with Poisson noise. "
+                   "Use a drift only for a trace whose background really drifts.")
+        g.setWordWrap(True)
+        g.setStyleSheet(GREY)
+        v.addWidget(g)
+        return w
 
-    def _reorder(self, src, tgt, below):
-        if not src:
-            return
-        if src[0] == "dataset" and (tgt is None or tgt[0] == "dataset"):
-            self._push_undo("reorder datasets")
-            self._reorder_list(self.datasets, src[1], tgt[1] if tgt else None, below, lambda d: d.id)
-        elif src[0] == "curve" and tgt and tgt[0] == "curve" and src[1] == tgt[1]:
-            ds = self._ds(src[1])
-            if ds is None:
-                return
-            ps, pt = ds.parent_of(src[2]), ds.parent_of(tgt[2])
-            if ps is None or ps is not pt:  # only reorder curves that share a parent
-                self.log("To reorder curves, drop onto a sibling curve (same parent).")
-                return
-            self._push_undo("reorder curves")
-            self._reorder_list(ps.children, src[2], tgt[2], below, lambda c: c.id)
-        else:
-            self.log("Reorder: drop a dataset onto another dataset, or a curve onto a sibling curve.")
-            return
-        self._rebuild_tree()
-        self._select_id(src)
-        self._refresh_plot()
-        self.log("Reordered (draw order).")
+    def _peaks_step(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(6, 2, 6, 6)
+        g = QLabel("Drag across a peak on the plot: its edges land in the valleys (hold Alt to "
+                   "place them exactly). Drag an edge to move it, ← → to nudge it a point. "
+                   "Click a region to select it; Del removes it. Wheel: zoom the time; "
+                   "Ctrl+wheel: the height; right-drag: pan; double-click: the whole run.")
+        g.setWordWrap(True)
+        g.setStyleSheet(GREY)
+        v.addWidget(g)
+        h = QHBoxLayout()
+        for text, tip, fn in (
+                ("Find peaks", "Regions for the peaks no region holds: 5 σ of the background "
+                 "above their surroundings, more counts than the detection limit", self._find),
+                ("Apply to all", "These regions on every other run, edges snapped to its own "
+                 "valleys (replacing its regions)", self._apply_all),
+                ("Clear", "Remove every region of this run", self._clear)):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            h.addWidget(b)
+        v.addLayout(h)
+        self.reg_box = QGroupBox("Selected region")
+        f = QFormLayout(self.reg_box)
+        self.r_name = QLineEdit()
+        self.r_name.editingFinished.connect(lambda: self._reg_set("name", self.r_name.text().strip()))
+        self.r_under = QComboBox()
+        self.r_under.addItems(["the background", "a straight line between its ends"])
+        self.r_under.setToolTip("What its net counts are above: the run's background, or — for "
+                                "a peak on another's tail — a line from its start to its end")
+        self.r_under.activated.connect(
+            lambda i: self._reg_set("under", ("background", "line")[i]))
+        self.r_note = QLineEdit()
+        self.r_note.setPlaceholderText("why it was drawn or moved, if it matters")
+        self.r_note.editingFinished.connect(lambda: self._reg_set("note", self.r_note.text()))
+        self.r_color = ColorButton("#808080", lambda: self._reg_set("color", self.r_color.color))
+        for label, wdg in (("Name", self.r_name), ("Under it", self.r_under),
+                           ("Note", self.r_note), ("Colour", self.r_color)):
+            f.addRow(label, wdg)
+        v.addWidget(self.reg_box)
+        return w
 
-    @staticmethod
-    def _reorder_list(lst, src_id, tgt_id, below, key):
-        src = next((o for o in lst if key(o) == src_id), None)
-        if src is None:
-            return
-        lst.remove(src)
-        if tgt_id is None:   # dropped past the end
-            lst.append(src)
-            return
-        idx = next((i for i, o in enumerate(lst) if key(o) == tgt_id), None)
-        if idx is None:
-            lst.append(src)
-        else:
-            lst.insert(idx + 1 if below else idx, src)
-
-    def _on_tree_select(self):
-        data = self._selected()
-        kind = data[0] if data else None
-        self.btn_info.setEnabled(kind is not None)        # info for whatever element is selected
-        self.btn_adjust.setEnabled(kind == "curve")       # normalization is per-curve
-        self.btn_disp.setEnabled(kind not in (None, "dataset"))
-        self.btn_dup.setEnabled(kind == "curve")
-        self.btn_export.setEnabled(kind in ("curve", "dataset", "peaks", "peak"))
-
-    # ---------------- undo / redo ----------------
-    def _push_undo(self, label):
-        """Snapshot the whole dataset tree before a mutating op so Ctrl+Z can restore it.
-        *label* is what the log will say the undo took back, in the user's words."""
-        self._undo_stack.append((copy.deepcopy(self.datasets), label))
-        del self._undo_stack[:-25]   # ponytail: cap depth at 25, deep undo isn't worth the RAM
-        self._redo_stack.clear()     # a new change: what was undone can't come back
-
-    def _undo(self):
-        self._step(self._undo_stack, self._redo_stack, "undo", "Undone")
-
-    def _redo(self):
-        self._step(self._redo_stack, self._undo_stack, "redo", "Redone")
-
-    def _step(self, src, dst, what, done):
-        """Ctrl+Z / Ctrl+Y: the state on top of src comes back; the one left goes on dst."""
-        if not src:
-            self.log(f"Nothing to {what}.")
-            return
-        datasets, label = src.pop()
-        dst.append((self.datasets, label))
-        self.datasets = datasets
-        self._rebuild_tree()
-        self._update_enabled()
-        self._refresh_plot()
-        self._update_report()
-        self.log(f"{done}: {label}.")
-
-    # ---------------- helpers ----------------
-    def log(self, msg):
-        ts = _dt.datetime.now().strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{ts}] {msg}")
-        sb = self.log_view.verticalScrollBar()   # auto-scroll to the newest line
-        sb.setValue(sb.maximum())
-
-    def eventFilter(self, obj, event):
-        if (event.type() == QEvent.Resize and hasattr(self, "plot_view")
-                and obj is self.plot_view.viewport()):
-            self._position_overlay()
-        return super().eventFilter(obj, event)
-
-    def _position_overlay(self):
-        if not hasattr(self, "plot_tools"):
-            return
-        vp = self.plot_view.viewport()
-        m = 8
-        self.plot_tools.move(max(m, vp.width() - self.plot_tools.width() - m), m)
-        self.plot_tools.raise_()
-        if hasattr(self, "scale_bar"):
-            self.scale_bar.move(m, max(m, vp.height() - self.scale_bar.height() - m))
-            self.scale_bar.raise_()
-
-    def _on_scale(self, v):
-        self.view_scale = v / 10.0
-        self.scale_label.setText(f"{self.view_scale:.1f}×")
-        self._refresh_plot()
-
-    def _on_scale_export(self, on):
-        self.scale_export = on
-
-    def _opts_scaled(self, factor):
-        o = copy.deepcopy(self.plot_opts)
-        o.crop_fills = PREFS["crop_fills"]
-        o.plot_w_mm *= factor
-        o.plot_h_mm *= factor
-        return o
-
-    def _export_fig(self):
-        # border=None: the dotted frame marks the export area on screen, it is not part of the plot
-        factor = self.view_scale if self.scale_export else 1.0
-        return build_figure(self.datasets, self._opts_scaled(factor))
-
-    def _refresh_plot(self):
-        if not self.datasets:
-            self._fig = None
-            self.plot_view.clear()
-            return
-        self._fig = build_figure(self.datasets, self._opts_scaled(self.view_scale),
-                                 border=ExportBorder(**PREFS["export_border"]))
-        self.plot_view.set_figure(self._fig, keep_view=True)
-        self._fill_auto_fields()
-
-    def _update_enabled(self):
-        has = bool(self.datasets)
-        self.display_dock.toggleViewAction().setEnabled(has)
-        self.plot_copy_btn.setEnabled(has)
-        self.plot_export_btn.setEnabled(has)
-        if has:
-            if PREFS["docks_open"].get("plot_options") and not self._plot_opts_shown_once:
-                self.display_dock.show()      # honour "open Plot options by default" once data arrives
-                self._plot_opts_shown_once = True
-        else:
-            self.display_dock.hide()
-            self._plot_opts_shown_once = False
-        self._on_tree_select()
-
-    def _apply_lock(self):
-        base = QDockWidget.DockWidgetClosable
-        feats = base if PREFS["lock_docks"] else (
-            base | QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        for dock in (self.data_dock, self.processing_dock, self.display_dock, self.log_dock):
-            dock.setFeatures(feats)
-
-    def _update_report(self):
-        """The data changed: the report follows, if it is open."""
+    # ================================================================ state
+    def refresh(self):
+        """After any change: results recomputed, every view redrawn."""
+        self.results = {r.id: measure(r, PREFS["methods"]) for r in self.runs}
+        if self.sel not in self.runs:
+            self.sel = self.runs[0] if self.runs else None
+        if self.sel is None or not 0 <= self.sel_region < len(self.sel.regions):
+            self.sel_region = -1
+        self.canvas.show(self.runs, self.plot_opts, self.results, self.sel, self.sel_region,
+                         self.view)
+        self._fill_steps()
+        self._fill_table()
+        if self.figure_win is not None:
+            self.figure_win.refresh()
         if self.report_win is not None:
             self.report_win.refresh_later()
 
-    # ---------------- loading ----------------
+    def _fill_steps(self):
+        self._filling = True
+        run, res = self.sel, self.results.get(self.sel.id) if self.sel else None
+        for key, c in self.ticks.items():
+            c.setChecked(self.view[key] if key in self.view else getattr(self.plot_opts, key))
+        self.run_list.clear()
+        for r in self.runs:
+            it = QListWidgetItem(r.name)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if r.shown else Qt.Unchecked)
+            it.setForeground(QColor(r.color).lighter(160))
+            self.run_list.addItem(it)
+        if run is not None:
+            self.run_list.setCurrentRow(self.runs.index(run))
+        for key in ("spikes", "background", "peaks"):
+            self.step[key]._content.setEnabled(run is not None)
+        self.run_form.setEnabled(run is not None)
+        if run is None:
+            for key, title in (("spikes", "② Spikes"), ("background", "③ Background"),
+                               ("peaks", "④ Peaks")):
+                self.step[key].set_title(title)
+            self.f_info.setText("")
+            self.spike_list.clear()
+            self.bg_value.setText("")
+            self.reg_box.setEnabled(False)
+            self._filling = False
+            return
+        # ① runs
+        self.f_name.setText(run.name)
+        self.f_name.setCursorPosition(0)
+        _fill_iso(self.f_iso, run.isotope)
+        self.f_method.clear()
+        self.f_method.addItem("—", "")
+        for m in method_names() + ([run.method] if run.method and run.method not in
+                                   method_names() else []):
+            self.f_method.addItem(m, m)
+        self.f_method.setCurrentIndex(max(0, self.f_method.findData(run.method)))
+        self.f_mol.setText(run.molecule)
+        if self.f_cond.toPlainText() != run.conditions:
+            self.f_cond.setPlainText(run.conditions)
+        self.f_color.set_color(run.color)
+        decay = (f"decay-corrected to the run start ({run.isotope})" if run.decayed()
+                 else "not decay-corrected")
+        self.f_info.setText(f"{run.file or '—'} · {run.run_datetime or 'no run date'} · "
+                            f"{len(run.y)} points, one every {run.dt_s:g} s, "
+                            f"{run.x[-1]:.2f} min · {decay}"
+                            + (f" · SHA-256 {run.sha256[:12]}…" if run.sha256 else ""))
+        # ② spikes
+        n_ex = int(run.excluded().sum())
+        self.step["spikes"].set_title(f"② Spikes — {n_ex} excluded"
+                                      + (f", {len(run.kept)} kept" if run.kept else ""))
+        self.spike_list.clear()
+        bridged = remove(run.y, run.excluded())
+        where = [(r.start, r.end, row.name) for r, row in zip(run.regions, res.rows)]
+        for i in run.spike_list():
+            t = float(run.x[i])
+            reg = next((n for a, b, n in where if a <= t <= b), "")
+            it = QListWidgetItem(f"{t:6.2f} min   {run.y[i]:.0f} → {bridged[i]:.0f} cps"
+                                 + (f"   in {reg}" if reg else ""))
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Unchecked if i in run.kept else Qt.Checked)
+            it.setData(Qt.UserRole, i)
+            self.spike_list.addItem(it)
+        p = run.spike_params
+        self.sens.setValue(int(round(p.n_sigma * 2)))
+        self.sens_lab.setText(f"{p.n_sigma:.1f} σ")
+        self.f_window.setValue(p.window)
+        self.f_width.setValue(p.max_width)
+        # ③ background
+        self.step["background"].set_title(f"③ Background — {res.background:.1f} cps")
+        self.bg_radio[run.bg_mode].setChecked(True)
+        self.bg_method.setCurrentIndex(1 if run.bg_drift == "arpls" else 0)
+        self.bg_n.setValue(run.bg_n)
+        self.bg_n.setEnabled(run.bg_drift == "snip")
+        self.bg_value.setText(f"<b>{res.background:.2f} cps</b> — {res.background_how}")
+        # ④ peaks
+        self.step["peaks"].set_title(f"④ Peaks — {len(run.regions)} region"
+                                     + ("" if len(run.regions) == 1 else "s"))
+        k = self.sel_region
+        self.reg_box.setEnabled(k >= 0)
+        if k >= 0:
+            r, row = run.regions[k], res.rows[k]
+            self.reg_box.setTitle(f"Selected region — {row.start:.2f}–{row.end:.2f} min")
+            self.r_name.setText(r.name)
+            self.r_name.setPlaceholderText(row.name)
+            self.r_under.setCurrentIndex(1 if r.under == "line" else 0)
+            self.r_note.setText(r.note)
+            self.r_color.set_color(r.color or run.color)
+        else:
+            self.reg_box.setTitle("Selected region — click one")
+            for wdg in (self.r_name, self.r_note):
+                wdg.setText("")
+        self._filling = False
+
+    def _fill_table(self):
+        self._filling = True
+        t = self.table
+        res = self.results.get(self.sel.id) if self.sel else None
+        if res is None:
+            t.setRowCount(0)
+            t.setColumnCount(0)
+            self.summary.setText("")
+            self._filling = False
+            return
+        run = self.sel
+        cols = columns()
+        head, body, extra = result_rows(res)
+        t.setColumnCount(len(head))
+        t.setHorizontalHeaderLabels(head)
+        for c, (key, _, _) in enumerate(cols):
+            t.horizontalHeaderItem(c).setToolTip(HELP.get(key, ""))
+        t.setRowCount(len(body) + len(extra))
+        italic = QFont()
+        italic.setItalic(True)
+        for r, vals in enumerate(body + extra):
+            for c, val in enumerate(vals):
+                it = QTableWidgetItem(val)
+                edit = r < len(body) and cols[c][0] == "name"
+                it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable
+                            | (Qt.ItemIsEditable if edit else Qt.NoItemFlags))
+                if cols[c][0] not in ("name", "flags"):
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if r >= len(body):
+                    it.setFont(italic)
+                elif "n.d." in res.rows[r].flags:
+                    it.setForeground(QColor("#808080"))
+                t.setItem(r, c, it)
+        t.resizeColumnsToContents()
+        if 0 <= self.sel_region < len(body):
+            t.selectRow(self.sel_region)
+        else:
+            t.clearSelection()
+        n_ex = int(run.excluded().sum())
+        self.summary.setText(
+            f"<b>{run.name}</b> · background {res.background:.1f} cps ({res.background_how}) · "
+            f"{res.total:.0f} net counts in the run · % of total = of all of them (Ph. Eur.) · "
+            f"{n_ex} spike(s) excluded · "
+            + (f"decay-corrected ({run.isotope})" if run.decayed() else "not decay-corrected")
+            + ("" if res.active else " · <b>no activity above background: no %</b>"))
+        self._filling = False
+
+    # ================================================================ undo / redo
+    def _push(self, label):
+        """Snapshot the runs before a change, so Ctrl+Z can restore it. label: what the log
+        will say was undone, in the user's words."""
+        idx = self.runs.index(self.sel) if self.sel in self.runs else None
+        self._undo.append((copy.deepcopy(self.runs), idx, label))
+        del self._undo[:-25]       # ponytail: 25 deep; deeper isn't worth the RAM
+        self._redo.clear()
+
+    def _undo_step(self):
+        self._step(self._undo, self._redo, "undo", "Undone")
+
+    def _redo_step(self):
+        self._step(self._redo, self._undo, "redo", "Redone")
+
+    def _step(self, src, dst, what, done):
+        if not src:
+            self.log(f"Nothing to {what}.")
+            return
+        runs, idx, label = src.pop()
+        dst.append((self.runs, self.runs.index(self.sel) if self.sel in self.runs else None,
+                    label))
+        self.runs = runs
+        self.sel = runs[idx] if idx is not None and idx < len(runs) else None
+        self.sel_region = -1
+        self.refresh()
+        self.log(f"{done}: {label}.")
+
+    # ================================================================ runs
+    def _run_ticked(self, it):
+        if self._filling:
+            return
+        self.runs[self.run_list.row(it)].shown = it.checkState() == Qt.Checked
+        self.refresh()
+
+    def _run_picked(self, row):
+        if self._filling or not 0 <= row < len(self.runs):
+            return
+        self.sel, self.sel_region = self.runs[row], -1
+        self.refresh()
+
+    def _meta(self, key, value, undo=False, refresh=True):
+        run = self.sel
+        if self._filling or run is None or getattr(run, key) == value:
+            return
+        if undo:
+            self._push(f"{key} of {run.name}")
+        setattr(run, key, value)
+        if refresh:
+            self.refresh()
+        elif self.report_win is not None:
+            self.report_win.refresh_later()
+
+    def _remove_run(self):
+        if self.sel is None:
+            return
+        self._push(f"remove {self.sel.name}")
+        i = self.runs.index(self.sel)
+        del self.runs[i]
+        self.sel = self.runs[min(i, len(self.runs) - 1)] if self.runs else None
+        self.refresh()
+
+    def _export_trace(self):
+        run = self.sel
+        if run is None:
+            return
+        name = re.sub(r'[\\/:*?"<>|]', "_", run.name) + "_spikeless.txt"
+        path, _ = QFileDialog.getSaveFileName(self, "Export trace (GINA)", str(self._dir / name),
+                                              "Text (*.txt)")
+        if path:
+            if not path.lower().endswith(".txt"):
+                path += ".txt"
+            io_gina.save(run, path)
+            self.log(f"Trace of '{run.name}' exported to {path}")
+
+    # ================================================================ spikes
+    def _threshold(self, v):
+        run = self.sel
+        if self._filling or run is None:
+            return
+        if not self.sens.isSliderDown():            # keys / a click on the groove
+            self._push("spike threshold")
+        run.spike_params.n_sigma = v / 2
+        run.detect_spikes()
+        self.refresh()
+
+    def _spike_param(self, key, val):
+        run = self.sel
+        if self._filling or run is None:
+            return
+        self._push(f"spike {key.replace('_', ' ')}")
+        setattr(run.spike_params, key, val | 1 if key == "window" else val)
+        run.detect_spikes()
+        self.refresh()
+
+    def _spike_ticked(self, it):
+        run = self.sel
+        if self._filling or run is None:
+            return
+        i = it.data(Qt.UserRole)
+        keep = it.checkState() != Qt.Checked
+        self._push(f"{'keep' if keep else 'exclude'} the spike at {run.x[i]:.2f} min")
+        run.kept = sorted(set(run.kept) | {i}) if keep else [k for k in run.kept if k != i]
+        self.refresh()
+
+    # ================================================================ background
+    def _bg_mode(self, mode):
+        run = self.sel
+        if self._filling or run is None or run.bg_mode == mode:
+            return
+        self._push("background")
+        run.bg_mode = mode
+        if mode == "stretch" and not run.bg_stretch:
+            self._arm_stretch()
+        self.refresh()
+
+    def _bg_set(self, key, val):
+        run = self.sel
+        if self._filling or run is None or getattr(run, key) == val:
+            return
+        self._push("background")
+        setattr(run, key, val)
+        run.bg_mode = "drift"
+        self.refresh()
+
+    def _arm_stretch(self):
+        self.canvas.stretch = True
+        self.statusBar().showMessage("Drag across a stretch with no peak, on the plot.", 8000)
+
+    def _stretch(self, a, b):
+        run = self.sel
+        if run is None:
+            return
+        self._push("background stretch")
+        run.bg_mode, run.bg_stretch = "stretch", [a, b]
+        self.refresh()
+        self.log(f"Background of '{run.name}': mean of {a:.2f}–{b:.2f} min, "
+                 f"{self.results[run.id].background:.2f} cps.")
+
+    # ================================================================ regions
+    def _row_text(self, run, k):
+        row = self.results[run.id].rows[k]
+        return (f"{row.name}, {row.start:.2f}–{row.end:.2f} min, {row.net:.0f} ± {row.unc:.0f} "
+                f"counts" + (f", {row.pct:.1f} % of total" if row.pct is not None else "")
+                + (f" ({', '.join(row.flags)})" if row.flags else ""))
+
+    def _drawn(self, a, b, exact):
+        run = self.sel
+        if run is None:
+            return
+        if not exact:
+            y = run.trace()
+            a, b = snap(run.x, y, a), snap(run.x, y, b)
+        ab = fit(run.regions, a, b, run.dt_s / 60)
+        if ab is None:
+            self.log("That span lies inside a region, or is too short: drag a region's edges "
+                     "to change it.")
+            return
+        self._push("draw a region")
+        new = Region(*ab, how="drawn")
+        run.regions = sorted(run.regions + [new], key=lambda r: r.start)
+        self.sel_region = run.regions.index(new)
+        self.refresh()
+        self.log(f"Region drawn on '{run.name}': {self._row_text(run, self.sel_region)}.")
+
+    def _edge_moved(self, i, side, t, exact):
+        run = self.sel
+        if run is None or i >= len(run.regions):
+            return
+        r, dtm = run.regions[i], run.dt_s / 60
+        if not exact:
+            t = snap(run.x, run.trace(), t)
+        old = getattr(r, side)
+        opp = "end" if side == "start" else "start"
+        # an edge shared with the neighbour moves for both
+        other = next((o for o in run.regions if o is not r
+                      and abs(getattr(o, opp) - old) < 1e-9), None)
+        if side == "start":
+            lo = other.start + 2 * dtm if other else max(
+                [o.end for o in run.regions if o is not r and o.end <= old + 1e-9]
+                + [float(run.x[0])])
+            hi = r.end - 2 * dtm
+        else:
+            lo = r.start + 2 * dtm
+            hi = other.end - 2 * dtm if other else min(
+                [o.start for o in run.regions if o is not r and o.start >= old - 1e-9]
+                + [float(run.x[-1])])
+        t = float(np.clip(t, lo, hi))
+        if abs(t - old) < 1e-9:
+            return
+        self._push("move a region's edge")
+        for reg, s in ((r, side), (other, opp)):
+            if reg is not None:
+                setattr(reg, s, t)
+                if reg.how == "auto":
+                    reg.how = "moved"
+        self.sel_region = i
+        self.refresh()
+        self.log(f"Edge moved: {self._row_text(run, i)}.")
+
+    def _pick_region(self, i):
+        if self.sel is not None and i != self.sel_region:
+            self.sel_region = i
+            self.refresh()
+
+    def _pick_row(self, r):
+        if not self._filling and self.sel is not None:
+            self._pick_region(r if r < len(self.sel.regions) else -1)
+
+    def _dragging(self, a, b):
+        run = self.sel
+        if run is None:
+            return
+        y = run.trace()
+        m = (run.x >= a) & (run.x <= b)
+        if m.sum() >= 2:
+            net = float(np.trapezoid((y - run.background(y)[0])[m], run.x[m])) * 60
+            self.statusBar().showMessage(f"{a:.2f}–{b:.2f} min: {net:.0f} net counts", 2000)
+
+    def _reg_set(self, key, val):
+        run, k = self.sel, self.sel_region
+        if self._filling or run is None or k < 0 or getattr(run.regions[k], key) == val:
+            return
+        self._push(f"region {key}")
+        setattr(run.regions[k], key, val)
+        self.refresh()
+
+    def _renamed(self, it):
+        run = self.sel
+        if self._filling or run is None or it.row() >= len(run.regions):
+            return
+        name = it.text().strip()
+        auto = self.results[run.id].rows[it.row()].name
+        self.sel_region = it.row()
+        self._reg_set("name", "" if name == auto and not run.regions[it.row()].name else name)
+
+    def _delete_region(self):
+        run, k = self.sel, self.sel_region
+        if run is None or k < 0:
+            return
+        self._push(f"remove {self.results[run.id].rows[k].name}")
+        del run.regions[k]
+        self.sel_region = -1
+        self.refresh()
+
+    def _find(self):
+        run = self.sel
+        if run is None:
+            return
+        self._push("find peaks")
+        new = find_regions(run)
+        run.regions = sorted(run.regions + new, key=lambda r: r.start)
+        self.refresh()
+        self.log(f"Find peaks on '{run.name}': " + (
+            f"{len(new)} region(s) added." if new else
+            "nothing above the detection limit that no region already holds."))
+
+    def _apply_all(self):
+        src = self.sel
+        if src is None or not src.regions or len(self.runs) < 2:
+            self.log("Apply to all: needs regions on this run and another run.")
+            return
+        self._push("apply the regions to all runs")
+        for run in self.runs:
+            if run is src:
+                continue
+            y, new = run.trace(), []
+            for r in src.regions:
+                ab = fit(new, snap(run.x, y, r.start), snap(run.x, y, r.end), run.dt_s / 60)
+                if ab:
+                    new.append(Region(*ab, name=r.name, under=r.under, how="copied"))
+            run.regions = sorted(new, key=lambda r: r.start)
+        self.refresh()
+        self.log(f"Regions of '{src.name}' applied to {len(self.runs) - 1} other run(s).")
+
+    def _clear(self):
+        if self.sel is None or not self.sel.regions:
+            return
+        self._push("clear the regions")
+        self.sel.regions = []
+        self.refresh()
+
+    # ================================================================ view
+    def _view(self, key, on):
+        if self._filling:
+            return
+        if key in self.view:
+            self.view[key] = on
+        else:
+            setattr(self.plot_opts, key, on)
+        self.refresh()
+
+    # ================================================================ files
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(OPENS)
                                           for u in e.mimeData().urls()):
@@ -1121,19 +861,56 @@ class MainWindow(QMainWindow):
     def _load(self, path):
         self._dir = Path(path).parent
         try:
-            ds, warnings = io_gina.load(path)
+            run, warnings = io_gina.load(path)
         except Exception as exc:  # noqa: BLE001
             self.log(f"ERROR loading {Path(path).name}: {exc}")
             QMessageBox.warning(self, "Load failed", str(exc))
             return
-        self._adopt(ds, warnings)
+        self._adopt([run], warnings)
 
-    # ---------------- session file ----------------
+    def _paste(self):
+        """Ctrl+V on the window: pasted columns (time, count rate…) as runs."""
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QPlainTextEdit)):
+            fw.paste()   # a text field has focus — that paste is not ours
+            return
+        self._paste_n += 1
+        try:
+            runs, warnings = io_paste.load_text(QApplication.clipboard().text(),
+                                                f"Clipboard {self._paste_n}")
+        except Exception as exc:  # noqa: BLE001
+            self._paste_n -= 1
+            self.log(f"ERROR pasting from clipboard: {exc}")
+            QMessageBox.warning(self, "Paste failed", str(exc))
+            return
+        self._adopt(runs, warnings)
+
+    def _adopt(self, runs, warnings):
+        """Freshly read runs into the session (one undo step): selected, logged, drawn."""
+        self._push(f"load {runs[0].name}" + (f" and {len(runs) - 1} more" if len(runs) > 1
+                                             else ""))
+        for r in runs:
+            r.color = COLORS[len(self.runs) % len(COLORS)]
+            self.runs.append(r)
+        self.sel, self.sel_region = runs[0], -1
+        self.canvas.xlim = None
+        self.refresh()
+        for r in runs:
+            sp = r.spike_list()
+            self.log(f"Loaded '{r.name}' ({len(r.y)} points, one every {r.dt_s:g} s, "
+                     f"{r.x[-1]:.2f} min) from {r.file}: "
+                     + (f"{len(sp)} spike(s) excluded, at "
+                        + ", ".join(f"{r.x[i]:.2f}" for i in sp) + " min." if sp
+                        else "no spike."))
+        for w in warnings:
+            self.log(f"  ⚠ {w}")
+
     def _save_session(self):
-        if not self.datasets:
+        if not self.runs:
             self.log("Save: nothing loaded yet.")
             return
-        name = self._session_path or self._dir / f"{self.datasets[0].meta.name}{session.EXT}"
+        stem = re.sub(r'[\\/:*?"<>|]', "_", self.runs[0].name)
+        name = self._session_path or self._dir / f"{stem}{session.EXT}"
         path, _ = QFileDialog.getSaveFileName(self, "Save session", str(name),
                                               f"Spikeless session (*{session.EXT})")
         if not path:
@@ -1142,7 +919,7 @@ class MainWindow(QMainWindow):
         if not path.name.lower().endswith(session.EXT):   # not with_suffix: names carry dots
             path = path.with_name(path.name + session.EXT)
         try:
-            path.write_text(session.dumps(self.datasets, self.plot_opts), encoding="utf-8")
+            path.write_text(session.dumps(self.runs, self.plot_opts), encoding="utf-8")
         except OSError as exc:
             QMessageBox.warning(self, "Save failed", str(exc))
             return
@@ -1151,1150 +928,124 @@ class MainWindow(QMainWindow):
 
     def _open_session(self, path):
         try:
-            datasets, plot = session.loads(Path(path).read_text(encoding="utf-8"))
+            runs, plot = session.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             self.log(f"ERROR opening {Path(path).name}: {exc}")
             QMessageBox.warning(self, "Open failed", str(exc))
             return
-        if self.datasets and QMessageBox.question(
-                self, "Open session", f"Replace the {len(self.datasets)} dataset(s) open now? "
+        if self.runs and QMessageBox.question(
+                self, "Open session", f"Replace the {len(self.runs)} run(s) open now? "
                 "Ctrl+Z brings them back.") != QMessageBox.Yes:
             return
-        self._push_undo(f"open {Path(path).name}")
-        self.datasets, self.plot_opts = datasets, plot
+        self._push(f"open {Path(path).name}")
+        self.runs, self.plot_opts = runs, plot
+        self.sel, self.sel_region = (runs[0] if runs else None), -1
+        self.canvas.xlim = None
         self._session_at(Path(path))
-        self._load_display()
-        self._rebuild_tree()
-        self._update_enabled()
-        self._refresh_plot()
-        self._update_report()
-        n = sum(len(d.curves()) for d in datasets)
-        self.log(f"Opened session {path}: {len(datasets)} dataset(s), {n} curve(s).")
+        if self.figure_win is not None:
+            self.figure_win.load()
+        self.refresh()
+        self.log(f"Opened session {path}: {len(runs)} run(s), "
+                 f"{sum(len(r.regions) for r in runs)} region(s).")
 
     def _session_at(self, path):
         self._session_path, self._dir = path, path.parent
         self.setWindowTitle(f"{path.name} — {self._title}")
 
+    # ================================================================ clipboard, log
     def _copy(self):
-        """Ctrl+C on the window: the plot, unless a text field has focus."""
+        """Ctrl+C: the selected text, the results table if it has focus, else the figure."""
         fw = QApplication.focusWidget()
         if isinstance(fw, (QLineEdit, QPlainTextEdit)):
             fw.copy()
-        else:
-            self._copy_plot()
-
-    def _delete_selected(self):
-        """Del in the Data tree: what its ✖ removes (the original curve has none)."""
-        item = self.data_tree.currentItem()
-        if item is not None and self.data_tree.itemWidget(item, 1) is not None:
-            self._remove_node(item.data(0, Qt.UserRole))
-
-    def _paste(self):
-        """Ctrl+V on the window: import two pasted columns (time, count rate) as a dataset."""
-        fw = QApplication.focusWidget()
-        if isinstance(fw, (QLineEdit, QPlainTextEdit)):
-            fw.paste()   # a text field has focus — that paste is not ours
-            return
-        self._paste_n += 1
-        try:
-            dss, warnings = io_paste.load_text(QApplication.clipboard().text(),
-                                               f"Clipboard {self._paste_n}")
-        except Exception as exc:  # noqa: BLE001
-            self._paste_n -= 1
-            self.log(f"ERROR pasting from clipboard: {exc}")
-            QMessageBox.warning(self, "Paste failed", str(exc))
-            return
-        # one paste = one undo step, however many columns it held
-        for i, ds in enumerate(dss):
-            self._adopt(ds, warnings if i == 0 else [], undo=(i == 0))
-
-    def _adopt(self, ds, warnings, undo=True):
-        """Take a freshly parsed dataset into the session: select it, log it, redraw."""
-        if undo:
-            self._push_undo(f"load {ds.meta.name}")
-        self.datasets.append(ds)
-        self._rebuild_tree()
-        self._select_id(("curve", ds.id, ds.root.id))
-        self.log(f"Loaded '{ds.meta.name}' ({len(ds.root.y)} points, dt={ds.dt_s:g}s, "
-                 f"{ds.root.x[-1]:.2f} min) from {ds.meta.original_filename}")
-        for w in warnings:
-            self.log(f"  ⚠ {w}")
-        self._update_enabled()
-        self._refresh_plot()
-        self._update_report()
-
-    # ---------------- processing (acts on the selected curve) ----------------
-    def _need_curve(self):
-        ds, curve = self._sel_curve()
-        if curve is None:
-            self.log("Select a curve first.")
-        return ds, curve
-
-    def _run_feature(self, key):
-        """Click handler for a Processing button: run its editable action list on the selected curve."""
-        ds, curve = self._need_curve()
-        if curve is None:
-            return
-        self._push_undo(_ACTION_LABEL.get(key, key))
-        self._proc_child = None
-        self._run_actions(key, ds, curve, self.proc_actions[key], 0)
-
-    def _run_actions(self, key, ds, curve, acts, i):
-        """Execute a feature's action list from index i. A delay schedules the rest via QTimer
-        (re-entrant), so later actions run after the pause; a process that finds nothing aborts."""
-        procs = {"spikes": self._proc_spikes, "decay": self._proc_decay,
-                 "baseline": self._proc_baseline, "peaks": self._proc_peaks}
-        while i < len(acts):
-            a = acts[i]
-            t = a.get("type")
-            if t == "process":
-                if procs[key](ds, curve) is False:
-                    break
-            elif t == "vis":
-                self._apply_vis(key, curve, a.get("target"), bool(a.get("show")))
-            elif t == "delay":
-                self._rebuild_tree()
-                self._refresh_plot()
-                QTimer.singleShot(int(a.get("ms", 500)),
-                                  lambda k=key, nx=i + 1: self._run_actions(k, ds, curve, acts, nx))
-                return
-            i += 1
-        self._rebuild_tree()
-        self._refresh_plot()
-        self._update_report()
-
-    def _apply_vis(self, key, curve, target, show):
-        """Show/hide one artifact of the selected curve. 'result' = the child the process step made."""
-        if target == "original":
-            curve.shown = show
-        elif target == "spikes":
-            curve.spikes_group_shown = show
-        elif target == "baseline":
-            curve.baseline_shown = show
-        elif target == "peaks":
-            curve.peaks_group_shown = show
-        elif target == "result":
-            child = self._proc_child
-            if child is None:   # e.g. show:result placed before process → best-effort find
-                kind = {"spikes": "spikeless", "decay": "decay",
-                        "baseline": "baseline-corrected"}.get(key, key)
-                child = next((c for c in curve.children if kind in c.kind), None)
-            if child is not None:
-                child.shown = show
-
-    # -- process steps: detect + build artifacts (hidden); visibility is driven by vis actions.
-    def _proc_spikes(self, ds, curve) -> bool:
-        mask = detect(curve.y, self.spike_params)
-        n = int(mask.sum())
-        if not n:
-            curve.spike_mask = None
-            self.log(f"No spikes on '{curve.name}'.")
-            return False
-        curve.spike_mask = mask
-        curve.spike_shown = np.ones(n, bool)
-        curve.spikes_group_shown = False
-        cleaned = remove(curve.y, mask, method=self.interp_method)
-        child = next((c for c in curve.children if c.kind == "spikeless"), None)
-        if child is None:
-            child = new_curve_from(curve, cleaned, "spikeless", "spikeless", "#00a000")
-            curve.children.append(child)
-        else:
-            child.y = cleaned
-        child.shown = False
-        sp = self.spike_params
-        curve.how["spikes"] = (f"Hampel filter, window {sp.window}, threshold {sp.n_sigma:g} σ, "
-                               f"at most {sp.max_width} point(s) wide")
-        child.how["curve"] = (f"{n} spike(s) of '{curve.name}' replaced by "
-                              f"{dict(linear='linear', pchip='PCHIP')[self.interp_method]} "
-                              f"interpolation ({curve.how['spikes']})")
-        self._proc_child = child
-        self.log(f"Detected {n} spike(s) on '{curve.name}' → spikeless child ({self.interp_method}).")
-        return True
-
-    def _proc_baseline(self, ds, curve) -> bool:
-        curve.baseline = estimate_baseline(curve.y, self.baseline_method, self.baseline_n)
-        curve.baseline_shown = False
-        corrected = curve.y - curve.baseline           # detrend/offset by the detected baseline
-        if self.baseline_clip:
-            corrected = np.clip(corrected, 0.0, None)
-        child = next((c for c in curve.children if c.kind == "baseline-corrected"), None)
-        if child is None:
-            child = new_curve_from(curve, corrected, f"{curve.name} −baseline",
-                                   "baseline-corrected", "#0088aa")
-            curve.children.append(child)
-        else:
-            child.y = corrected
-        child.shown = False
-        n = {"first_n": f", first {self.baseline_n} points",
-             "snip": f", half-width {self.baseline_n} points"}.get(self.baseline_method, "")
-        curve.how["baseline"] = BASELINE_LABELS[self.baseline_method] + n
-        child.how["curve"] = (f"baseline of '{curve.name}' subtracted ({curve.how['baseline']}"
-                              f"{'; negatives set to 0' if self.baseline_clip else ''})")
-        self._proc_child = child
-        self.log(f"Baseline on '{curve.name}' ({self.baseline_method}) → corrected child"
-                 f"{' (clipped ≥0)' if self.baseline_clip else ''}.")
-        return True
-
-    def _proc_peaks(self, ds, curve) -> bool:
-        data = self._selected()
-        # On a curve → fresh peaks group; on an existing peak/peaks group → reprocess (re-detect
-        # with the current options). Both replace this curve's single peaks group.
-        reprocess = bool(data) and data[0] in ("peak", "peaks")
-        sig = curve.y
-        if curve.spike_mask is not None:   # don't let spikes become peaks or truncate neighbours
-            sig = remove(curve.y, curve.spike_mask, method=self.interp_method)
-        pks = detect_peaks(sig, curve.baseline, self.peak_params)
-        curve.peak_local_baseline = self.peak_params.local_baseline
-        analyze_peaks(curve.x, sig, pks, curve.baseline, curve.peak_local_baseline)
-        curve.peaks = pks
-        curve.peaks_group_shown = False
-        p = self.peak_params
-        prom = "auto (5% of the range)" if p.min_prominence <= 0 else f"{p.min_prominence:g}"
-        area = ("a straight line between each peak's bounds"
-                if curve.peak_local_baseline or curve.baseline is None else "the curve's baseline")
-        curve.how["peaks"] = ", ".join(
-            [f"prominence {prom}"]
-            + ([f"height ≥ {p.min_height:g}"] if p.min_height is not None else [])
-            + ([f"{p.min_distance} points apart"] if p.min_distance > 1 else [])
-            + (["spikes interpolated over first"] if curve.spike_mask is not None else [])
-        ) + f"; area above {area}"
-        self.log(f"{'Reprocessed' if reprocess else 'Detected'} {len(pks)} peak(s) on '{curve.name}' "
-                 f"(area above {area}).")
-        return True
-
-    def _proc_decay(self, ds, curve) -> bool:
-        hl = ds.half_life_s or lookup_half_life_s(ds.meta.radioisotope)
-        if not hl:  # missing info → open the decay options popup, then retry
-            self._edit_decay_options(ds)
-            hl = ds.half_life_s or lookup_half_life_s(ds.meta.radioisotope)
-            if not hl:
-                self.log("Apply decay: no half-life set.")
-                return False
-        factor = decay_factor(curve.x, hl, ds.decay_ref_offset_s)
-        base_kind = "spikeless+decay" if "spikeless" in curve.kind else "decay"
-        name = f"{curve.name} +decay"
-        child = new_curve_from(curve, curve.y * factor, name, base_kind, "#b000b0")
-        child.shown = False
-        child.how["curve"] = (f"'{curve.name}' decay-corrected to {ds.decay_ref_label}"
-                              f" ({ds.meta.radioisotope or 'half-life'} {hl / 3600:g} h)")
-        curve.children.append(child)
-        self._proc_child = child
-        self.log(f"Applied decay to '{curve.name}' → '{name}' (ref {ds.decay_ref_label}).")
-        return True
-
-    def _edit_decay_options(self, ds=None):
-        if ds is None or isinstance(ds, bool):   # gear's clicked(bool) must not be taken as a dataset
-            ds, _ = self._sel_curve()
-        if ds is None:
-            self.log("Decay options: select a dataset/curve first.")
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Apply decay — options")
-        form = QFormLayout(dlg)
-        iso = _iso_combo(ds.meta.radioisotope)
-        hl_val = QDoubleSpinBox()
-        hl_val.setRange(0, 1e9)
-        hl_val.setDecimals(4)
-        hl_unit = QComboBox()
-        hl_unit.addItems(list(_UNIT_S))
-        _set_halflife(hl_val, hl_unit, ds.half_life_s or lookup_half_life_s(ds.meta.radioisotope))
-        iso.currentIndexChanged.connect(
-            lambda: _set_halflife(hl_val, hl_unit, lookup_half_life_s(iso.currentData())))
-        rb_start = QRadioButton("Run start (from header)")
-        rb_off = QRadioButton("Offset from start")
-        grp = QButtonGroup(dlg)
-        grp.addButton(rb_start)
-        grp.addButton(rb_off)
-        off = QDoubleSpinBox()
-        off.setRange(-1e7, 1e7)
-        off.setSuffix(" min")
-        if abs(ds.decay_ref_offset_s) < 1e-9:
-            rb_start.setChecked(True)
-        else:
-            rb_off.setChecked(True)
-            off.setValue(ds.decay_ref_offset_s / 60.0)
-        form.addRow("Radioisotope", iso)
-        form.addRow("Half-life (override)", _pair(hl_val, hl_unit))
-        form.addRow("Decay-correct to", rb_start)
-        form.addRow("", _pair(rb_off, off))
-        if not _run_dialog(dlg, form):
-            return
-        ds.meta.radioisotope = iso.currentData()
-        manual = hl_val.value() * _UNIT_S[hl_unit.currentText()]
-        ds.half_life_s = manual if manual > 0 else lookup_half_life_s(ds.meta.radioisotope)
-        if rb_off.isChecked():
-            ds.decay_ref_offset_s = off.value() * 60.0
-            ds.decay_ref_label = f"{off.value():g} min from start"
-        else:
-            ds.decay_ref_offset_s, ds.decay_ref_label = 0.0, "run start"
-        self.log(f"Decay options: isotope={ds.meta.radioisotope or '—'}, "
-                 f"half-life={'set' if ds.half_life_s else 'unknown'}, ref={ds.decay_ref_label}.")
-
-    def _duplicate_curve(self):
-        ds, curve = self._sel_curve()
-        if curve is None or (self._selected() or [None])[0] != "curve":
-            return
-        self._push_undo(f"duplicate {curve.name}")
-        dup = copy.deepcopy(curve)
-        for c in dup.walk():
-            c.id = new_id()
-        dup.name = curve.name + " copy"
-        dup.legend_label = dup.name
-        target = ds.parent_of(curve.id) or ds.root
-        target.children.append(dup)
-        self.log(f"Duplicated '{curve.name}' → '{dup.name}'.")
-        self._rebuild_tree()
-        self._select_id(("curve", ds.id, dup.id))
-        self._refresh_plot()
-        self._update_report()
-
-    # ---------------- clipboard / exports ----------------
-    def _render_qimage(self, fig, dpi):
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-        canvas = FigureCanvasAgg(fig)
-        old = fig.get_dpi()
-        fig.set_dpi(dpi)
-        canvas.draw()
-        w, h = canvas.get_width_height()
-        img = QImage(bytes(canvas.buffer_rgba()), w, h, QImage.Format_RGBA8888).copy()
-        fig.set_dpi(old)
-        dpm = int(round(dpi / 0.0254))  # embed resolution so PowerPoint pastes at physical size
-        img.setDotsPerMeterX(dpm)
-        img.setDotsPerMeterY(dpm)
-        return img
-
-    def _copy_plot(self):
-        if not self.datasets:
-            return
-        fig = self._export_fig()
-        cb = QApplication.clipboard()
-        if PREFS["clip_format"] == "svg":
-            buf = io.BytesIO()
-            fig.savefig(buf, format="svg", facecolor=fig.get_facecolor(), edgecolor="none")
+        elif fw is self.table and self.sel is not None:
+            head, body, extra = result_rows(self.results[self.sel.id])
+            rows = [head] + body + extra
             md = QMimeData()
-            md.setData("image/svg+xml", QByteArray(buf.getvalue()))
-            md.setText(buf.getvalue().decode("utf-8", "replace"))
-            cb.setMimeData(md)
-            self.log("Plot copied (SVG).")
+            md.setText("\n".join("\t".join(r) for r in rows))
+            md.setHtml("<table border=1 cellspacing=0 cellpadding=3>" + "".join(
+                "<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
+                + "</table>")
+            QApplication.clipboard().setMimeData(md)
+            self.log(f"Results of '{self.sel.name}' copied ({len(body)} region(s)).")
         else:
-            img = self._render_qimage(fig, PREFS["clip_dpi"])
-            cb.setImage(img)
-            self.log(f"Plot copied {fig.get_figwidth() * 25.4:.0f}×{fig.get_figheight() * 25.4:.0f} mm "
-                     f"({img.width()}×{img.height()} px @ {PREFS['clip_dpi']} dpi).")
+            copy_figure(self)
 
-    def _export_plot(self):
-        if not self.datasets:
-            return
-        path, flt = QFileDialog.getSaveFileName(self, "Export plot", "",
-                                                "PNG image (*.png);;SVG vector (*.svg)")
-        if not path:
-            return
-        fig = self._export_fig()
-        dpi = PREFS["png_dpi"]
-        is_png = path.lower().endswith(".png") or "png" in flt.lower()
-        if is_png and not path.lower().endswith(".png"):
-            path += ".png"
-        elif not is_png and not path.lower().endswith(".svg"):
-            path += ".svg"
-        kw = {"facecolor": fig.get_facecolor(), "edgecolor": "none"}
-        if is_png:
-            kw["pil_kwargs"] = {"dpi": (dpi, dpi)}
-        fig.savefig(path, dpi=dpi, **kw)
-        self.log(f"Exported plot to {path}"
-                 + f" (figure {fig.get_figwidth() * 25.4:.0f}×{fig.get_figheight() * 25.4:.0f} mm"
-                 + (f" @ {dpi} dpi)" if is_png else ")"))
+    def log(self, msg):
+        self.log_view.appendPlainText(f"[{_dt.datetime.now():%H:%M:%S}] {msg}")
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
-    def _export_data_gina(self):
-        ds, curve = self._sel_curve()
-        if curve is None:
-            self.log("Export data: select a curve.")
-            return
-        default = f"{ds.meta.name}_{curve.name}.txt".replace(" ", "_")
-        path, _ = QFileDialog.getSaveFileName(self, "Export curve (GINA)", default, "Text (*.txt)")
-        if not path:
-            return
-        if not path.lower().endswith(".txt"):
-            path += ".txt"
-        io_gina.save(ds, curve, path)
-        self.log(f"Exported curve '{curve.name}' to {path}")
+    def _log_text(self):
+        text = self.log_view.toPlainText()
+        if not PREFS["log_timestamps"]:
+            text = re.sub(r"^\[\d\d:\d\d:\d\d\] ", "", text, flags=re.MULTILINE)
+        return text
+
+    def _copy_log(self):
+        QApplication.clipboard().setText(self._log_text())
+        self.log("Log copied to clipboard.")
 
     def _export_log(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export log", "spikeless_log.txt", "Text (*.txt)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export log",
+                                              str(self._dir / "spikeless_log.txt"),
+                                              "Text (*.txt)")
         if path:
             Path(path).write_text(self._log_text(), encoding="utf-8")
             self.log(f"Log exported to {path}")
 
-    # ---- Data panel: Export… ----
-    def _export_selected(self):
-        data = self._selected()
-        if not data:
-            self.log("Export: select a curve, dataset or peaks group first.")
-            return
-        if data[0] in ("curve", "dataset"):
-            self._export_data_gina()
-        elif data[0] in ("peaks", "peak"):
-            self._export_peaks()
-
-    def _export_peaks(self):
-        """The selected curve's peak table, as Excel or CSV, in the report's columns. (Every
-        curve's at once: the report, as a workbook.)"""
-        ds, cv = self._sel_curve()
-        if cv is None or not cv.peaks:
-            self.log("Export: no peaks to export.")
-            return
-        if not peak_rows(cv)[0]:
-            self.log("Export: no peak columns are ticked (Report window, Peak tables).")
-            return
-        default = self._dir / f"{ds.meta.name}_{cv.name}_peaks".replace(" ", "_")
-        path, flt = QFileDialog.getSaveFileName(self, "Export peak table", str(default),
-                                                "Excel workbook (*.xlsx);;CSV (*.csv)")
-        if not path:
-            return
-        xlsx = path.lower().endswith(".xlsx") or ("xlsx" in flt.lower() and not path.lower().endswith(".csv"))
-        if xlsx and not path.lower().endswith(".xlsx"):
-            path += ".xlsx"
-        elif not xlsx and not path.lower().endswith(".csv"):
-            path += ".csv"
-        n = self._write_peaks_xlsx(path, cv) if xlsx else self._write_peaks_csv(path, cv)
-        self.log(f"Exported {n} peak(s) of '{cv.name}' to {path}")
-
-    def _write_peaks_csv(self, path, cv):
-        head, body = peak_rows(cv)
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerows([head] + body)     # quotes a peak name with a comma
-        return len(body)
-
-    def _write_peaks_xlsx(self, path, cv):
-        from openpyxl import Workbook
-        wb = Workbook()
-        ws = wb.active
-        ws.title = sheet_name(cv.name, set())
-        head, body = peak_rows(cv)
-        ws.append(list(head))
-        for r in body:
-            ws.append([num(c) for c in r])
-        wb.save(path)
-        return len(body)
-
-    # ---------------- dialogs ----------------
-    def _edit_info(self):
-        """Info for whichever element is selected in the Data tree."""
-        data = self._selected()
-        if not data:
-            return
-        kind = data[0]
-        if kind == "dataset":
-            self._edit_dataset_info()
-        elif kind == "curve":
-            self._curve_info()
-        elif kind == "baseline":
-            self._baseline_info()
-        elif kind == "spikes":
-            self._spikes_info()
-        elif kind == "peaks":
-            self._peaks_info()
-        elif kind == "spike":
-            _ds, curve = self._sel_curve()
-            if curve is not None:
-                self._edit_spike_info(curve, data[3])
-        elif kind == "peak":
-            _ds, curve = self._sel_curve()
-            if curve is not None:
-                self._edit_peak_info(curve, data[3])
-
-    def _info_dialog(self, title, rows):
-        dlg = QDialog(self)
-        dlg.setWindowTitle(title)
-        form = QFormLayout(dlg)
-        for lbl, val in rows:
-            ed = QLineEdit(str(val))
-            ed.setReadOnly(True)
-            ed.setStyleSheet("color:#bbb;")
-            form.addRow(lbl, ed)
-        _run_dialog(dlg, form)
-
-    def _curve_info(self):
-        _ds, curve = self._sel_curve()
-        if curve is None:
-            return
-        y = curve.y
-        rows = [("Name", curve.name), ("Kind", curve.kind), ("Points", len(y)),
-                ("x range (min)", f"{float(curve.x[0]):.3f} … {float(curve.x[-1]):.3f}"),
-                ("y range", f"{float(np.nanmin(y)):.1f} … {float(np.nanmax(y)):.1f}"),
-                ("Spikes", len(curve.spike_indices()) if curve.has_spikes else "—"),
-                ("Baseline", "yes" if curve.baseline is not None else "—"),
-                ("Peaks", len(curve.peaks) if curve.peaks else "—"),
-                ("Derived curves", len(curve.children))]
-        if curve.how.get("curve"):
-            rows.insert(2, ("Made by", curve.how["curve"]))
-        self._info_dialog(f"Curve info — {curve.name}", rows)
-
-    def _baseline_info(self):
-        _ds, curve = self._sel_curve()
-        if curve is None or curve.baseline is None:
-            return
-        b = np.asarray(curve.baseline, float)
-        flat = float(np.nanmax(b) - np.nanmin(b)) < 1e-9
-        rows = [("Curve", curve.name), ("Type", "constant" if flat else "per-point / drift"),
-                ("Min level", f"{float(np.nanmin(b)):.2f}"), ("Max level", f"{float(np.nanmax(b)):.2f}"),
-                ("Mean level", f"{float(np.nanmean(b)):.2f}"),
-                ("Method", curve.how.get("baseline", "—"))]
-        self._info_dialog(f"Baseline info — {curve.name}", rows)
-
-    def _spikes_info(self):
-        _ds, curve = self._sel_curve()
-        if curve is None or not curve.has_spikes:
-            return
-        idxs = curve.spike_indices()
-        times = ", ".join(f"{float(curve.x[i]):.2f}" for i in idxs[:12]) + (" …" if len(idxs) > 12 else "")
-        rows = [("Curve", curve.name), ("Count", len(idxs)), ("Times (min)", times),
-                ("Found by", curve.how.get("spikes", "—"))]
-        self._info_dialog(f"Spikes info — {curve.name}", rows)
-
-    def _peaks_info(self):
-        _ds, curve = self._sel_curve()
-        if curve is None or not curve.peaks:
-            return
-        total = sum(pk.auc for pk in curve.peaks)
-        rows = [("Curve", curve.name), ("Count", len(curve.peaks)), ("Total AUC", f"{total:.1f}"),
-                ("Settings", curve.how.get("peaks", "—"))]
-        self._info_dialog(f"Peaks info — {curve.name}", rows)
-
-    def _edit_dataset_info(self):
-        ds, _ = self._sel_curve()
-        if ds is None:
-            return
-        m = ds.meta
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Info — {m.name}")
-        outer = QVBoxLayout(dlg)
-        form = QFormLayout()
-        name = QLineEdit(m.name)
-        orig = QLineEdit(m.original_filename)
-        orig.setReadOnly(True)
-        orig.setStyleSheet("color:#888;")
-        run = QLineEdit(ds.run_datetime)
-        run.setReadOnly(True)
-        run.setStyleSheet("color:#888;")
-        molecule = QLineEdit(m.molecule)
-        radio = _iso_combo(m.radioisotope)
-        for lbl, wdg in [("Dataset name", name), ("Original file", orig), ("Run date/time", run),
-                         ("Molecule", molecule), ("Radioisotope", radio)]:
-            form.addRow(lbl, wdg)
-        outer.addLayout(form)
-
-        outer.addWidget(QLabel("Conditions:"))
-        cond_box = QVBoxLayout()
-        outer.addLayout(cond_box)
-        rows = []
-
-        def add_row(cond: Condition | None = None):
-            cond = cond or Condition()
-            w = QWidget()
-            h = QHBoxLayout(w)
-            h.setContentsMargins(0, 0, 0, 0)
-            pair = QCheckBox("label+value")
-            pair.setChecked(bool(cond.label))
-            lab = QLineEdit(cond.label)
-            lab.setPlaceholderText("label")
-            val = QLineEdit(cond.value)
-            val.setPlaceholderText("note / value")
-            lab.setVisible(pair.isChecked())
-            pair.toggled.connect(lab.setVisible)
-            rm = QPushButton("✖")
-            rm.setFixedWidth(24)
-            rm.setStyleSheet("color:#ff5555;")
-            entry = (w, pair, lab, val)
-            rm.clicked.connect(lambda: (_drop(entry)))
-            for x in (pair, lab, val, rm):
-                h.addWidget(x)
-            cond_box.addWidget(w)
-            rows.append(entry)
-
-        def _drop(entry):
-            entry[0].setParent(None)
-            rows.remove(entry)
-
-        for c in ds.conditions:
-            add_row(c)
-        add_btn = QPushButton("+ add condition")
-        add_btn.clicked.connect(lambda: add_row())
-        outer.addWidget(add_btn)
-
-        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        box.accepted.connect(dlg.accept)
-        box.rejected.connect(dlg.reject)
-        outer.addWidget(box)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        m.name = name.text().strip() or m.name
-        m.molecule, m.radioisotope = molecule.text(), radio.currentData()
-        if m.radioisotope:
-            ds.half_life_s = lookup_half_life_s(m.radioisotope)
-        ds.conditions = []
-        for _w, pair, lab, val in rows:
-            if pair.isChecked():
-                ds.conditions.append(Condition(label=lab.text(), value=val.text()))
-            elif val.text().strip():
-                ds.conditions.append(Condition(label="", value=val.text()))
-        self.log(f"Updated info for '{m.name}'.")
-        self._rebuild_tree()
-        self._refresh_plot()
-        self._update_report()
-
-    def _edit_adjust(self):
-        ds, curve = self._sel_curve()
-        if curve is None:
-            return
-        a = curve.adjust
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Adjust (normalization) — {curve.name}")
-        outer = QVBoxLayout(dlg)
-        gn = QGroupBox("Normalization")
-        fn = QFormLayout(gn)
-        r_cps = QRadioButton("Counts (cps)")
-        r_max = QRadioButton("% of max")
-        r_tot = QRadioButton("% of total")
-        grp = QButtonGroup(dlg)
-        for rb in (r_cps, r_max, r_tot):
-            grp.addButton(rb)
-        {"cps": r_cps, "pct_max": r_max, "pct_total": r_tot}.get(a.norm_mode, r_cps).setChecked(True)
-        for rb in (r_cps, r_max, r_tot):
-            fn.addRow(rb)
-        fn.addRow(QLabel("% modes subtract the curve's detected baseline (Processing) if present."))
-        outer.addWidget(gn)
-        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        box.accepted.connect(dlg.accept)
-        box.rejected.connect(dlg.reject)
-        outer.addWidget(box)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        curve.adjust = AdjustParams(
-            norm_mode="pct_total" if r_tot.isChecked() else "pct_max" if r_max.isChecked() else "cps")
-        self.log(f"Adjust '{curve.name}': norm={curve.adjust.norm_mode}.")
-        self._refresh_plot()
-        self._update_report()
-
-    def _edit_node_display(self):
-        data = self._selected()
-        ds, curve = self._sel_curve()
-        if curve is None or not data:
-            return
-        kind = data[0]
-        if kind == "curve":
-            self._edit_curve_style(curve)
-        elif kind in ("spike", "spikes"):   # single items share the group's style
-            self._edit_spike_viz(curve)
-        elif kind == "baseline":
-            self._edit_baseline_viz(curve)
-        elif kind == "peak":
-            self._edit_peak_color(curve, data[3])   # a specific peak → just its colour
-        elif kind == "peaks":
-            self._edit_peak_viz(curve)               # the group → group style
-
-    def _edit_curve_style(self, curve):
-        st = curve.style
-        has_base = curve.baseline is not None
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Display — {curve.name}")
-        form = QFormLayout(dlg)
-        color = _ColorButton(st.color)
-        alpha = _spin(0, 1, st.alpha, 0.05)
-        lw = _spin(0.1, 5, st.line_width_pt, 0.1)
-        ls = QComboBox()
-        ls.addItems(_LINESTYLES)
-        ls.setCurrentText(st.linestyle)
-        fill = QCheckBox("(baseline ↔ curve)" if has_base else "needs a baseline")
-        fill.setEnabled(has_base)
-        fill.setChecked(st.fill and has_base)
-        fillc = _ColorButton(st.fill_color)
-        filla = _spin(0, 1, st.fill_alpha, 0.05)
-        leg = QCheckBox("Show in legend")
-        leg.setChecked(curve.show_legend)
-        leglbl = QLineEdit(curve.legend_label or curve.name)
-        for lbl, wdg in [("Colour", color), ("Alpha", alpha), ("Line width (pt)", lw),
-                         ("Line style", ls), ("Fill", fill), ("Fill colour", fillc),
-                         ("Fill alpha", filla), ("In legend", leg), ("Legend label", leglbl)]:
-            form.addRow(lbl, wdg)
-        if _run_dialog(dlg, form):
-            st.color = color.color
-            st.alpha, st.line_width_pt = alpha.value(), lw.value()
-            st.linestyle = ls.currentText()
-            st.fill = fill.isChecked() and has_base
-            st.fill_color, st.fill_alpha = fillc.color, filla.value()
-            curve.show_legend = leg.isChecked()
-            curve.legend_label = leglbl.text()
-            self._refresh_plot()
-
-    def _edit_spike_viz(self, curve):
-        v = curve.spike_viz
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Spikes display")
-        form = QFormLayout(dlg)
-        r_seg = QRadioButton("Colour n-1 → n+1")
-        r_pts = QRadioButton("Single points")
-        r_vln = QRadioButton("Vertical line (interpolated → max)")
-        grp = QButtonGroup(dlg)
-        grp.addButton(r_seg)
-        grp.addButton(r_pts)
-        grp.addButton(r_vln)
-        {"points": r_pts, "vline": r_vln}.get(v.mode, r_seg).setChecked(True)
-        color = _ColorButton(v.color)
-        leg = QCheckBox("Show in legend")
-        leg.setChecked(v.in_legend)
-        form.addRow(r_seg)
-        form.addRow(r_pts)
-        form.addRow(r_vln)
-        form.addRow("Colour", color)
-        form.addRow(leg)
-        if _run_dialog(dlg, form):
-            mode = "points" if r_pts.isChecked() else "vline" if r_vln.isChecked() else "segment"
-            curve.spike_viz = SpikeViz(mode=mode, color=color.color, in_legend=leg.isChecked())
-            self._refresh_plot()
-
-    def _edit_baseline_viz(self, curve):
-        v = curve.baseline_viz
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Baseline display")
-        form = QFormLayout(dlg)
-        auto = QCheckBox("Auto (desaturated curve colour)")
-        auto.setChecked(v.color is None)
-        color = _ColorButton(v.color or "#888888")
-        color.setEnabled(v.color is not None)
-        auto.toggled.connect(lambda on: color.setDisabled(on))
-        alpha = _spin(0, 1, v.alpha, 0.05)
-        ls = QComboBox()
-        ls.addItems(_LINESTYLES)
-        ls.setCurrentText(v.linestyle)
-        form.addRow(auto)
-        form.addRow("Colour", color)
-        form.addRow("Alpha", alpha)
-        form.addRow("Line style", ls)
-        if _run_dialog(dlg, form):
-            curve.baseline_viz = BaselineViz(color=None if auto.isChecked() else color.color,
-                                             alpha=alpha.value(), linestyle=ls.currentText())
-            self._refresh_plot()
-
-    def _edit_peak_viz(self, curve):
-        v = curve.peak_viz
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Peaks display")
-        form = QFormLayout(dlg)
-        r_fill = QRadioButton("Fill AUC")
-        r_mark = QRadioButton("Markers")
-        grp = QButtonGroup(dlg)
-        grp.addButton(r_fill)
-        grp.addButton(r_mark)
-        (r_mark if v.mode == "markers" else r_fill).setChecked(True)
-        color = _ColorButton(v.color)
-        alpha = _spin(0, 1, v.alpha, 0.05)
-        marker = QComboBox()
-        marker.addItems(_MARKERS)
-        marker.setCurrentText(v.marker)
-        annot = QComboBox()
-        for key, lbl in _ANNOT:
-            annot.addItem(lbl, key)
-        annot.setCurrentIndex(max(0, annot.findData(curve.annotate)))
-        lsize = _spin(4, 24, v.label_size, 0.5)
-        lpos = QComboBox()
-        for key in ("auto", "above", "right", "left"):
-            lpos.addItem(key.capitalize(), key)
-        lpos.setCurrentIndex(max(0, lpos.findData(v.label_pos)))
-        lauto = QCheckBox("auto (readable on background)")
-        lauto.setChecked(v.label_color is None)
-        lcolor = _ColorButton(v.label_color or v.color)
-        lcolor.setEnabled(v.label_color is not None)
-        lauto.toggled.connect(lambda on: lcolor.setDisabled(on))
-        leg = QCheckBox("Show in legend")
-        leg.setChecked(v.in_legend)
-        form.addRow(r_fill)
-        form.addRow(r_mark)
-        form.addRow("Colour", color)
-        form.addRow("Fill alpha", alpha)
-        form.addRow("Marker", marker)
-        form.addRow("On-graph label", annot)
-        form.addRow("Label size (pt)", lsize)
-        form.addRow("Label position", lpos)
-        form.addRow("Label colour", lcolor)
-        form.addRow("", lauto)
-        form.addRow(leg)
-        if _run_dialog(dlg, form):
-            curve.peak_viz = PeakViz(mode="markers" if r_mark.isChecked() else "fill",
-                                     color=color.color, alpha=alpha.value(),
-                                     marker=marker.currentText(), in_legend=leg.isChecked(),
-                                     label_size=lsize.value(),
-                                     label_color=None if lauto.isChecked() else lcolor.color,
-                                     label_pos=lpos.currentData())
-            curve.annotate = annot.currentData()
-            self._refresh_plot()
-
-    def _edit_spike_info(self, curve, i):
-        idxs = curve.spike_indices()
-        if i >= len(idxs):
-            return
-        si = int(idxs[i])
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Spike info")
-        form = QFormLayout(dlg)
-        for lbl, val in [("Time (min)", f"{curve.x[si]:.3f}"), ("Sample index", str(si)),
-                         ("y (raw)", f"{curve.y[si]:.1f}")]:
-            ed = QLineEdit(val)
-            ed.setReadOnly(True)
-            form.addRow(lbl, ed)
-        _run_dialog(dlg, form)
-
-    def _peak_color_row(self, form, pk, curve):
-        """Add a 'Colour' + 'use group colour' pair to `form`; returns (auto_checkbox, button).
-        Ticked auto => pk.color None (inherit the group peak_viz colour)."""
-        auto = QCheckBox("use group colour")
-        auto.setChecked(pk.color is None)
-        btn = _ColorButton(pk.color or curve.peak_viz.color)
-        btn.setEnabled(pk.color is not None)
-        auto.toggled.connect(lambda on: btn.setDisabled(on))
-        form.addRow("Colour", btn)
-        form.addRow("", auto)
-        return auto, btn
-
-    def _edit_peak_color(self, curve, i):
-        if not curve.peaks or i >= len(curve.peaks):
-            return
-        pk = curve.peaks[i]
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"Peak {i + 1} display")
-        form = QFormLayout(dlg)
-        auto, btn = self._peak_color_row(form, pk, curve)
-        annot = QComboBox()
-        annot.addItem("(group default)", None)
-        for key, lbl in _ANNOT:
-            annot.addItem(lbl, key)
-        annot.setCurrentIndex(max(0, annot.findData(pk.annotate)))
-        form.addRow("On-graph label", annot)
-        if _run_dialog(dlg, form):
-            pk.color = None if auto.isChecked() else btn.color
-            pk.annotate = annot.currentData()   # None => inherit the curve's group label
-            self._refresh_plot()
-
-    def _edit_peak_info(self, curve, i):
-        if not curve.peaks or i >= len(curve.peaks):
-            return
-        pk = curve.peaks[i]
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Peak info")
-        form = QFormLayout(dlg)
-        name = QLineEdit(pk.name)
-        name.setPlaceholderText(f"peak {i + 1}")
-        form.addRow("Name", name)
-        auto, colorbtn = self._peak_color_row(form, pk, curve)
-        for lbl, val in [("Rt (min)", f"{pk.rt:.3f}"), ("x start (min)", f"{pk.x_start:.3f}"),
-                         ("x end (min)", f"{pk.x_end:.3f}"), ("width (min)", f"{pk.length:.3f}"),
-                         ("y max (above base)", f"{pk.y_max:.1f}"), ("AUC", f"{pk.auc:.2f}"),
-                         ("% of group", f"{pk.pct:.2f}"), ("skewness", f"{pk.skew:.3f}")]:
-            ed = QLineEdit(val)
-            ed.setReadOnly(True)
-            ed.setStyleSheet("color:#bbb;")
-            form.addRow(lbl, ed)
-        if _run_dialog(dlg, form):
-            pk.name = name.text()
-            pk.color = None if auto.isChecked() else colorbtn.color
-            self._rebuild_tree()
-            self._refresh_plot()
-
-    # ---------------- detection params ----------------
-    def _edit_spike_params(self):
-        p = self.spike_params
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Detect spikes — options")
-        outer = QVBoxLayout(dlg)
-
-        det, df = _section("Spike detection")      # finds the spikes (overlay on the parent)
-        window = _int_spin(3, 101, p.window, 2)
-        n_sigma = _spin(1, 50, p.n_sigma, 0.5)
-        max_width = _int_spin(1, 10, p.max_width, 1)
-        df.addRow("Window (odd)", window)
-        df.addRow("Threshold (n·σ)", n_sigma)
-        df.addRow("Max width", max_width)
-        outer.addWidget(det)
-
-        bld, bf = _section("Spikeless curve")       # builds the cleaned child curve
-        interp = QComboBox()
-        for key, lbl in _INTERP_METHODS:
-            interp.addItem(lbl, key)
-        interp.setCurrentIndex(max(0, interp.findData(self.interp_method)))
-        bf.addRow("Interpolation", interp)
-        outer.addWidget(bld)
-
-        if _run_dialog(dlg, outer):
-            self.spike_params = SpikeParams(window=window.value() | 1, n_sigma=n_sigma.value(),
-                                            max_width=max_width.value())
-            self.interp_method = interp.currentData()
-            self.log(f"Spike params: window={self.spike_params.window}, interp={self.interp_method}.")
-
-    def _edit_baseline_params(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Detect baseline — options")
-        outer = QVBoxLayout(dlg)
-
-        det, df = _section("Baseline detection")        # estimates the baseline (overlay on parent)
-        method = QComboBox()
-        for key in ("min", "first_n", "snip", "arpls", "none"):
-            method.addItem(BASELINE_LABELS[key], key)
-        method.setCurrentIndex(max(0, method.findData(self.baseline_method)))
-        n_spin = _int_spin(1, 100000, self.baseline_n, 1)
-        df.addRow("Method", method)
-        df.addRow("N", n_spin)
-        n_label = df.labelForField(n_spin)  # relabel + enable N per method (shared knob)
-
-        def _sync_n():
-            m = method.currentData()
-            n_spin.setEnabled(m in ("first_n", "snip"))
-            n_label.setText("Peak half-width (pts)" if m == "snip"
-                            else "First N points" if m == "first_n" else "N (unused)")
-        method.currentIndexChanged.connect(_sync_n)
-        _sync_n()
-        outer.addWidget(det)
-
-        cor, cf = _section("Baseline correction  (corrected curve = curve − baseline)")
-        clip = QCheckBox("Clip negative values to 0")
-        clip.setChecked(self.baseline_clip)
-        cf.addRow(clip)
-        outer.addWidget(cor)
-
-        if _run_dialog(dlg, outer):
-            self.baseline_method = method.currentData()
-            self.baseline_n = n_spin.value()
-            self.baseline_clip = clip.isChecked()
-            self.log(f"Baseline algorithm: {self.baseline_method}"
-                     f"{', corrected clipped ≥0' if self.baseline_clip else ''}.")
-
-    def _edit_peak_params(self):
-        p = self.peak_params
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Detect peaks — options")
-        outer = QVBoxLayout(dlg)
-
-        det, df = _section("Peak detection")
-        prom = _spin(0, 1e9, p.min_prominence, 1)
-        height = QLineEdit("" if p.min_height is None else f"{p.min_height:g}")
-        dist = _int_spin(1, 100000, p.min_distance, 1)
-        local = QCheckBox("Local (drift) baseline per peak")
-        local.setChecked(p.local_baseline)
-        df.addRow("Min prominence (0=auto)", prom)
-        df.addRow("Min height (blank=none)", height)
-        df.addRow("Min distance (points)", dist)
-        df.addRow(local)
-        outer.addWidget(det)
-
-        if _run_dialog(dlg, outer):
-            try:
-                h = float(height.text().replace(",", ".")) if height.text().strip() else None
-            except ValueError:
-                h = None
-            self.peak_params = PeakParams(min_prominence=prom.value(), min_height=h,
-                                          min_distance=dist.value(), local_baseline=local.isChecked())
-            self.log(f"Peak params: prominence={self.peak_params.min_prominence:g}, "
-                     f"local baseline={self.peak_params.local_baseline}.")
-
-# ---------------- small widget helpers ----------------
-class _DataTree(QTreeWidget):
-    """Tree with drag-to-reorder that reorders the model (draw order = z-order) via a signal.
-    A drop line shows where the item will land; the model is rebuilt so the move sticks."""
-
-    reordered = Signal(object, object, bool)  # (source data, target data|None, drop-below)
-
-    def dropEvent(self, e):
-        src = self.currentItem()
-        tgt = self.itemAt(e.position().toPoint())
-        dip = self.dropIndicatorPosition()
-        e.ignore()  # we own z-order; reorder the model ourselves and rebuild, don't let Qt move items
-        if src is None or src is tgt:
-            return
-        below = dip in (QAbstractItemView.BelowItem, QAbstractItemView.OnItem)
-        # dropped past the last row → move to the end of the top-level (dataset) list
-        tgt_data = tgt.data(0, Qt.UserRole) if tgt is not None else None
-        self.reordered.emit(src.data(0, Qt.UserRole), tgt_data, below)
-
-
-class _ReorderList(QListWidget):
-    """QListWidget that reorders its rows by internal drag and calls `_on_drop` afterwards.
-    A drag drops the rows' inline widgets (setItemWidget), so the callback rebuilds them; the
-    per-item Qt.UserRole token (a plain int) survives the move and gives the new order."""
-
-    def __init__(self):
-        super().__init__()
-        self.setDragDropMode(QAbstractItemView.InternalMove)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._on_drop = None
-
-    def dropEvent(self, e):
-        super().dropEvent(e)
-        if self._on_drop:
-            self._on_drop()
-
-
-class _Collapsible(QWidget):
-    toggled = Signal(bool)
-
-    def __init__(self, title, content, expanded=True):
-        super().__init__()
-        self._btn = QToolButton()
-        self._btn.setText(title)
-        self._btn.setCheckable(True)
-        self._btn.setChecked(expanded)
-        self._btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
-        self._btn.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
-        self._btn.toggled.connect(self._on_toggled)
-        self._content = content
-        self._content.setVisible(expanded)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        lay.addWidget(self._btn)
-        lay.addWidget(self._content)
-
-    def _on_toggled(self, on):
-        self._content.setVisible(on)
-        self._btn.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
-        self.toggled.emit(on)
-
-
-def _gear(slot):
-    b = QPushButton("⚙")
-    b.setFixedWidth(30)
-    b.clicked.connect(slot)
-    return b
-
-
-def _tool(text, tip, slot):
-    b = QToolButton()
-    b.setText(text)
-    b.setToolTip(tip)
-    b.setAutoRaise(True)
-    b.clicked.connect(slot)
-    return b
-
-
-def _clear_layout(lay):
-    """Remove and delete every item (widgets and spacers) from a layout, in place."""
-    while lay.count():
-        item = lay.takeAt(0)
-        w = item.widget()
-        if w is not None:
-            w.deleteLater()
-
-
-class _DockTitleBar(QWidget):
-    """Custom dock title bar: [title] … Copy  Export  ⚙  ✕ — so the log gets its
-    copy/export tools on the title line instead of a button row at the bottom."""
-
-    def __init__(self, dock, tools):
-        super().__init__()
-        self.setStyleSheet(
-            "QToolButton{color:#e0e0e0;border:none;padding:2px 6px;} "
-            "QToolButton:hover{background:#4a4d4f;border-radius:2px;} "
-            "QToolButton:disabled{color:#777;}")
-        h = QHBoxLayout(self)
-        h.setContentsMargins(6, 1, 2, 1)
-        h.setSpacing(0)
-        title = QLabel(dock.windowTitle())
-        title.setStyleSheet("font-weight:600; padding-right:6px;")
-        h.addWidget(title)
-        h.addStretch(1)
-        self.buttons = {}
-        for key, text, tip, slot in tools:
-            b = _tool(text, tip, slot)
-            self.buttons[key] = b
-            h.addWidget(b)
-        close = _tool("✕", "Close", dock.close)
-        h.addWidget(close)
-
-
-def _cform(w):
-    """A compact form layout (less line spacing) for the Plot-options panel."""
-    f = QFormLayout(w)
-    f.setVerticalSpacing(4)
-    f.setContentsMargins(6, 4, 6, 4)
-    return f
-
-
-def _section(title):
-    """A titled group box holding a form; returns (box, form) so callers add rows to `form`."""
-    box = QGroupBox(title)
-    return box, QFormLayout(box)
-
-
-def _pen_icon():
-    pm = QPixmap(14, 14)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setPen(QColor("#9aa"))
-    p.drawText(pm.rect(), Qt.AlignCenter, "✎")
-    p.end()
-    return QIcon(pm)
-
-
-def _app_icon():
-    """The window/taskbar icon, if the bundled .ico is present (generated by misc/icon.py)."""
-    p = Path(__file__).with_name("assets") / "spikeless.ico"
-    return QIcon(str(p)) if p.exists() else None
-
-
-def _spin(lo, hi, val, step):
-    s = QDoubleSpinBox()
-    s.setRange(lo, hi)
-    s.setSingleStep(step)
-    s.setDecimals(2 if step < 1 else 0)
-    s.setValue(val)
-    return s
-
-
-def _int_spin(lo, hi, val, step):
-    s = QSpinBox()
-    s.setRange(lo, hi)
-    s.setSingleStep(step)
-    s.setValue(val)
-    return s
-
-
-def _pair(left, right):
+    # ================================================================ other windows
+    def apply_prefs(self):
+        """The options changed (Options window): results and every view follow."""
+        if self.report_win is not None:
+            self.report_win.sync()
+        self.refresh()
+
+    def _options(self, topic=None):
+        if self.options_win is None:
+            self.options_win = OptionsWindow(self)
+        self.options_win.open(topic)
+
+    def _report(self):
+        if self.report_win is None:
+            self.report_win = ReportWindow(self)
+        self.report_win.open()
+
+    def _figure(self):
+        if self.figure_win is None:
+            self.figure_win = FigureWindow(self)
+        self.figure_win.open()
+
+    def closeEvent(self, e):
+        for w in (self.options_win, self.report_win, self.figure_win):
+            if w is not None:      # or the app stays up with them
+                w.close()
+        super().closeEvent(e)
+
+
+# ---------------- small helpers
+def _row(*widgets):
     w = QWidget()
     h = QHBoxLayout(w)
     h.setContentsMargins(0, 0, 0, 0)
-    h.addWidget(left)
-    h.addWidget(right, 1)
+    for k, wdg in enumerate(widgets):
+        h.addWidget(wdg, 1 if k == 0 else 0)
     return w
 
 
-def _iso_combo(current):
-    """The Radioisotope list: the isotope table (Options › Isotopes), and the current one
-    even if the table no longer has it, so opening a dialog never drops it."""
-    c = QComboBox()
+def _fill_iso(c: QComboBox, current: str):
+    """The isotope list (Options › Isotopes), and the current one even if the table no longer
+    has it, so opening a run never drops it."""
+    c.clear()
     c.addItem("—", "")
-    for name, hours in PREFS["isotopes"]:
-        c.addItem(f"{name}   ({hours:g} h)", name)
+    for name, hours, corr in PREFS["isotopes"]:
+        c.addItem(f"{name}   ({hours:g} h{', decay-corrected' if corr else ''})", name)
     if current and c.findData(current) < 0:
         c.addItem(current, current)
     c.setCurrentIndex(max(0, c.findData(current)))
-    return c
 
 
-def _set_halflife(spin, unit, hl_s):
-    if not hl_s:
-        return
-    for u, factor in (("d", 86400.0), ("h", 3600.0), ("min", 60.0), ("s", 1.0)):
-        if hl_s >= factor:
-            spin.setValue(hl_s / factor)
-            unit.setCurrentText(u)
-            return
-    spin.setValue(hl_s)
-    unit.setCurrentText("s")
-
-
-def _run_dialog(dlg, lay):
-    """Add OK/Cancel to the dialog's layout and run it. Takes a QFormLayout (rows) or a plain
-    box layout (a stack of _section group boxes) — the only thing that differed."""
-    box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-    box.accepted.connect(dlg.accept)
-    box.rejected.connect(dlg.reject)
-    (lay.addRow if isinstance(lay, QFormLayout) else lay.addWidget)(box)
-    return dlg.exec() == QDialog.Accepted
+def _app_icon():
+    """The window/taskbar icon, if the bundled .ico is present (drawn by misc/make_icon.py)."""
+    p = Path(__file__).with_name("assets") / "spikeless.ico"
+    return QIcon(str(p)) if p.exists() else None

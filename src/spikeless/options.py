@@ -5,13 +5,12 @@ Topics on the left, a page each; every change saved the moment it is made, to
 foot. Whatever is missing or malformed in the file keeps its default, so an old or
 hand-edited file never stops the app.
 
-What lives here is how the plot is shown, copied and exported, which Processing buttons
-show, the panels, the log and the isotope table. The report's choices are saved here too but
-set in the Report window. The processing settings (each button's ⚙) are not: they start from
-their defaults every session, as a threshold remembered from last week would be an analysis
-nobody asked for today.
+What lives here: how the figure is exported and copied, the isotopes (half-lives, which are
+decay-corrected), the HPLC methods (region names by retention time), the log. The report's
+choices are saved here too but set in the Report window. A run's processing (spike
+sensitivity, background, regions) is not: it belongs to the run, and is saved with the session.
 
-Also here, because every window needs them: `guard_wheel` (the mouse wheel over a field
+Also here, because every window needs them: `guard_fields` (the mouse wheel over a field
 scrolls the page, it does not change the value) and `ColorButton`.
 """
 
@@ -32,35 +31,26 @@ from PySide6.QtWidgets import (
 )
 
 from .adjust import ISOTOPES, set_half_lives
-from .plotting import BORDER_STYLES, ExportBorder
 from .plotview import Background
 
 APP_DIR = Path(__file__).resolve().parents[2]          # where Spikeless.bat is
 OPTIONS_FILE = APP_DIR / "spikeless_options.json"
 GREY = "color:#8d8d8d;"
 
-# The Processing buttons, in pipeline order.
-PROC_LABELS = {"spikes": "Detect spikes", "decay": "Apply decay",
-               "baseline": "Detect baseline", "peaks": "Detect peaks"}
-
 PREFS: dict = {
-    "background": asdict(Background()),
-    "export_border": asdict(ExportBorder()),
-    "scale_max": 5,                     # top of the resolution slider (× plot size)
-    "crop_fills": False,
+    "background": asdict(Background()),   # behind the figure preview (transparency)
     "png_dpi": 600,
     "clip_dpi": 600,
     "clip_format": "png",
-    "proc_visible": {"spikes": True, "decay": False, "baseline": True, "peaks": True},
-    "docks_open": {"data": True, "processing": True, "log": True, "plot_options": True},
-    "lock_docks": True,
     "log_timestamps": True,
-    "isotopes": [list(x) for x in ISOTOPES],
+    "isotopes": [list(x) for x in ISOTOPES],   # [name, half-life h, decay-correct]
+    "methods": [],                            # [method, region name, Rt from, Rt to] (min)
     "report_format": ".pdf",
-    "report_sections": {"plot": True, "datasets": True, "curves": True, "spikes": False,
-                        "peaks": True},
-    "report_cols": {"num": True, "name": False, "rt": True, "x_start": False, "x_end": False,
-                    "width": False, "y_max": False, "auc": True, "pct": True, "skew": False},
+    "report_sections": {"plot": True, "runs": True, "processing": True, "spikes": True,
+                        "results": True},
+    "report_cols": {"start": True, "end": True, "rt": True, "net": True,      # + Region, always
+                    "unc": True, "pct": True, "pct_reg": False, "height": False,
+                    "w_half": False, "sym": False, "rs": False, "sn": False, "flags": True},
 }
 _DEFAULTS = copy.deepcopy(PREFS)
 
@@ -77,6 +67,10 @@ def _merge(default, got):
     return copy.deepcopy(got if type(got) is type(default) else default)
 
 
+def _num(v):
+    return type(v) in (int, float)
+
+
 def load_prefs(path: Path | None = None, got=None) -> None:
     """Options from a JSON file (or a dict); what is missing or malformed keeps its default."""
     if got is None:
@@ -87,9 +81,12 @@ def load_prefs(path: Path | None = None, got=None) -> None:
     got = got if isinstance(got, dict) else {}
     for k, v in _DEFAULTS.items():
         PREFS[k] = _merge(v, got.get(k))
-    PREFS["isotopes"] = [[r[0], float(r[1])] for r in PREFS["isotopes"]
-                         if isinstance(r, list) and len(r) == 2 and isinstance(r[0], str)
-                         and type(r[1]) in (int, float)]
+    PREFS["isotopes"] = [[r[0], float(r[1]), bool(r[2]) if len(r) > 2 else False]
+                         for r in PREFS["isotopes"] if isinstance(r, list) and len(r) in (2, 3)
+                         and isinstance(r[0], str) and _num(r[1])]
+    PREFS["methods"] = [[r[0], r[1], float(r[2]), float(r[3])] for r in PREFS["methods"]
+                        if isinstance(r, list) and len(r) == 4 and isinstance(r[0], str)
+                        and isinstance(r[1], str) and _num(r[2]) and _num(r[3])]
     set_half_lives(PREFS["isotopes"])
 
 
@@ -100,6 +97,10 @@ def save_prefs(path: Path | None = None) -> bool:
         return True
     except OSError:
         return False
+
+
+def method_names() -> list[str]:
+    return list(dict.fromkeys(r[0] for r in PREFS["methods"] if r[0]))
 
 
 class _WheelGuard(QObject):
@@ -136,6 +137,10 @@ class ColorButton(QPushButton):
         self._paint()
         self.clicked.connect(self._pick)
 
+    def set_color(self, color):
+        self.color = color
+        self._paint()
+
     def _paint(self):
         self.setStyleSheet(f"background:{self.color}; padding:4px;")
         self.setText(self.color)
@@ -148,8 +153,7 @@ class ColorButton(QPushButton):
             return
         c = dlg.currentColor()
         if c.isValid():
-            self.color = c.name()
-            self._paint()
+            self.set_color(c.name())
             if self._on_change:
                 self._on_change()
 
@@ -220,9 +224,8 @@ class OptionsWindow(QMainWindow):
             w = self.pages.widget(0)
             self.pages.removeWidget(w)
             w.deleteLater()
-        for name, page in (("Plot", self._plot_page()), ("Screen", self._screen_page()),
-                           ("Processing", self._proc_page()), ("Isotopes", self._iso_page()),
-                           ("Panels", self._panels_page()), ("Log", self._log_page())):
+        for name, page in (("Figure", self._figure_page()), ("Isotopes", self._iso_page()),
+                           ("Methods", self._methods_page()), ("Log", self._log_page())):
             self.topics.addItem(name)
             sc = QScrollArea(widgetResizable=True)
             sc.setFrameShape(QScrollArea.NoFrame)
@@ -253,7 +256,7 @@ class OptionsWindow(QMainWindow):
         v.addWidget(c)
         return c
 
-    def _num(self, key, lo, hi, step, sub=None, suffix=""):
+    def _number(self, key, lo, hi, step, sub=None, suffix=""):
         val = PREFS[key][sub] if sub else PREFS[key]
         s = QSpinBox() if isinstance(val, int) else QDoubleSpinBox()
         s.setRange(lo, hi)
@@ -263,103 +266,63 @@ class OptionsWindow(QMainWindow):
         s.valueChanged.connect(lambda x: self._set(key, x, sub))
         return s
 
-    def _choice(self, key, items: dict, sub=None):
-        cur = PREFS[key][sub] if sub else PREFS[key]
-        c = QComboBox()
-        c.addItems(list(items.values()))
-        c.setCurrentIndex(list(items).index(cur) if cur in items else 0)
-        c.activated.connect(lambda i: self._set(key, list(items)[i], sub))
-        return c
-
     def _color(self, key, sub):
         b = ColorButton(PREFS[key][sub])
         b._on_change = lambda: self._set(key, b.color, sub)
         return b
 
-    def _plot_page(self):
-        w, v = self._page("Plot", "How the plot is drawn, copied and exported. Its size, axes "
-                          "and legend are in the Plot options panel; each curve's look is "
-                          "Display… in the Data panel.")
-        self._check(v, "crop_fills", "Crop fill areas where a curve passes",
-                    tip="Cuts AUC and baseline fills around each curve line, so overlapping "
-                        "semi-transparent areas read cleanly. Best on an opaque plot background.")
-        v.addSpacing(8)
-        f = QFormLayout()
-        f.addRow("Export PNG at", self._num("png_dpi", 72, 2400, 50, suffix=" dpi"))
-        f.addRow("Copy at", self._num("clip_dpi", 72, 2400, 50, suffix=" dpi"))
-        f.addRow("Copy as", self._choice("clip_format", {"png": "PNG image",
-                                                         "svg": "SVG vector"}))
-        v.addLayout(f)
-        g = QLabel("A copied PNG carries its resolution, so it pastes into PowerPoint or Word "
-                   "at the plot's size in mm.")
-        g.setWordWrap(True)
-        g.setStyleSheet(GREY)
-        v.addWidget(g)
-        v.addStretch(1)
-        return w
-
-    def _screen_page(self):
-        w, v = self._page("Screen", "What the plot sits on, on screen. None of this is copied "
-                          "or exported.")
-        v.addWidget(QLabel("<b>Background</b>"))
-        self._check(v, "background", "Checkered", "checkered")
-        f = QFormLayout()
-        f.addRow("Colour A / solid", self._color("background", "color_a"))
-        f.addRow("Colour B (checker)", self._color("background", "color_b"))
-        f.addRow("Checker cell", self._num("background", 0.2, 20, 0.1, "size_mm", " mm"))
-        v.addLayout(f)
-        v.addSpacing(8)
-        v.addWidget(QLabel("<b>Export-area guide</b>"))
-        self._check(v, "export_border", "Show where the exported image ends", "on")
-        f = QFormLayout()
-        f.addRow("Colour", self._color("export_border", "color"))
-        f.addRow("Style", self._choice("export_border", {k: k for k in BORDER_STYLES}, "style"))
-        f.addRow("Width", self._num("export_border", 0.1, 3, 0.1, "width", " pt"))
-        v.addLayout(f)
-        v.addSpacing(8)
-        f = QFormLayout()
-        f.addRow("Resolution slider up to", self._num("scale_max", 2, 20, 1, suffix=" ×"))
-        v.addLayout(f)
-        v.addStretch(1)
-        return w
-
-    def _proc_page(self):
-        w, v = self._page("Processing", "The buttons the Processing panel shows. Their "
-                          "settings (each button's ⚙) start from their defaults every session.")
-        for key, label in PROC_LABELS.items():
-            self._check(v, "proc_visible", label, key)
-        v.addStretch(1)
-        return w
-
-    def _iso_page(self):
-        w, v = self._page("Isotopes", "The isotopes the Radioisotope lists offer, and the "
-                          "half-lives decay correction uses. Edit a cell; + adds a row, − "
-                          "removes the selected ones.")
-        t = QTableWidget(0, 2)
-        t.setHorizontalHeaderLabels(["isotope", "half-life (h)"])
+    def _table(self, v, key, heads, kinds):
+        """An editable list of rows (kinds: str / float / bool per column): typing saves it;
+        + adds a row, − removes the selected ones. A row missing a value is left out."""
+        t = QTableWidget(0, len(heads))
+        t.setHorizontalHeaderLabels(heads)
         t.verticalHeader().setVisible(False)
         t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        rows = PREFS["isotopes"]
+        rows = PREFS[key]
         t.setRowCount(len(rows))
-        for r, (name, h) in enumerate(rows):
-            t.setItem(r, 0, QTableWidgetItem(name))
-            t.setItem(r, 1, QTableWidgetItem(f"{h:g}"))
+        for r, row in enumerate(rows):
+            for c, (val, kind) in enumerate(zip(row, kinds)):
+                it = QTableWidgetItem()
+                if kind is bool:
+                    it.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    it.setCheckState(Qt.Checked if val else Qt.Unchecked)
+                else:
+                    it.setText(f"{val:g}" if kind is float else str(val))
+                t.setItem(r, c, it)
 
         def read(*_):
             out = []
             for r in range(t.rowCount()):
-                name = (t.item(r, 0).text().strip() if t.item(r, 0) else "")
-                try:
-                    h = float((t.item(r, 1).text() if t.item(r, 1) else "").replace(",", "."))
-                except ValueError:
-                    h = 0.0
-                if name and h > 0:
-                    out.append([name, h])
-            self._set("isotopes", out)
+                row = []
+                for c, kind in enumerate(kinds):
+                    it = t.item(r, c)
+                    if kind is bool:
+                        row.append(bool(it) and it.checkState() == Qt.Checked)
+                    elif kind is float:
+                        try:
+                            row.append(float((it.text() if it else "").replace(",", ".")))
+                        except ValueError:
+                            row.append(None)
+                    else:
+                        row.append(it.text().strip() if it else "")
+                if all(x not in ("", None) for x in row):
+                    out.append(row)
+            self._set(key, out)
+
+        def add():
+            t.insertRow(t.rowCount())
+            for c, kind in enumerate(kinds):
+                if kind is bool:
+                    it = QTableWidgetItem()
+                    it.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                    it.setCheckState(Qt.Unchecked)
+                    t.setItem(t.rowCount() - 1, c, it)
+            t.scrollToBottom()
+
         t.itemChanged.connect(read)
         v.addWidget(t, 1)
         h = QHBoxLayout()
-        for text, fn in (("+", lambda: (t.insertRow(t.rowCount()), t.scrollToBottom())),
+        for text, fn in (("+", add),
                          ("−", lambda: ([t.removeRow(r) for r in sorted(
                              {i.row() for i in t.selectedIndexes()}, reverse=True)], read()))):
             b = QPushButton(text)
@@ -368,17 +331,55 @@ class OptionsWindow(QMainWindow):
             h.addWidget(b)
         h.addStretch(1)
         v.addLayout(h)
+        return t
+
+    def _figure_page(self):
+        w, v = self._page("Figure", "How Copy and Export write the figure. What it shows, its "
+                          "size, fonts and axes are in the Figure window.")
+        f = QFormLayout()
+        f.addRow("Export PNG at", self._number("png_dpi", 72, 2400, 50, suffix=" dpi"))
+        f.addRow("Copy at", self._number("clip_dpi", 72, 2400, 50, suffix=" dpi"))
+        c = QComboBox()
+        c.addItems(["PNG image", "SVG vector"])
+        c.setCurrentIndex(1 if PREFS["clip_format"] == "svg" else 0)
+        c.activated.connect(lambda i: self._set("clip_format", ("png", "svg")[i]))
+        f.addRow("Copy as", c)
+        v.addLayout(f)
+        g = QLabel("A copied PNG carries its resolution, so it pastes into PowerPoint or Word "
+                   "at the figure's size in mm.")
+        g.setWordWrap(True)
+        g.setStyleSheet(GREY)
+        v.addWidget(g)
+        v.addSpacing(8)
+        v.addWidget(QLabel("<b>Behind the preview</b> (shows through transparent parts)"))
+        self._check(v, "background", "Checkered", "checkered")
+        f = QFormLayout()
+        f.addRow("Colour A / solid", self._color("background", "color_a"))
+        f.addRow("Colour B (checker)", self._color("background", "color_b"))
+        f.addRow("Checker cell", self._number("background", 0.2, 20, 0.1, "size_mm", " mm"))
+        v.addLayout(f)
+        v.addStretch(1)
         return w
 
-    def _panels_page(self):
-        w, v = self._page("Panels", "The panels open when Spikeless starts (Plot options once "
-                          "data is loaded). Locked, a panel can't be dragged off or floated.")
-        for key, label in (("data", "Data"), ("processing", "Processing"), ("log", "Log"),
-                           ("plot_options", "Plot options")):
-            self._check(v, "docks_open", label, key)
-        v.addSpacing(8)
-        self._check(v, "lock_docks", "Lock the panels")
-        v.addStretch(1)
+    def _iso_page(self):
+        w, v = self._page("Isotopes", "The isotopes the runs' Isotope list offers, their "
+                          "half-lives, and whether runs of each are decay-corrected: each "
+                          "point back to the run start before integration, which the results "
+                          "then say. Within a 15-min run that is 0.1 % for ¹⁷⁷Lu, 3 % for "
+                          "⁹⁹ᵐTc, 17 % for ⁶⁸Ga. Edit a cell; + adds a row, − removes the "
+                          "selected ones.")
+        self._table(v, "isotopes", ["isotope", "half-life (h)", "decay-correct runs"],
+                    (str, float, bool))
+        return w
+
+    def _methods_page(self):
+        w, v = self._page("Methods", "Region names by retention time, per HPLC method. A run "
+                          "picks its method (Runs step); a region whose apex falls in a window "
+                          "of that method takes its name, unless one was typed. Without a "
+                          "match, a region is “peak N (Rt)”. A row per region: the "
+                          "method, the name, the window in minutes.")
+        self._table(v, "methods", ["method", "region", "Rt from (min)", "Rt to (min)"],
+                    (str, str, float, float))
         return w
 
     def _log_page(self):
@@ -415,15 +416,19 @@ class OptionsWindow(QMainWindow):
 def _self_check():
     """Malformed and partial files keep the defaults; a good value is taken."""
     load_prefs(got={"png_dpi": "lots", "clip_dpi": 300.0, "background": {"size_mm": 2},
-                    "proc_visible": [1], "isotopes": [["¹⁸F", 1.83], ["bad"], [3, 4]],
-                    "unknown": 1})
+                    "isotopes": [["¹⁸F", 1.83], ["⁶⁸Ga", 1.13, True], ["bad"], [3, 4]],
+                    "methods": [["M", "product", 7, 9.5], ["M", "bad", "x", 1]],
+                    "report_sections": [1], "unknown": 1})
     assert PREFS["png_dpi"] == 600 and PREFS["clip_dpi"] == 300
     assert isinstance(PREFS["clip_dpi"], int)
     assert PREFS["background"]["size_mm"] == 2.0 and PREFS["background"]["checkered"] is True
-    assert PREFS["proc_visible"] == _DEFAULTS["proc_visible"]
-    assert PREFS["isotopes"] == [["¹⁸F", 1.83]] and "unknown" not in PREFS
-    from .adjust import lookup_half_life_s
+    assert PREFS["report_sections"] == _DEFAULTS["report_sections"]
+    assert PREFS["isotopes"] == [["¹⁸F", 1.83, False], ["⁶⁸Ga", 1.13, True]]
+    assert PREFS["methods"] == [["M", "product", 7.0, 9.5]] and method_names() == ["M"]
+    assert "unknown" not in PREFS
+    from .adjust import decay_on, lookup_half_life_s
     assert lookup_half_life_s("¹⁸F") == 1.83 * 3600 and lookup_half_life_s("¹⁷⁷Lu") is None
+    assert decay_on("⁶⁸Ga") and not decay_on("¹⁸F")
     load_prefs(got={})
     assert PREFS == _DEFAULTS
     print("options self-check OK")

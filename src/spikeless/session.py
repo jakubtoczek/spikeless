@@ -1,9 +1,10 @@
-"""A session file: the datasets open, every curve made from them, and the plot options, in
-one JSON file (.spikeless), to reopen an analysis where it was left.
+"""A session file: the runs open — each with its spikes, background and regions — and the
+figure's settings, in one JSON file (.spikeless), to reopen an analysis where it was left.
 
 Arrays are written as lists. Reading is forgiving the way the options are: a key it does not
-know is dropped and a missing one keeps its default, so a file from an older or newer
-version still opens. Curve ids are not kept: each curve opened gets a new one.
+know is dropped and a missing one keeps its default, so a file from an older or newer version
+still opens. A file from 2026.10.14 (datasets of curves) opens too: each dataset becomes a
+run, its spikes are found again, and the peaks of its most processed curve become regions.
 """
 
 from __future__ import annotations
@@ -15,12 +16,13 @@ import typing
 import numpy as np
 
 from . import __version__
-from .dataset import Condition, Curve, Dataset, Peak
-from .plotting import PlotOptions
+from .plotting import Y_TITLE, PlotOptions
+from .run import COLORS, Region, Run
+from .spikes import SpikeParams
 
 EXT = ".spikeless"
-_ARRAYS = {"x": float, "y": float, "baseline": float, "spike_mask": bool, "spike_shown": bool}
-_LISTS = {"peaks": Peak, "children": Curve, "conditions": Condition}
+_ARRAYS = {"x": float, "y": float, "spikes": bool}
+_LISTS = {"regions": Region}
 
 
 def _plain(o):
@@ -31,9 +33,9 @@ def _plain(o):
     raise TypeError(f"{type(o).__name__} is not JSON")
 
 
-def dumps(datasets: list[Dataset], plot: PlotOptions) -> str:
+def dumps(runs: list[Run], plot: PlotOptions) -> str:
     return json.dumps({"app": "Spikeless", "version": __version__,
-                       "datasets": [dataclasses.asdict(d) for d in datasets],
+                       "runs": [dataclasses.asdict(r) for r in runs],
                        "plot": dataclasses.asdict(plot)}, default=_plain, ensure_ascii=False)
 
 
@@ -56,54 +58,94 @@ def _make(cls, d: dict):
     return cls(**kw)
 
 
-def loads(text: str) -> tuple[list[Dataset], PlotOptions]:
-    """(datasets, plot options) from a session file's text; ValueError if it isn't one."""
+def _from_dataset(d: dict, k: int) -> Run:
+    """A 2026.10.14 dataset (a tree of curves) as a run."""
+    root, meta = d["root"], d.get("meta", {})
+    conds = [(c.get("label") + ": " if c.get("label") else "") + c.get("value", "")
+             for c in d.get("conditions", [])]
+    run = Run(x=root["x"], y=root["y"], dt_s=d.get("dt_s", 1.0),
+              name=meta.get("name", ""), file=meta.get("original_filename", ""),
+              run_datetime=d.get("run_datetime", ""), headers=d.get("headers", []),
+              signal_col=d.get("signal_col", 1), molecule=meta.get("molecule", ""),
+              isotope=meta.get("radioisotope", ""), conditions="\n".join(conds),
+              color=COLORS[k % len(COLORS)])
+    run.detect_spikes()
+
+    def walk(c, depth=0):
+        yield depth, c
+        for ch in c.get("children", []):
+            yield from walk(ch, depth + 1)
+    peaked = [(depth, c) for depth, c in walk(root) if c.get("peaks")]
+    if peaked:
+        _, c = max(peaked, key=lambda t: t[0])
+        x = run.x
+        run.regions = [Region(float(x[p["left"]]), float(x[p["right"]]), name=p.get("name", ""))
+                       for p in c["peaks"]]
+    return run
+
+
+def loads(text: str) -> tuple[list[Run], PlotOptions]:
+    """(runs, figure settings) from a session file's text; ValueError if it isn't one."""
     try:
         got = json.loads(text)
         if got.get("app") != "Spikeless":
             raise ValueError("no Spikeless mark")
-        return ([_make(Dataset, d) for d in got["datasets"]],
-                _make(PlotOptions, got.get("plot") or {}))
-    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        if "runs" in got:
+            runs = [_make(Run, d) for d in got["runs"]]
+        else:
+            runs = [_from_dataset(d, k) for k, d in enumerate(got["datasets"])]
+        for r in runs:
+            if not isinstance(r.spike_params, SpikeParams) or r.spikes is None:
+                r.detect_spikes()
+        plot = _make(PlotOptions, got.get("plot") or {})
+        if plot.y.title == "Counts (cps)":          # the old default, which said counts
+            plot.y.title = Y_TITLE
+        return runs, plot
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError) as e:
         raise ValueError(f"Not a Spikeless session file ({e}).") from e
 
 
 def _self_check():
-    from .peaks import analyze_peaks, detect_peaks
-    from .spikes import detect
+    from .peaks import find_regions, measure
 
-    x = np.arange(600) / 60.0
-    y = 8 + 300 * np.exp(-0.5 * ((np.arange(600) - 300) / 6) ** 2)
+    t = np.arange(600, dtype=float)
+    y = 8 + 300 * np.exp(-0.5 * ((t - 300) / 6) ** 2)
     y[100] += 2000
-    ds = Dataset(root=Curve(x=x, y=y), conditions=[Condition("pH", "7")])
-    ds.meta.radioisotope, ds.half_life_s = "¹⁷⁷Lu", 574300.8
-    root = ds.root
-    root.spike_mask = detect(y)
-    root.spike_shown = np.ones(1, bool)
-    child = Curve(x=x, y=y * 2, name="clean", kind="spikeless", how={"curve": "Hampel w=7"})
-    child.baseline = np.full(600, 8.0)
-    child.peaks = detect_peaks(child.y, child.baseline)
-    analyze_peaks(x, child.y, child.peaks, child.baseline)
-    child.peaks[0].name = "main"
-    root.children.append(child)
-    plot = PlotOptions(plot_w_mm=120)
+    run = Run(x=t / 60, y=y, isotope="¹⁷⁷Lu", conditions="pH: 7", method="M")
+    run.detect_spikes()
+    run.kept = [100]
+    run.regions = find_regions(run)
+    run.regions[0].name, run.regions[0].note = "main", "checked"
+    run.bg_mode, run.bg_stretch = "stretch", [0.5, 2.0]
+    plot = PlotOptions(plot_w_mm=120, stack=True)
     plot.y.vmax = 500.0
 
-    (ds2,), plot2 = loads(dumps([ds], plot))
-    r2, c2 = ds2.root, ds2.root.children[0]
-    assert np.array_equal(r2.y, y) and r2.spike_mask.dtype == bool and r2.spike_mask[100]
-    assert c2.kind == "spikeless" and c2.how == {"curve": "Hampel w=7"} and c2.id != child.id
-    assert np.array_equal(c2.baseline, child.baseline)
-    assert c2.peaks[0].name == "main" and c2.peaks[0].auc == child.peaks[0].auc
-    assert ds2.conditions[0].text() == "pH: 7" and ds2.meta.radioisotope == "¹⁷⁷Lu"
-    assert plot2 == plot, "plot options changed on the way"
+    (r2,), plot2 = loads(dumps([run], plot))
+    assert np.array_equal(r2.y, y) and r2.spikes.dtype == bool and r2.spikes[100]
+    assert r2.kept == [100] and r2.id != run.id
+    assert r2.regions == run.regions and r2.bg_stretch == [0.5, 2.0]
+    assert measure(r2).rows[0].net == measure(run).rows[0].net
+    assert plot2 == plot, "figure settings changed on the way"
 
     # forgiving: an unknown key is dropped, a missing one defaults
-    raw = json.loads(dumps([ds], plot))
-    raw["datasets"][0]["root"]["from_the_future"] = 1
-    del raw["datasets"][0]["root"]["style"]
-    (ds3,), _ = loads(json.dumps(raw))
-    assert ds3.root.style.color == Curve(x=x, y=y).style.color
+    raw = json.loads(dumps([run], plot))
+    raw["runs"][0]["from_the_future"] = 1
+    del raw["runs"][0]["color"], raw["runs"][0]["spike_params"]
+    (r3,), _ = loads(json.dumps(raw))
+    assert r3.color == COLORS[0] and r3.spike_params == SpikeParams()
+
+    # a 2026.10.14 file: a dataset with an original curve, a spikeless child with peaks
+    old = {"app": "Spikeless", "version": "2026.10.14", "plot": {"y": {"title": "Counts (cps)"}},
+           "datasets": [{"root": {"x": (t / 60).tolist(), "y": y.tolist(), "children": [
+               {"x": [], "y": [], "children": [], "peaks": [{"apex": 300, "left": 280,
+                                                             "right": 320, "name": "main"}]}]},
+               "dt_s": 1.0, "run_datetime": "07/07/2026 14:17",
+               "meta": {"name": "Old", "original_filename": "old.txt", "radioisotope": "¹⁸F"},
+               "conditions": [{"label": "pH", "value": "7"}, {"label": "", "value": "note"}]}]}
+    (r4,), p4 = loads(json.dumps(old))
+    assert r4.name == "Old" and r4.isotope == "¹⁸F" and r4.conditions == "pH: 7\nnote"
+    assert r4.spike_list() == [100] and r4.regions[0].name == "main"
+    assert abs(r4.regions[0].start - 280 / 60) < 1e-9 and p4.y.title == Y_TITLE
     for bad in ("", "[]", '{"app": "Other"}', '{"app": "Spikeless"}'):
         try:
             loads(bad)

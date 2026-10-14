@@ -1,115 +1,150 @@
 # Spikeless — user guide
 
-Everything the window does, how the numbers are made, and how to report spike removal. For
-installing, see the [README](README.md).
+Everything the window does, how the numbers are made, and how to report them. For installing,
+see the [README](README.md).
 
 ## A run, step by step
 
-1. **Load.** Drop a GINA X `.txt` export on the window, or **Open…**. Several files: several
-   datasets, overlaid. Or copy columns in Excel or Prism (time, then count rate) and press
+1. **Load.** Drop a GINA X `.txt` export on the window, or **Open…** (Ctrl+O). Several files:
+   several runs, overlaid. Or copy columns in Excel or Prism (time, then count rate) and press
    **Ctrl+V**; the log says what it assumed about units and layout.
-2. **Spikes.** **Detect spikes**: the spikes flash red on the plot, then a **spikeless** curve
-   takes the original's place. The Data panel lists each spike (time, height). If one is not a
-   spike, see [When something looks wrong](#when-something-looks-wrong).
-3. **Select the spikeless curve** in the Data panel. Processing always acts on the selected
-   curve.
-4. **Background.** In **Detect baseline ⚙**, choose **Average of first N points** (the start of
-   the run, before anything elutes: the detector's background, ~5–10 cps), then **Detect
-   baseline**. (The default, *Minimum*, gives 0 cps on a noisy background — see below.)
-5. **Peaks.** In **Detect peaks ⚙**, set **Min prominence** to a count rate, e.g. **50** cps,
-   then **Detect peaks**. Each peak's retention time, area and % appear in the Data panel and are
-   shaded on the plot. Select a peak ▸ **Info** to name it (e.g. *free ¹⁷⁷Lu*, *product*).
-6. **Report.** **Report** on the toolbar: tick the sections, check the preview, **Save
-   report…** as PDF, `.odt`, Excel, Markdown or web page.
-7. **Keep it.** **Save…** (Ctrl+S) writes the whole analysis to a `.spikeless` file; open or drop
-   it later to carry on.
+2. **Spikes** are found and excluded at once: red marks on the plot, a line each in
+   **② Spikes** (time, height as recorded → as bridged). Untick one that is not a spike.
+3. **Background** — nothing to do for a radio-detector: **③** shows it (≈ 7 cps here), dashed
+   on the plot.
+4. **Peaks.** **Find peaks** (in **④**), or **drag across a peak on the plot**. Adjust an edge
+   by dragging it. The results table under the plot gives each region's net counts, ± and
+   **% of total** — the radiochemical purity.
+5. **Name them** once for all runs of an HPLC method: Options › Methods (e.g. *free ¹⁷⁷Lu*
+   2.3–2.8 min, *product* 7.5–8.5 min), then pick the method in **①**. Or type a name in the
+   table.
+6. **Report** (toolbar): tick sections and columns, check the preview, **Save report…** as PDF,
+   `.odt`, Excel, Markdown or web page.
+7. **Save…** (Ctrl+S) keeps the whole analysis in a `.spikeless` file.
 
-Ctrl+Z undoes a load, a processing step or a removal, Ctrl+Y redoes it; the log names each one.
+Ctrl+Z / Ctrl+Y undo and redo every change to a run; the log names each.
 
 ## The window
 
-The **plot** in the middle; **Plot options** on the left; **Data** and **Processing** on the
-right; the **Log** at the bottom. The toolbar buttons of the same names show and hide them.
-
-### Data
-
-A tree. Each **dataset** (a run) holds its curves: the **original**, and each curve made from
-it — *spikeless*, *−baseline*, *+decay* — under the curve it was made from. Under a curve: its
-**spikes** (each one), its **baseline**, its **peaks** (each one, with Rt, height, area, %).
-
-- **Tick** to show or hide (unticking a parent hides what is under it).
-- **Double-click** a name (✎) to rename it; a dataset's or a peak's name goes into the report.
-- **✖** or **Del** removes a node (not the original curve: remove the dataset instead).
-- **Drag** datasets onto datasets, or curves onto sibling curves, to change which draws on top.
-- Buttons, for the selected node: **Info** (everything about it; a dataset's file, run time,
-  molecule, radioisotope and conditions are edited here), **Adjust** (show a curve as cps, % of
-  max or % of total), **Display…** (colour, line, fill, legend; peak and spike styles),
-  **Duplicate** (a curve), **Export…** (a curve back to a GINA-style `.txt`, or a peak table to
-  Excel / CSV).
-
-### Processing
-
-Four buttons, in the order they should run: **Detect spikes → Apply decay → Detect baseline →
-Detect peaks**. Spikes first: they are an electronic artefact, not activity, so they go before
-decay correction; decay before baseline and peaks, so areas are of the corrected signal.
-*Apply decay* is hidden until switched on in Options › Processing.
-
-- **⚙** beside each: its settings (they start from their defaults every session).
-- **▸** before each: what it shows and hides as it runs, and when (show the spikes, wait 0.5 s,
-  show the spikeless curve…). Add steps with **＋ add**, drag to reorder.
+The **plot** in the middle, the **Results** under it (the **Log** in the tab beside), the
+**steps** on the right. The steps act on the **selected run** (① Runs).
 
 ### The plot
 
-- **Wheel** zooms around the cursor, **drag** pans, **double-click** fits it to the window.
-- **⧉ Copy · ⭳ Export** (top right): the figure at its exact size in mm — PNG (600 dpi) or SVG,
-  transparency kept. A copied PNG carries its resolution, so it pastes into PowerPoint or Word at
-  its real size. **⚙** opens Options › Plot.
-- **res** slider (bottom left): enlarges the plot area 1–5× on screen with the text kept the
-  same size, to pull close peaks apart; tick **export** to apply it to Copy / Export too.
-- The checkerboard (behind transparent parts) and the dashed frame (where the exported image
-  ends) are never exported.
+- **Wheel**: zoom the time around the cursor. **Ctrl+wheel**: zoom the height (to see a small
+  peak beside a large one). **Right- or middle-drag**: pan. **Double-click**: the whole run.
+- **Left-drag** across the trace: draw a region (see [Drawing regions](#drawing-regions)).
+- Ticks above it: **Trace as recorded** (grey, before spikes were excluded), **Spikes** (red
+  line from the bridged point to the spike's height; a ring on a spike put back), **Background**
+  (dashed), **Stack** (runs one above the other, background subtracted), **% of max** (each run
+  as % of its highest point above background). Stack and % of max apply to the figure too.
+- **⧉ Copy · ⭳ Export · ⚙ Figure…**: the figure, see [Figure](#figure).
 
-### Plot options
+### Results
 
-The figure: **Plot area** (size in mm, background), **Margins** (a fixed total size instead),
-**Legend**, **Y axis**, **X axis** (title, limits, tick spacing, fonts, tick lengths; **Advanced**:
-spacing and a grid). A ticked **Auto** shows, greyed, the value it uses. The wheel scrolls the
-panel; a field takes the wheel once clicked into. A typed number applies on Enter.
+A row per region of the selected run, then **Outside the regions** and **Total**. Columns are
+chosen in the Report window (the report shows the same): region, start, end, Rt, **net
+counts**, **±**, **% of total**, % of regions, height, w½, symmetry, resolution, S/N, flags.
+Hover a header for its meaning. Click a row to select the region; double-click its name to
+rename it; **Del** removes it; **Ctrl+C** copies the table (pastes into Word or Excel).
 
-### Log
+The line above the table says how the numbers were made: background and how it was taken, the
+run's total net counts, spikes excluded, decay correction.
 
-What was done, with times. **Copy · Export** on its title bar; ⚙ opens Options › Log.
+### ① Runs
+
+The runs loaded: **tick** to show, **click** to work on one, **Del** to remove it. For the
+selected run: **Name** (the legend and the report use it), **Isotope** (its half-life and
+whether runs of it are decay-corrected: Options › Isotopes), **Method** (names the regions:
+Options › Methods), **Molecule**, **Conditions** (one per line), **Colour**. Below: its file,
+run date, points and SHA-256. **Export trace…** writes the trace as used (spikes excluded,
+decay-corrected if so) back to a GINA-style `.txt`.
+
+### ② Spikes
+
+Each flagged point: time, height as recorded → as bridged, and the region it falls in. Ticked =
+excluded; **untick to keep it** (the point comes back, everywhere). **Threshold** (default 5 σ):
+lower finds more, higher fewer — the list and the plot follow as you slide. **More**: the
+moving-median window and the widest run of points that can be a spike.
+
+### ③ Background
+
+What lies under the peaks: the detector's background count rate.
+
+- **Mean outside the regions** (default): the mean of every point no region holds, leaving out
+  any point 4 σ above it (a peak no region holds yet).
+- **Mean of a stretch**: click **Drag on the plot**, then drag across a stretch with no peak.
+- **Follows a drift** (SNIP or arPLS): for a trace whose background drifts. A radio-detector's
+  is flat; use it only when it really is not.
+
+### ④ Peaks
+
+**Find peaks** proposes regions for the peaks no region holds yet (it never moves yours).
+**Apply to all** copies this run's regions to every other run, each edge moved to that run's own
+valley (replacing its regions). **Clear** removes them all. **Selected region**: its name,
+what its net counts are above (**the background**, or **a straight line between its ends** —
+for a peak on another's tail), a note (why it was drawn or moved, if it matters), its colour.
+
+### Drawing regions
+
+- **Draw**: press at a peak's left foot, drag to its right foot, release. The status line shows
+  the net counts while you drag. Each edge lands on the lowest point within 3 points of where
+  you let go — the valley — so a rough drag gives the region you meant. **Hold Alt** to place
+  the edges exactly.
+- **Adjust**: over an edge the cursor turns ↔; drag it. **← →** move the last-touched edge one
+  point. Two regions that touch share their edge (a perpendicular drop at the valley): moving it
+  moves both. Regions never overlap: a drag across a neighbour stops at its edge.
+- **Select** a region with a click (or its row); **Del** removes it.
+- How each was placed is kept and reported: *auto* (Find peaks), *drawn*, *moved* (found, then
+  adjusted), *copied* (Apply to all).
+
+## Figure
+
+**Figure…** (or ⚙ above the plot) opens what Copy and Export make. Left: a **preset** (article
+80 × 40 mm 7 pt, half page, slide 160 × 90 mm 14 pt), what it **shows** (regions, their labels —
+name and/or %, the background line, excluded spikes, the trace as recorded, a legend), its
+**size** in mm, margins, legend and axes (title, limits, ticks, fonts, grid). Right: the figure
+as it will be written (wheel to zoom; the checkerboard is transparency). **Copy** puts it on the
+clipboard at its real size (a PNG carries its resolution, so it pastes into PowerPoint or Word
+at its size in mm); **Export…** writes PNG (600 dpi) or SVG. Its settings are saved with the
+session.
+
+Labels: a region with a name of its own shows it; every region shows its % of total; regions
+below the quantification limit carry no label (they are in the results).
 
 ## Report
 
-**Report** opens its own window. On the left: the **format** (PDF, `.odt` — opens in Word and
-LibreOffice, Excel — a sheet per table and the plot on its own, Markdown — the plot saved beside
-it, web page) and the **sections**: the plot (as Export makes it), the datasets (file, run,
-molecule, radioisotope, conditions), the curves (how each was made: method and settings), the
-spikes (time and height of each), the peak tables (tick their columns underneath). On the right,
-the report as it will be written, following your work. **Save report…** (Ctrl+S) writes it;
+**Report** opens its own window. Left: the **format** (PDF; `.odt`, opens in Word and
+LibreOffice; Excel, a sheet per table and the figure; Markdown, the figure saved beside it; web
+page) and the **sections**: the **figure**; the **runs** (file and its SHA-256, run date,
+isotope, molecule, method, conditions); the **processing** (the spike rule and how many were
+excluded, the area of each region holding an excluded spike *with it kept* beside its result,
+the background and how it was taken, decay correction); the **spikes** (each one: time, as
+recorded, as bridged, region, excluded or kept); the **results** (the columns ticked
+underneath). Right: the report as it will be written. **Save report…** (Ctrl+S) writes it;
 **Copy** puts its text and tables on the clipboard. Your choices are kept for next time.
 
 ## Options
 
-**Options** opens its own window, topics on the left. **Plot** — crop fills where curves cross,
-PNG and copy resolution, copy as PNG or SVG. **Screen** — the background behind the plot and the
-export frame. **Processing** — which buttons show. **Isotopes** — the Radioisotope lists and the
-half-lives decay correction uses (edit a cell; + / −). **Panels** — which open at start; lock
-them. **Log** — times in its copy. Every change is saved at once, to `spikeless_options.json`
-beside `Spikeless.bat`; **Export… / Import…** carry them to another computer, **Reset to
-defaults** starts over.
+**Options** opens its own window, topics on the left. **Figure** — PNG and copy resolution,
+copy as PNG or SVG, what shows behind the preview. **Isotopes** — the Isotope list, half-lives,
+and a tick per isotope for **decay correction** (all off at first). **Methods** — region names
+by retention time, per HPLC method: a row per region (method, name, Rt from, Rt to). **Log** —
+times in its copy. Every change is saved at once, to `spikeless_options.json` beside
+`Spikeless.bat`; **Export… / Import…** carry them to another computer, **Reset to defaults**
+starts over.
 
 ## Sessions
 
-**Save…** writes the datasets, every curve, spikes, baselines, peaks and their names, styles
-and the plot options to one `.spikeless` file. **Open…** or a drop opens it; if something is
-open, Spikeless asks before replacing it (Ctrl+Z brings it back). The GINA files are not needed
-again: the session holds their data.
+**Save…** writes the runs — their data, spikes (and those put back), background, regions with
+their names and notes — and the figure's settings to one `.spikeless` file. **Open…** or a drop
+opens it; if something is open, Spikeless asks before replacing it (Ctrl+Z brings it back). The
+GINA files are not needed again. Session files from 2026.10.14 open too: each dataset becomes a
+run, its spikes are found again, the peaks of its last processed curve become regions.
 
 ## How the numbers are made
 
-### Spike detection
+### Spikes
 
 A spike is one sample far above the trace around it. Detection is a **Hampel filter**: it
 compares each point to the median of its neighbourhood, so it finds a spike even on a peak's
@@ -126,37 +161,47 @@ flank and leaves the peak alone. For a window *w* (odd, default 7 points):
    narrow real peak rises above the window's median but not far above its neighbours; a spike
    jumps away from both.
 
-### Spike removal
+An excluded point is bridged by the straight line between its two neighbours. The file is never
+changed: the trace results use is computed from it each time, so a spike put back is back.
 
-The file is never changed. The flagged point is left out of a new **spikeless** curve, where the
-straight line between its two neighbours bridges its place (**Linear**, the default; **PCHIP**,
-a smooth monotone curve, is offered for multi-point gaps). Further processing — baseline, peaks,
-decay — is done on that curve.
+### The trace
 
-### Background (baseline)
+The recorded count rate (cps), spikes bridged, then — when the run's isotope is ticked in
+Options › Isotopes — each point corrected to the run start, × e^(λ t). Within a 15-min run that
+is 0.1 % for ¹⁷⁷Lu, 3 % for ⁹⁹ᵐTc, 17 % for ⁶⁸Ga.
 
-**Detect baseline** estimates it on the selected curve and makes a **−baseline** curve (the
-curve minus it). Methods: **Average of first N points** (the background before anything elutes —
-the usual choice for a radio-detector, whose background is flat), **Minimum** (0 on a noisy
-background: avoid), **SNIP** and **arPLS** (follow a drifting baseline, for traces that have one),
-**None**. Optionally the −baseline curve's negative values are set to 0.
+### Net counts, ± and % of total
 
-### Peaks
+A region's **net counts** are the counts of the trace above what lies under it — the
+background, or a straight line between its ends — integrated by trapezoids (count rate × time).
+**±** is 1 σ of counting statistics, √(gross + background counts). **% of total** is of all the
+net counts of the run (the trace minus the background, over the whole run): the radiochemical
+purity as Ph. Eur. defines it, relative to all the activity of the radionuclide. What no region
+holds is the **Outside the regions** row, so the regions and it add to 100 %. **% of regions**
+is of the regions only.
 
-**Detect peaks** finds peaks by prominence (**Min prominence** in cps; *0 = auto*, 5 % of the
-trace's range — which misses a small peak beside a large one), **Min height** and **Min
-distance**. Each peak's bounds run from its apex down to the valley beside it, then in to its
-feet. Per peak: **Rt** (apex), start, end, width (end − start), height above the baseline, **area**
-and **%** — of the peaks found — and a moment skewness. The area is taken above the curve's
-baseline when it has one, else above a straight line between the peak's bounds (Detect peaks ⚙
-can ask for that line always). Areas (**AUC**) are in **cps·min**: × 60 gives counts. Spikes are bridged before peaks are looked for, so they never become false peaks.
+### Detection and quantification limits
 
-### Decay correction
+From the background counts *B* under a region (Currie 1968): **L_D** = 2.71 + 4.65 √B and
+**L_Q** = 50 (1 + √(1 + B/12.5)) — where its relative uncertainty falls to 10 %. Below L_D a
+region is **n.d.** (no % given); between L_D and L_Q it is flagged **< LOQ**. A run whose total
+net counts are below its own detection limit has no activity above background: no % at all.
 
-**Apply decay** makes a **+decay** curve, each point corrected back to the run start (or an
-offset from it) with the half-life of the dataset's isotope (Options › Isotopes, or typed in its
-⚙): × e^(λ (t − t_ref)). Within a 15-min run this matters for short-lived isotopes (⁶⁸Ga: 17 %
-between start and end) and hardly for long ones (¹⁷⁷Lu: 0.1 %).
+### Find peaks
+
+Maxima of the trace's 5-point mean that stand 5 σ above their surroundings, σ the Poisson noise
+of that mean at the background count rate; at least 10 s apart. Each becomes a region from its
+feet (where the 5-point mean falls back within 2 σ of the background) or the valley it shares
+with a neighbour; it is kept if its net counts exceed L_D. On the example runs: both peaks of
+the HOPO run; the ¹⁷⁷Lu product at 7.90 min (97.7 %), the impurity at 2.55 min (2.2 %) and two
+traces < LOQ of the Imathera2 run; nothing on a 120-min blank injection.
+
+### System suitability (Ph. Eur. 2.2.46)
+
+**w½** the width at half height; **symmetry** w₀.₀₅ / 2d (1 = symmetric, > 1 tailing);
+**resolution** 1.18 (t₂ − t₁) / (w½₁ + w½₂) from the region before; **S/N** 2H / h, H the
+height above background, h the range of the background (points outside every region) within
+5 w½ of the region.
 
 ### Files
 
@@ -175,9 +220,9 @@ They are the same operation, written two ways:
 - **On the plot**, a curve drawn without the point joins its two neighbours with a straight
   line — the line linear interpolation draws.
 - **In an area**, integrating across the gap with trapezoids gives exactly the area with the
-  interpolated point: 15 484 counts both ways on the example below.
+  interpolated point.
 
-They differ only if the gap is handled otherwise, and both alternatives are worse. The one
+They differ only if the gap is handled otherwise, and the alternatives are worse. The one
 example spike inside a peak — a 3 120 cps sample between 25 and 211 cps, on the rising edge of
 a ¹⁷⁷Lu product peak — with the peak's counts summed point by point above the 7 cps background:
 
@@ -185,31 +230,27 @@ a ¹⁷⁷Lu product peak — with the peak's counts summed point by point above
 |---|---|---|
 | Kept (no cleaning) | 18 489 | +19.4 % |
 | **Excluded, gap bridged linearly** (= linear interpolation) | **15 487** | — |
-| PCHIP curve across the gap | 15 448 | −0.25 % |
+| A smooth curve across the gap (PCHIP) | 15 448 | −0.25 % |
 | Excluded, counts summed with that second missing | 15 376 | −0.7 % |
 | Excluded, sum rescaled by the points kept | 15 889 | +2.6 % |
 
 Summing without the point loses the counts of that second: little on a flank (here 118
-counts), the local count rate × 1 s at an apex (here ~3 000 counts, ~20 % of the peak).
-Rescaling assumes the missing second was average for the peak, which a point on a flank is not.
-PCHIP adds a curve assumption for no gain. So: **exclude the point and bridge it linearly** —
-what Spikeless does with *Linear* — and **say it that way**: excluded, not corrected.
+counts), the local count rate × 1 s at an apex (~20 % of a peak). Rescaling assumes the missing
+second was average for the peak, which a point on a flank is not. A smooth curve adds an
+assumption for no gain (Spikeless no longer offers it). So: **exclude the point and bridge it
+linearly**, and **say it that way** — excluded, not corrected.
 
 ### What makes it rigorous
 
-1. **A rule fixed in advance**: the default settings, or your procedure's — not adjusted run by
+1. **A rule fixed in advance**: the default threshold, or your procedure's — not moved run by
    run until a result looks right.
 2. **Only isolated single points**: Max width 1. A wider event is real signal or another fault,
    and is reported as such.
-3. **Raw data kept**: the GINA file is untouched; the original curve stays in the Data panel and
-   in the session.
-4. **Every exclusion listed**: Report › Spikes gives the time and height of each; Report › Curves
-   gives the rule and its settings.
-5. **Its effect shown when it matters**: when a spike falls inside an integrated peak, give the
-   area both ways (detect peaks on the original curve too). On the background it changes a few
-   counts and needs no more than the count.
-6. **The figure says it**: in the caption, or mark the excluded points (Display… on the spikes:
-   points, or a line from the bridged value to the spike's height).
+3. **Raw data kept**: the GINA file is untouched, and its SHA-256 is in the report.
+4. **Every exclusion listed**: Report › Spikes (time, as recorded, as bridged, region).
+5. **Its effect shown when it matters**: Report › Processing gives the area of a region holding
+   an excluded spike with the spike kept, beside its result.
+6. **The figure says it**: in the caption, or show the excluded spikes on it (Figure › Shows).
 
 ### Methods text
 
@@ -219,10 +260,12 @@ With the default settings, adapt the numbers:
 > identified with a Hampel filter: a point was flagged when it exceeded the 7-point moving median
 > by more than 5 robust standard deviations (median absolute deviation × 1.4826, at least the
 > Poisson noise of the local count rate) and exceeded both adjacent points by the same margin;
-> runs of more than one point were not flagged. Flagged points (n = …, … of them within integrated
-> peaks) were excluded and their 1-s intervals bridged by linear interpolation between the
-> adjacent points before integration. Raw chromatograms are available on request. Processing:
-> Spikeless <version> (github.com/jakubtoczek/spikeless).
+> runs of more than one point were not flagged. Flagged points (n = …, … of them within
+> integrated peaks) were excluded and their 1-s intervals bridged by linear interpolation
+> between the adjacent points. Peaks were integrated above the mean background count rate
+> (… cps, outside the integrated regions) and reported as net counts and % of the total net
+> counts of the chromatogram; counting uncertainties are 1 σ, detection and quantification
+> limits after Currie (1968). Processing: Spikeless <version> (github.com/jakubtoczek/spikeless).
 
 ### In a GMP or regulatory record
 
@@ -234,33 +277,29 @@ show and document what was excluded, and why.
 
 ## When something looks wrong
 
-- **A small peak is missing; the product shows 100 %.** Auto prominence is 5 % of the trace's
-  range: a peak under 5 % of the largest one's height is not looked for. Set **Min prominence**
-  to a count rate (Detect peaks ⚙), e.g. 50 cps — about 20 × the noise of a 7 cps background.
-  On the example runs this finds a 2.7 % impurity the auto setting missed, and nothing on a
-  blank injection.
-- **Hundreds of tiny peaks on a blank.** Same cause, same fix.
-- **Areas too large, small peaks too big.** The baseline is 0: *Minimum* of a noisy background.
-  Use *Average of first N points*. On an example run: an impurity at 19.8 % with *Minimum*, 15.5 %
-  with the background subtracted.
-- **% does not match the activity in the run.** % is of the peaks found; activity outside them
-  (tailing, a small peak not found) is not in the denominator.
-- **A flagged point is not a spike.** Unticking it hides its mark only. Undo (Ctrl+Z) the
-  detection, raise **Threshold** in Detect spikes ⚙ and run it again.
-- **The same peak gives different areas.** Peaks follow the selected curve: on the spikeless
-  curve, the area is above its baseline; on the −baseline curve, above a straight line under
-  each peak. Pick one way for a series and keep it.
-- **The y axis stops at 0.** Its Auto minimum is 0; set **Min** in Plot options › Y axis to see a
-  background-subtracted trace below zero.
-- **The plot is lost off screen.** Double-click it.
+- **A peak is not found.** Find peaks keeps what passes the detection limit; a peak below it is
+  not distinguishable from background noise. Draw it by hand to see its counts (it will say
+  n.d.).
+- **A flagged point is not a spike.** Untick it in ② Spikes; or raise the **Threshold**.
+- **A region's edge is in the wrong place.** Drag it (Alt for exactly where you let go), or ← →.
+- **A small peak on another's tail.** Select it, set *Under it* to **a straight line between its
+  ends**.
+- **% does not match what you expect.** % of total counts everything above background,
+  including what lies outside your regions (its own row). % of regions is the other column.
+- **The background looks wrong.** Tick Background above the plot; pick a peak-free stretch
+  (③ Mean of a stretch).
+- **Can't see a small peak.** Zoom: wheel over it, Ctrl+wheel for the height.
+- **The plot is lost.** Double-click it.
 
 ## Shortcuts
 
 | Key | |
 |---|---|
-| Ctrl+Z / Ctrl+Y | undo / redo a load, a processing step, a removal |
-| Ctrl+C | copy the plot (or the selected text) |
-| Ctrl+V | paste columns as datasets |
-| Ctrl+S | save the session (in the Report window: the report) |
-| Del | remove the selected node of the Data panel |
-| wheel · drag · double-click | zoom · pan · fit the plot |
+| Ctrl+O · Ctrl+S | open · save the session (in the Report window: save the report) |
+| Ctrl+Z / Ctrl+Y | undo / redo every change to a run |
+| Ctrl+C | copy the figure, the results table (when it has focus), or the selected text |
+| Ctrl+V | paste columns as runs |
+| Del | remove the selected region (plot or table), or run (run list) |
+| ← → | move the last-touched region edge one point |
+| wheel · Ctrl+wheel · right-drag · double-click | zoom time · zoom height · pan · whole run |
+| drag · Alt+drag | draw a region · without snapping to the valleys |
