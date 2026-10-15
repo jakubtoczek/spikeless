@@ -15,9 +15,10 @@ by trapezoids (count rate × time). Results follow radio-HPLC practice:
   As = w₀.₀₅ / 2d, resolution Rs = 1.18 (t₂ − t₁) / (w½₁ + w½₂) from the region before,
   S/N = 2H / h with h the range of the background around the region.
 
-Find peaks proposes regions: maxima of the 5-point mean standing 5 σ (Poisson, of that mean)
-above their surroundings, each kept if its net counts pass L_D — a threshold of counting statistics, not a
-fraction of the tallest peak (which missed a 2 % impurity beside a large product).
+Find regions proposes them: maxima of the 5-point mean standing 5 σ (Poisson, of that mean)
+above their surroundings, at least 10 s apart, each kept if its net counts pass L_D — a
+threshold of counting statistics, not a fraction of the tallest peak (which missed a 2 %
+impurity beside a large product). Those numbers are the run's FindParams (defaults shown).
 """
 
 from __future__ import annotations
@@ -66,14 +67,14 @@ def fit(regions, a: float, b: float, dt_min: float, skip=None):
     return (a, b) if b - a >= 2 * dt_min - 1e-9 else None
 
 
-def _bounds(s, apex, noise, lo, hi, w=5):
+def _bounds(s, apex, noise, lo, hi, w=5, k=2.0):
     """Bounds of one peak (s: the trace above background): out from the apex while a w-point
-    mean of s stays 2 σ above the background — its feet — or until the valley (lowest point
+    mean of s stays k σ above the background — its feet — or until the valley (lowest point
     before the neighbouring apex), where two unresolved peaks share an edge.
-    # ponytail: a fixed 2 σ foot on a 5-point mean; a slow tail past it counts as outside the
+    # ponytail: a fixed k σ foot on a w-point mean; a slow tail past it counts as outside the
     # region, which the results show — make w follow the peak width if tails matter."""
     sm = np.convolve(s, np.ones(w) / w, mode="same")
-    thr = 2 * noise / np.sqrt(w)
+    thr = k * noise / np.sqrt(w)
     left_v = lo + int(np.argmin(sm[lo:apex + 1]))
     right_v = apex + int(np.argmin(sm[apex:hi + 1]))
     i = apex
@@ -90,14 +91,16 @@ def find_regions(run: Run) -> list[Region]:
     """Regions for the peaks no region holds yet (see the module docstring)."""
     from scipy.signal import find_peaks   # 1.3 s to import: kept off the startup path
 
+    p = run.find_params
+    w = max(1, int(p.smooth))
     x, y = run.x, run.trace()
     b, _ = run.background(y)
     s = y - b
     noise = sigma(float(np.median(b)), run.dt_s)
-    # on a 5-point mean, 5 σ of that mean: one noisy point on a tail is not a peak
-    sm = np.convolve(s, np.ones(5) / 5, mode="same")
-    apexes, _ = find_peaks(sm, prominence=5 * noise / np.sqrt(5),
-                           distance=max(1, round(10 / run.dt_s)))
+    # on a w-point mean, n σ of that mean: one noisy point on a tail is not a peak
+    sm = np.convolve(s, np.ones(w) / w, mode="same")
+    apexes, _ = find_peaks(sm, prominence=p.n_sigma * noise / np.sqrt(w),
+                           distance=max(1, round(p.min_gap_s / run.dt_s)))
     held = run.in_regions()
     dtm = run.dt_s / 60.0
     out = []
@@ -106,7 +109,7 @@ def find_regions(run: Run) -> list[Region]:
             continue
         lo = 0 if k == 0 else int(apexes[k - 1])
         hi = len(s) - 1 if k == len(apexes) - 1 else int(apexes[k + 1])
-        i, j = _bounds(s, int(a), noise, lo, hi)
+        i, j = _bounds(s, int(a), noise, lo, hi, w, p.foot_sigma)
         ab = fit(run.regions + out, float(x[i]), float(x[j]), dtm)
         if ab is None:
             continue
@@ -276,6 +279,12 @@ def _self_check():
     blank = Run(x=t / 60, y=rng.poisson(bg, n).astype(float), dt_s=1.0)
     blank.detect_spikes()
     assert find_regions(blank) == [] and not measure(blank).active
+
+    # the threshold is the run's: high enough, the small peak is no longer found
+    probe = Run(x=run.x, y=run.y, dt_s=1.0)
+    probe.detect_spikes()
+    probe.find_params.n_sigma = 60
+    assert len(find_regions(probe)) == 1
 
     # a region with a straight line under it
     run.regions = [Region(7.5, 8.5, under="line")]

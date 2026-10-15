@@ -32,15 +32,19 @@ One screen: the chromatogram, its results under it, four steps on the right.
    or Prism). Its **spikes** are excluded at once — red on the plot, listed in **② Spikes**,
    where one can be put back.
 2. **③ Background**: the detector's background, shown dashed — nothing to do.
-3. **④ Peaks**: **Find peaks**, or **drag across a peak on the plot**; drag an edge to adjust
-   it. The table under the plot gives each region's **net counts ± σ** and **% of total** (the
-   radiochemical purity).
+3. **④ Regions**: **Find regions**, or **Draw region** and drag across a peak on the plot; drag
+   an edge to adjust it. The table under the plot gives each region's **net counts ± σ** and
+   **% of total** (the radiochemical purity).
 4. **Report** — pick the sections, see it, save it as PDF, Word-compatible `.odt`, Excel,
    Markdown or web page. **Figure…** sets what **Copy / Export** make, at its size in mm.
-5. **Save…** (Ctrl+S) keeps the whole analysis in a `.spikeless` file.
+5. **Save…** (Ctrl+S) keeps the whole analysis in a `.spikeless` (or `.json`) file.
 
-**Options**: export resolution, the isotopes (and which are decay-corrected), region names per
-HPLC method. Ctrl+Z / Ctrl+Y undo and redo every change.
+On the plot: click for a reading line, drag to zoom, right-drag to pan, double-click for the
+whole run.
+
+**Options**: the mouse on the plot, what a new run starts with (spike rule, background, how
+regions are found), export resolution, the isotopes (and which are decay-corrected), region
+names and conditions per HPLC method. Ctrl+Z / Ctrl+Y undo and redo every change.
 
 Every panel and setting, how the numbers are made, and how to report spike removal in a
 publication: **[the user guide](GUIDE.md)**.
@@ -62,5 +66,5 @@ Layers: `io_gina.py`, `io_paste.py` readers · `run.py` the model (a run, its sp
 background, regions) · `spikes.py`, `peaks.py`, `adjust.py` the maths (no Qt) · `session.py`
 the session file · `plotting.py` the chromatogram as a matplotlib figure · `canvas.py` it on
 screen, with the mouse · `figure.py`, `report.py`, `options.py` their windows (`plotview.py`
-the figure preview) · `app.py` the main window. scipy is imported inside the functions that
-need it, to keep it off the startup path.
+the figure preview), `editors.py` the run names and region details · `app.py` the main window.
+scipy is imported inside the functions that need it, to keep it off the startup path.

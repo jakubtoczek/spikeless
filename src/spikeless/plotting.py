@@ -16,12 +16,38 @@ import numpy as np
 from matplotlib.colors import to_hex, to_rgb, to_rgba
 from matplotlib.figure import Figure
 from matplotlib.ticker import FixedLocator, MultipleLocator
+from matplotlib.transforms import ScaledTranslation
 
 _MAX_TICKS = 2000
 PT_PER_MM = 2.834645669
 Y_TITLE = "Count rate (cps)"
 LABELS = {"none": "None", "name": "Name", "pct": "% of total", "both": "Name and %"}
 # (a region with no name of its own — no typed name, no method window — shows only its %)
+Y_MODES = {"cps": "Count rate", "pct_max": "% of max", "pct_total": "% of total"}
+_Y_TITLES = {"pct_max": "% of max", "pct_total": "% of total per min"}
+# set from the options (options.sync_style), for the screen and the figure alike
+STYLE = {"y_below_pct": 3.0,              # the y axis starts this % of its top below zero
+         "raw_color": "#b0b0b0", "raw_width": 0.8, "raw_style": "solid"}  # trace as recorded
+
+# legend positions: (matplotlib loc, the point of the plot it is anchored to; None: inside)
+LEGEND = {
+    "auto": ("upper right", None),
+    "in upper left": ("upper left", None), "in upper center": ("upper center", None),
+    "in upper right": ("upper right", None), "in center right": ("center right", None),
+    "in lower right": ("lower right", None), "in lower center": ("lower center", None),
+    "in lower left": ("lower left", None),
+    "out above left": ("lower left", (0, 1)), "out above center": ("lower center", (0.5, 1)),
+    "out above right": ("lower right", (1, 1)),
+    "out right top": ("upper left", (1, 1)), "out right center": ("center left", (1, 0.5)),
+    "out right bottom": ("lower left", (1, 0)),
+    "out below left": ("upper left", (0, 0)), "out below center": ("upper center", (0.5, 0)),
+    "out below right": ("upper right", (1, 0)),
+}
+
+
+def legend_text(key):
+    return ("Auto: inside if it fits, else outside right" if key == "auto" else
+            key.replace("in ", "Inside, ", 1).replace("out ", "Outside, ", 1))
 
 
 def _rel_lum(rgb) -> float:
@@ -97,15 +123,19 @@ class AxisOptions:
     title_font_size: float = 8.0
     title_pad_mm: float = 1.2
     tick_label_pad_mm: float = 0.6
-    grid_on: bool = False
+    grid_on: bool = False             # at the major ticks
     grid_color: str = "#c0c0c0"
     grid_style: str = "dotted"
     grid_width: float = 0.4
+    minor_grid_on: bool = False       # at the minor ticks (drawn even without the ticks)
+    minor_grid_color: str = "#e0e0e0"
+    minor_grid_style: str = "dotted"
+    minor_grid_width: float = 0.3
 
 
 @dataclass
 class PlotOptions:
-    """The figure as exported (Figure window). stack, pct_max and region_labels apply on
+    """The figure as exported (Figure window). stack, y_mode and the region labels apply on
     screen too, so the screen shows what the figure will."""
 
     plot_w_mm: float = 80.0
@@ -117,19 +147,22 @@ class PlotOptions:
     outside_color: str = "#ffffff"
     outside_alpha: float = 0.0
     legend: bool = True               # run names, when more than one run is shown
-    legend_loc: str = "upper right"
+    legend_loc: str = "auto"          # a key of LEGEND
+    legend_dx_mm: float = 0.0         # moved right (−: left) …
+    legend_dy_mm: float = 0.0         # … and up (−: down) from there
     legend_font_family: str = "sans-serif"
     legend_font_size: float = 7.0
     line_width_pt: float = 0.75
     show_regions: bool = True
     region_labels: str = "both"       # a key of LABELS
     label_size: float = 7.0
+    label_rt: bool = False            # the label says the region's Rt too
     region_alpha: float = 0.3
     show_background: bool = False
     show_spikes: bool = False
     show_raw: bool = False
     stack: bool = False               # overlays one above the other, background subtracted
-    pct_max: bool = False             # each run as % of its highest point above background
+    y_mode: str = "cps"               # a key of Y_MODES: background subtracted unless "cps"
     x: AxisOptions = field(default_factory=lambda: AxisOptions(title="Time (min)"))
     y: AxisOptions = field(default_factory=lambda: AxisOptions(title=Y_TITLE, unit="cps"))
 
@@ -165,48 +198,65 @@ def _minor_n(major, axis):
 # ---------------- runs
 def _scales(runs, opts):
     """Per shown run: (background, multiplier, offset) so that the drawn value is
-    (y - b) * k + off when stacked or in % of max, else y as is (b drawn as its own line)."""
-    out, off = {}, 0.0
-    shown = [r for r in runs if r.shown]
-    step = 0.0
-    if opts.stack:
-        step = 1.1 * max((float(np.nanmax(r.trace() - r.background()[0])) for r in shown),
-                         default=1.0)
-        if opts.pct_max:
-            step = 110.0
-    for r in reversed(shown):                     # the first run on top
+    (y - b) * k + off when stacked or in % — of its highest point above background, or of
+    all its net counts, per min (so that a peak's area on the plot is its % of total) — else
+    y as is (b drawn as its own line)."""
+    per = {}
+    for r in runs:
+        if not r.shown:
+            continue
         b = r.background()[0]
-        if opts.stack or opts.pct_max:
-            top = float(np.nanmax(r.trace() - b)) or 1.0
-            k = 100.0 / top if opts.pct_max else 1.0
-            out[r.id] = (b, k, off)
-            off += step
-        else:
-            out[r.id] = (b, 1.0, 0.0)
+        net = r.trace() - b
+        k = 1.0
+        if opts.y_mode == "pct_max":
+            k = 100.0 / (float(np.nanmax(net)) or 1.0)
+        elif opts.y_mode == "pct_total":
+            tot = float(np.trapezoid(net, r.x))           # cps × min
+            k = 100.0 / tot if tot > 0 else 1.0
+        per[r.id] = (b, k, float(np.nanmax(net)) * k)
+    step = 1.1 * max((t for *_, t in per.values()), default=1.0) if opts.stack else 0.0
+    out, off = {}, 0.0
+    for r in reversed([r for r in runs if r.shown]):     # the first run on top
+        b, k, _ = per[r.id]
+        out[r.id] = (b, k, off)
+        off += step
     return out
+
+
+def _flat(opts):
+    return opts.y_mode == "cps" and not opts.stack
 
 
 def _f(v, b, k, off, flat):
     return v if flat else (v - b) * k + off
 
 
-def visible_range(runs, opts, x0=None, x1=None):
-    """(ymin, ymax) of the shown runs' traces (and background lines) between x0 and x1."""
-    sc = _scales(runs, opts)
-    flat = not (opts.stack or opts.pct_max)
+def curves(runs, opts):
+    """(x, y as drawn) of each shown run: what the height of the view is fitted to."""
+    sc, flat = _scales(runs, opts), _flat(opts)
+    return [(r.x, _f(r.trace(), *sc[r.id], flat)) for r in runs if r.shown]
+
+
+def fit_y(cs, x0=None, x1=None):
+    """(ymin, ymax) of curves() between x0 and x1 (at most 0, at least 1)."""
     lo, hi = 0.0, 1.0
-    for r in runs:
-        if not r.shown:
-            continue
-        sel = np.ones(len(r.x), bool)
-        if x0 is not None:
-            sel = (r.x >= x0) & (r.x <= x1)
-        if not sel.any():
-            continue
-        b, k, off = sc[r.id]
-        v = _f(r.trace(), b, k, off, flat)[sel]
-        lo, hi = min(lo, float(np.nanmin(v))), max(hi, float(np.nanmax(v)))
+    for x, v in cs:
+        v = v if x0 is None else v[(x >= x0) & (x <= x1)]
+        if v.size:
+            lo, hi = min(lo, float(np.nanmin(v))), max(hi, float(np.nanmax(v)))
     return lo, hi
+
+
+def visible_range(runs, opts, x0=None, x1=None):
+    """(ymin, ymax) of the shown runs' traces between x0 and x1."""
+    return fit_y(curves(runs, opts), x0, x1)
+
+
+def y_span(lo, hi):
+    """Auto y limits for traces between lo and hi: 5 % over the top; under zero by STYLE's %
+    of the top, so the baseline clears the x axis (or under the lowest point)."""
+    top = hi * 1.05
+    return min(lo * 1.05, -STYLE["y_below_pct"] / 100 * top), top
 
 
 def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, only=None,
@@ -216,7 +266,7 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
     or only for `only`. sel: the selected run (its regions' edges drawn when `edges`,
     sel_region highlighted)."""
     sc = _scales(runs, opts)
-    flat = not (opts.stack or opts.pct_max)
+    flat = _flat(opts)
     lw = opts.line_width_pt
     x_end = max((float(r.x[-1]) for r in runs if r.shown), default=1.0)
     y_top = visible_range(runs, opts)[1] * 1.05
@@ -228,9 +278,9 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
         v = _f(y, b, k, off, flat)
         extra = only is None or r is only
         if raw and extra:
-            ax.plot(r.x, _f(r.trace(raw=True), b, k, off, flat), color="#b0b0b0", lw=lw * 0.8,
-                    zorder=1)
-        ax.plot(r.x, v, color=r.color, lw=lw, zorder=3, label=r.name)
+            ax.plot(r.x, _f(r.trace(raw=True), b, k, off, flat), color=STYLE["raw_color"],
+                    lw=lw * STYLE["raw_width"], ls=STYLE["raw_style"], zorder=1)
+        ax.plot(r.x, v, color=r.color, lw=lw, zorder=3, label=r.legend())
         if background and extra:
             ax.plot(r.x, _f(b, b, k, off, flat), color="#808080", lw=lw * 0.8, ls="--", zorder=2)
         if spikes and extra:
@@ -258,7 +308,7 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
                 for t in (reg.start, reg.end):
                     ax.axvline(t, color=col, lw=1.6 if hl else 0.6, alpha=0.9 if hl else 0.5,
                                zorder=5)
-            txt = _label(row, opts.region_labels)
+            txt = _label(row, opts.region_labels, opts.label_rt) if reg.label else ""
             if txt:
                 top = int(np.argmax(ys - under))
                 px, py = xs[top], _f(ys[top], b[m][top], k, off, flat)
@@ -268,10 +318,10 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
                             color=_readable(col, bg), zorder=6)
 
 
-def _label(row, mode):
-    """A region's label: its name if it has one (typed or the method's), its % of total.
-    None below the quantification limit: those are in the results, not on the figure, where
-    small neighbours' labels would only pile up."""
+def _label(row, mode, rt=False):
+    """A region's label: its name if it has one (typed or the method's), its % of total, its
+    Rt if asked. None below the quantification limit: those are in the results, not on the
+    figure, where small neighbours' labels would only pile up."""
     if "n.d." in row.flags or "< LOQ" in row.flags:
         return ""
     parts = []
@@ -279,11 +329,69 @@ def _label(row, mode):
         parts.append(row.name)
     if mode in ("pct", "both") and row.pct is not None:
         parts.append(f"{row.pct:.1f} %")
+    if rt:
+        parts.append(f"{row.rt:.2f} min")
     return "\n".join(parts)
 
 
 def y_title(opts):
-    return "% of max" if opts.pct_max and opts.y.title == Y_TITLE else opts.y.title
+    return _Y_TITLES.get(opts.y_mode, opts.y.title) if opts.y.title == Y_TITLE else opts.y.title
+
+
+# ---------------- the legend
+def _renderer(fig):
+    if not hasattr(fig.canvas, "get_renderer"):
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        FigureCanvasAgg(fig)
+    return fig.canvas.get_renderer()
+
+
+def _legend(ax, opts, key, handles, size, family, below_pt, pad_pt):
+    loc, at = LEGEND[key]
+    dx, dy = opts.legend_dx_mm * PT_PER_MM, opts.legend_dy_mm * PT_PER_MM
+    if key.startswith("out above"):
+        dy += pad_pt
+    elif key.startswith("out right"):
+        dx += pad_pt
+    elif key.startswith("out below"):
+        dy -= below_pt + pad_pt
+    off = ScaledTranslation(dx / 72, dy / 72, ax.figure.dpi_scale_trans)
+    return ax.legend(handles=handles, loc=loc, bbox_to_anchor=at or (0, 0, 1, 1),
+                     bbox_transform=ax.transAxes + off, borderaxespad=0.5 if at is None else 0,
+                     frameon=False, prop={"family": family, "size": size})
+
+
+def _in_the_way(ax, leg):
+    """The legend runs out of the plot, or lies over a trace."""
+    r = _renderer(ax.figure)
+    bb, ab = leg.get_window_extent(r), ax.get_window_extent(r)
+    if bb.x0 < ab.x0 - 1 or bb.x1 > ab.x1 + 1 or bb.y0 < ab.y0 - 1 or bb.y1 > ab.y1 + 1:
+        return True
+    for line in ax.get_lines():
+        p = line.get_transform().transform(line.get_xydata())
+        if ((p[:, 0] >= bb.x0) & (p[:, 0] <= bb.x1) & (p[:, 1] >= bb.y0)
+                & (p[:, 1] <= bb.y1)).any():
+            return True
+    return False
+
+
+def place_legend(ax, opts, size, family="sans-serif", below_pt=30.0, pad_pt=4.0):
+    """The runs' legend labels on ax, where opts says, moved by its offset; None for one run.
+    Auto: inside, upper right or left, where it covers no trace; else outside, right. An
+    'out below' legend goes under the x axis' labels, below_pt deep. Call it with the limits
+    set: auto looks at where the traces are drawn."""
+    handles = [ln for ln in ax.get_lines() if not ln.get_label().startswith("_")]
+    if not opts.legend or len(handles) < 2:
+        return None
+    key = opts.legend_loc if opts.legend_loc in LEGEND else "auto"
+    if key == "auto":
+        for k in ("in upper right", "in upper left"):
+            leg = _legend(ax, opts, k, handles, size, family, below_pt, pad_pt)
+            if not _in_the_way(ax, leg):
+                return leg
+            leg.remove()
+        key = "out right top"
+    return _legend(ax, opts, key, handles, size, family, below_pt, pad_pt)
 
 
 def resolve_limits(runs, opts):
@@ -291,8 +399,9 @@ def resolve_limits(runs, opts):
     lo, hi = visible_range(runs, opts)
     xmin = 0.0 if opts.x.vmin is None else opts.x.vmin
     xmax = x_max if opts.x.vmax is None else opts.x.vmax
-    ymin = (lo * 1.05 if lo < 0 else 0.0) if opts.y.vmin is None else opts.y.vmin
-    ymax = hi * 1.05 if opts.y.vmax is None else opts.y.vmax
+    auto_lo, auto_hi = y_span(lo, hi)
+    ymin = auto_lo if opts.y.vmin is None else opts.y.vmin
+    ymax = auto_hi if opts.y.vmax is None else opts.y.vmax
     if xmax <= xmin:
         xmax = xmin + 1.0
     if ymax <= ymin:
@@ -334,22 +443,24 @@ def _apply_axis(ax, which, axis, vmin, vmax, span_mm):
             axr.set_major_locator(MultipleLocator(major))
     else:
         axr.set_major_locator(MultipleLocator(major))
-    if axis.minor_on:
+    if axis.minor_on or axis.minor_grid_on:
         axr.set_minor_locator(MultipleLocator(major / max(1, _minor_n(major, axis))))
     tick_w = axis.lw_pt if axis.tick_lw_auto else axis.tick_lw_pt
     ax.tick_params(axis=which, which="major", direction=axis.tick_dir,
                    length=axis.major_len_mm * PT_PER_MM, width=tick_w, labelsize=axis.tick_font_size,
                    pad=axis.tick_label_pad_mm * PT_PER_MM)
     ax.tick_params(axis=which, which="minor", direction=axis.tick_dir,
-                   length=axis.minor_len_mm * PT_PER_MM, width=tick_w)
+                   length=axis.minor_len_mm * PT_PER_MM if axis.minor_on else 0, width=tick_w)
     for lbl in (ax.get_xticklabels() if is_x else ax.get_yticklabels()):
         lbl.set_fontfamily(axis.tick_font_family)
         lbl.set_fontsize(axis.tick_font_size)
     if axis.grid_on:
-        if not axis.minor_on:  # ensure minor gridlines exist even if minor ticks are off
-            axr.set_minor_locator(MultipleLocator(major / max(1, _minor_n(major, axis))))
-        ax.grid(True, which="both", axis=which, color=axis.grid_color,
-                linestyle=axis.grid_style, linewidth=axis.grid_width, zorder=0)
+        ax.grid(True, which="major", axis=which, color=axis.grid_color,
+                linestyle=axis.grid_style, linewidth=axis.grid_width)
+    if axis.minor_grid_on:
+        ax.grid(True, which="minor", axis=which, color=axis.minor_grid_color,
+                linestyle=axis.minor_grid_style, linewidth=axis.minor_grid_width)
+    ax.set_axisbelow(True)
 
 
 def build_figure(runs, opts: PlotOptions, results) -> Figure:
@@ -378,10 +489,37 @@ def build_figure(runs, opts: PlotOptions, results) -> Figure:
                   fontsize=opts.x.title_font_size, labelpad=opts.x.title_pad_mm * PT_PER_MM)
     ax.set_ylabel(y_title(opts), fontfamily=opts.y.title_font_family,
                   fontsize=opts.y.title_font_size, labelpad=opts.y.title_pad_mm * PT_PER_MM)
-    if opts.legend and sum(r.shown for r in runs) > 1:
-        ax.legend(loc=opts.legend_loc, frameon=False,
-                  prop={"family": opts.legend_font_family, "size": opts.legend_font_size})
+    x = opts.x
+    below = ((x.major_len_mm + x.tick_label_pad_mm + x.title_pad_mm) * PT_PER_MM
+             + 1.2 * (x.tick_font_size + x.title_font_size))
+    leg = place_legend(ax, opts, opts.legend_font_size, opts.legend_font_family, below)
+    if leg is not None:
+        _make_room(fig, ax, leg, opts, left, bottom, plot_w, plot_h)
     return fig
+
+
+def _make_room(fig, ax, leg, opts, left, bottom, plot_w, plot_h, pad=1.0):
+    """A legend out of the figure: the figure grows to hold it, pad mm clear; or, its total
+    size being fixed, the plot area gives up the room."""
+    fig_w, fig_h = fig.get_figwidth() * 25.4, fig.get_figheight() * 25.4
+    bb = leg.get_window_extent(_renderer(fig))
+    mm = 25.4 / fig.dpi
+    gl, gr = max(0.0, pad - bb.x0 * mm), max(0.0, bb.x1 * mm + pad - fig_w)
+    gb, gt = max(0.0, pad - bb.y0 * mm), max(0.0, bb.y1 * mm + pad - fig_h)
+    if not (gl or gr or gb or gt):
+        return
+    if opts.total_w_mm is None:
+        fig_w += gl + gr
+    else:
+        plot_w = max(5.0, plot_w - gl - gr)
+    if opts.total_h_mm is None:
+        fig_h += gb + gt
+    else:
+        plot_h = max(5.0, plot_h - gb - gt)
+    fig.set_size_inches(fig_w / 25.4, fig_h / 25.4)
+    ax.set_position([(left + gl) / fig_w, (bottom + gb) / fig_h, plot_w / fig_w,
+                     plot_h / fig_h])
+    fig.plot_area_mm = (plot_w, plot_h)
 
 
 def _self_check():
@@ -399,8 +537,29 @@ def _self_check():
     assert abs(bb.width * fig.get_figwidth() * 25.4 - 80) < 0.5
     assert abs(bb.height * fig.get_figheight() * 25.4 - 40) < 0.5
     assert len(ax.collections) == 1 and "100.0 %" in ax.texts[0].get_text()   # the region
-    o = PlotOptions(pct_max=True)
+    o = PlotOptions(y_mode="pct_max")
     assert y_title(o) == "% of max" and abs(visible_range([run], o)[1] - 100) < 1e-9
+    # % of total per min: the area under the trace, in plot units, is 100 %
+    (x, v), = curves([run], PlotOptions(y_mode="pct_total"))
+    assert abs(np.trapezoid(v, x) - 100) < 1e-6
+    lo, hi = resolve_limits([run], PlotOptions())[2:]
+    assert abs(lo + 0.03 * hi) < 1e-9, (lo, hi)      # 3 % of the top below zero
+
+    # two runs: the legend fits inside; a long label pushes it out, the figure grows for it
+    other = Run(x=t / 60, y=y * 0.5, name="b")
+    other.detect_spikes()
+    run.name = "a"
+    both = [run, other]
+    res = {r.id: measure(r) for r in both}
+    fig = build_figure(both, PlotOptions(), res)
+    w_in = fig.get_figwidth()
+    assert fig.axes[0].get_legend() is not None
+    other.label = "a legend label far too long to fit inside the plot area " * 2
+    fig = build_figure(both, PlotOptions(), res)
+    assert fig.get_figwidth() > w_in + 1 / 25.4, (fig.get_figwidth(), w_in)
+    assert abs(fig.plot_area_mm[0] - 80) < 0.5       # the plot area keeps its size
+    fixed = build_figure(both, PlotOptions(total_w_mm=100), res)
+    assert abs(fixed.get_figwidth() * 25.4 - 100) < 0.5 and fixed.plot_area_mm[0] < 80
     print("plotting self-check OK")
 
 

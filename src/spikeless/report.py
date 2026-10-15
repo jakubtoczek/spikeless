@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
-from .options import PREFS, save_prefs
+from .options import PREFS, method_info, save_prefs
 
 
 def _n(v, fmt):
@@ -64,9 +64,10 @@ HELP = {"pct": "% of all the net counts of the run (Ph. Eur.: radiochemical puri
                  "limit · n.d.: below the detection limit (Currie) · spike excluded: a spike "
                  "inside the region was excluded"}
 SECTIONS = [("plot", "Figure", "As Copy / Export make it (Figure window)"),
-            ("runs", "Runs", "File and its SHA-256, run date, isotope, molecule, method, "
-                             "conditions"),
-            ("processing", "Processing", "Spikes excluded, background, decay correction"),
+            ("runs", "Runs", "File and its SHA-256, run date, isotope, molecule, method and "
+                             "its conditions (Options › Methods), the run's conditions"),
+            ("processing", "Processing", "Spikes excluded, background, how the regions were "
+                                         "found, decay correction"),
             ("spikes", "Spikes", "Each spike: time, as recorded, as bridged, in which region"),
             ("results", "Results", "A row per region, outside the regions, total — in the "
                                    "columns ticked")]
@@ -130,6 +131,19 @@ def processing(run, res) -> list[str]:
                        f"{row.net_with_spikes:.0f} ({100 * d / row.net:+.1f} %)."
                        if row.net else f"{row.name}: spike(s) excluded.")
     out.append(f"Background: {res.background:.2f} cps — {res.background_how}.")
+    if run.regions:
+        hows = [r.how for r in run.regions]
+        found, moved = hows.count("auto") + hows.count("moved"), hows.count("moved")
+        f, parts = run.find_params, []
+        if found:
+            parts.append(f"{found} found (apexes of the {f.smooth}-point moving mean "
+                         f"{f.n_sigma:g} σ above their surroundings, at least {f.min_gap_s:g} s "
+                         f"apart, out to their feet at {f.foot_sigma:g} σ; kept above the "
+                         "detection limit)" + (f", {moved} of them moved by hand" if moved
+                                               else ""))
+        if len(hows) > found:
+            parts.append(f"{len(hows) - found} placed by hand")
+        out.append("Regions: " + "; ".join(parts) + ".")
     out.append(f"Decay: corrected to the run start ({run.isotope}, half-life "
                f"{run.half_life_s() / 3600:g} h)." if run.decayed() else
                "Decay: not corrected.")
@@ -140,10 +154,14 @@ def processing(run, res) -> list[str]:
 
 
 def run_info(run) -> list[tuple[str, str]]:
+    """The run's metadata: its original name if renamed, the file, the method and the
+    method's conditions (Options › Methods), the run's own conditions."""
     return [(k, v) for k, v in (
+        ("Original name", run.source if run.source != run.name else ""),
         ("File", run.file), ("SHA-256", run.sha256), ("Run", run.run_datetime),
         ("Points", f"{len(run.y)}, one every {run.dt_s:g} s, {run.x[-1]:.2f} min"),
         ("Isotope", run.isotope), ("Molecule", run.molecule), ("Method", run.method),
+        *method_info(run.method),
         ("Conditions", "; ".join(c for c in run.conditions.splitlines() if c.strip())))
         if v]
 

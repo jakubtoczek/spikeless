@@ -26,9 +26,24 @@ class Region:
     end: float
     name: str = ""                # typed by hand; else from the run's method; else "peak N (Rt)"
     under: str = "background"     # what is subtracted: "background" | "line" (between the ends)
-    how: str = "auto"             # "auto" (Find peaks) | "drawn" | "moved" (auto, then adjusted)
+    how: str = "auto"             # "auto" (Find regions) | "drawn" | "moved" (auto, then adjusted)
     note: str = ""
     color: str | None = None      # None: the run's colour
+    label: bool = True            # its label on the figure
+
+    def untouched(self) -> bool:
+        """Found and left as found: finding again (a new threshold) replaces it."""
+        return (self.how == "auto" and not self.name and not self.note and self.color is None
+                and self.under == "background" and self.label)
+
+
+@dataclass
+class FindParams:
+    """How Find regions looks for peaks (peaks.find_regions)."""
+    n_sigma: float = 5.0          # an apex stands this many σ above its surroundings
+    min_gap_s: float = 10.0       # apexes at least this far apart
+    smooth: int = 5               # points of the moving mean the apexes are looked for on
+    foot_sigma: float = 2.0       # a region's feet: where that mean falls back within this
 
 
 @dataclass(eq=False)     # a run is itself: `in`, `index`, `remove` by identity
@@ -36,7 +51,9 @@ class Run:
     x: np.ndarray                 # min from the run start
     y: np.ndarray                 # count rate as recorded, cps
     dt_s: float = 1.0
-    name: str = ""
+    name: str = ""                # what the app and the report call it (an alias of source)
+    source: str = ""              # the name it came with (file, clipboard); "" = name
+    label: str = ""               # what the figure's legend says; "" = name
     file: str = ""
     sha256: str = ""              # of the file as read, to trace a report to it
     run_datetime: str = ""
@@ -56,11 +73,16 @@ class Run:
     bg_drift: str = "snip"        # "snip" | "arpls", for "drift"
     bg_n: int = 40                # SNIP half-width, points
     regions: list = field(default_factory=list)
+    find_params: FindParams = field(default_factory=FindParams)
     id: int = field(default_factory=lambda: next(_ids))
 
     def __post_init__(self):
         self.x = np.asarray(self.x, dtype=float)
         self.y = np.asarray(self.y, dtype=float)
+        self.source = self.source or self.name
+
+    def legend(self) -> str:
+        return self.label or self.name
 
     # ---------------- spikes ----------------
     def detect_spikes(self):

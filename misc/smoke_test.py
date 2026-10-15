@@ -3,8 +3,12 @@
 Drives a synthetic GINA export through the four steps the way the mouse would — spikes
 excluded on load and one put back, the background three ways, regions found, drawn, moved
 and removed, a shared edge, decay, method names — then the results table, the report in every
-format, the figure, a session saved and opened again, the Options window, undo / redo; and the
-reference values on the example runs in C:\\Code\\Spikeless\\data when that folder is there.
+format, the figure, a session saved and opened again, the Options window, undo / redo; the
+plot's gestures (zoom to a span, an elastic pan and wheel, the reading line, Draw region by two
+clicks, a stretch's edge), run names, selecting none, finding again, % of total, a legend
+outside, a .json session, the method's conditions, a new run's settings, an exported trace
+pasted back; and the reference values on the example runs in C:\\Code\\Spikeless\\data when
+that folder is there.
 Run it after touching anything:  python misc/smoke_test.py
 """
 import json
@@ -16,11 +20,14 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
-from PySide6.QtCore import QEvent, Qt  # noqa: E402
+from matplotlib.backend_bases import MouseEvent  # noqa: E402
+from PySide6.QtCore import QEvent, QLocale, QPoint, Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QCheckBox, QMessageBox,  # noqa: E402
                                QTableWidget)
 
-from spikeless import figure, options, report, session  # noqa: E402
+from spikeless import figure, io_gina, options, report, session  # noqa: E402
+from spikeless.editors import GREY, WHITE  # noqa: E402
 from spikeless.adjust import decay_on, lookup_half_life_s  # noqa: E402
 
 TMP = Path(tempfile.gettempdir())
@@ -29,7 +36,8 @@ options.OPTIONS_FILE.unlink(missing_ok=True)                    # not the user's
 QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
 QMessageBox.warning = staticmethod(lambda *a, **k: None)
 
-from spikeless.app import MainWindow  # noqa: E402
+import spikeless.app as appmod  # noqa: E402
+from spikeless.app import MainWindow, _rows_of  # noqa: E402
 
 # ---- a GINA export: 7 cps background, two peaks, three single-point spikes (one on a peak) ----
 n = 900
@@ -115,7 +123,7 @@ w._drawn(11.0, 11.6, False)                                 # noise only
 k = w.sel_region
 row = w.results[run.id].rows[k]
 assert run.regions[k].how == "drawn" and "n.d." in row.flags and row.pct is None, row
-w._delete_region()
+w._delete_regions([w.sel_region])
 assert len(run.regions) == 2
 w._drawn(r1.start - 0.3, r1.start + 0.2, True)              # overlaps the big one: cut at its start
 k = w.sel_region
@@ -250,6 +258,196 @@ QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 assert lookup_half_life_s("⁹⁹ᵐTc") == 6.00718 * 3600 and not decay_on("¹⁷⁷Lu")
 assert options.PREFS["methods"] == [] and w.results[w.sel.id].rows[0].name.startswith("peak 1")
 
+assert QLocale().decimalPoint() == ".", "a decimal comma in the fields"
+
+# ---- the plot: zoom to a span, an elastic pan and wheel, the reading line ----
+w.show()
+app.processEvents()
+cv = w.canvas
+cv.anim_ms = 0                                              # no sliding: at once
+cv.draw()
+
+
+def at(t, frac=0.5):
+    y0, y1 = cv.ax.get_ylim()
+    return cv.ax.transData.transform((t, y0 + frac * (y1 - y0)))
+
+
+def ev(name, p, button=None, step=0):
+    return MouseEvent(name, cv, p[0], p[1], button=button, step=step)
+
+
+def drag(t0, t1, button=1):
+    p0, p1 = at(t0), at(t1)
+    cv._on_press(ev("button_press_event", p0, button))
+    cv._on_motion(ev("motion_notify_event", p1))
+    cv._on_release(ev("button_release_event", p1, button))
+
+
+def click(t, button=1):
+    p = at(t)
+    cv._on_press(ev("button_press_event", p, button))
+    cv._on_release(ev("button_release_event", p, button))
+
+
+drag(2.0, 4.0)                                              # left drag: zoom to the span
+assert cv.xlim and abs(cv.xlim[0] - 2) < 0.05 and abs(cv.xlim[1] - 4) < 0.05, cv.xlim
+assert cv.ylim is None                                      # the height fitted to it
+drag(2.2, 5.5, button=3)                                    # right drag past the start…
+assert abs(cv.xlim[0]) < 1e-9 and abs(cv.xlim[1] - cv.xlim[0] - 2) < 0.05, cv.xlim  # …back
+click(1.2)                                                  # a reading line, centred on it
+assert abs(cv.cursor_t - 1.2) < 0.05 and abs(sum(cv.xlim) / 2 - cv.cursor_t) < 0.05, cv.xlim
+reading = next(t.get_text() for t in cv.ax.texts if "point" in t.get_text())
+assert "min · point" in reading and "/ 900" in reading and "background" in reading, reading
+for _ in range(12):                                         # the wheel out past the run…
+    cv._on_scroll(ev("scroll_event", at(1.0), button="down", step=-1))
+cv._settle_later.stop()
+cv._settle()
+assert cv.xlim is None and cv.ylim is None                  # …springs back to all of it
+it = w.spike_list.item(0)                                   # a click on a spike: zoomed on it
+w._spike_focus(it)
+t0 = w.sel.x[it.data(Qt.UserRole)]
+assert cv.xlim[0] < t0 < cv.xlim[1] and cv.cursor_t == t0, (cv.xlim, t0)
+cv.reset_view()
+
+# ---- Draw region: pushed in, two clicks; a right click cancels ----
+n = len(w.sel.regions)
+w.reg_draw.setChecked(True)
+assert cv.mode == "region"
+click(11.0)
+assert cv.anchor is not None and w.reg_draw.isChecked()
+click(11.6)
+assert cv.mode is None and not w.reg_draw.isChecked() and len(w.sel.regions) == n + 1
+w._undo_step()
+w.reg_draw.setChecked(True)
+click(5.0, button=3)
+assert cv.mode is None and not w.reg_draw.isChecked() and len(w.sel.regions) == n
+
+# ---- the background stretch: shaded, its edge dragged, its ends typed ----
+w.bg_radio["stretch"].setChecked(True)
+run = w.sel
+assert run.bg_mode == "stretch" and sorted(run.bg_stretch) == [0.5, 1.5], run.bg_stretch
+drag(1.5, 2.0)                                              # its end's edge
+assert abs(w.sel.bg_stretch[1] - 2.0) < 0.02 and abs(w.bg_to.value() - 2.0) < 0.02
+w.bg_from.setValue(0.2)
+assert abs(w.sel.bg_stretch[0] - 0.2) < 1e-9
+w.bg_radio["auto"].setChecked(True)
+
+# ---- run names: an alias typed in the list, a legend of its own, Run names ▤ ----
+run = w.sel
+w.run_list.item(0).setText("Alias")
+assert (run.name, run.source, run.legend()) == ("Alias", "Smoke Run", "Alias")
+w.relabel(run, "On the figure")
+assert run.legend() == "On the figure" and run.name == "Alias"
+w.names_window()
+nw = w.names_win
+nw.refresh()
+assert nw.t.isColumnHidden(0) and nw.t.item(0, 0).text() == "Smoke Run"
+assert nw.t.item(0, 1).foreground().color() == WHITE and nw.t.item(0, 0).foreground().color() == GREY
+nw.t.item(0, 2).setText("")                                 # cleared: follows the name again
+app.processEvents()
+assert run.legend() == "Alias" and nw.t.item(0, 2).foreground().color() == GREY
+nw.t.item(0, 1).setText("")                                 # cleared: the original again
+app.processEvents()
+assert run.name == "Smoke Run"
+
+# ---- two runs: a legend; outside, the figure grows for it ----
+w._load(str(src))
+o = w.plot_opts
+o.legend_loc = "in upper right"
+w_in = figure.figure(w).get_figwidth()
+o.legend_loc = "out right top"
+f_out = figure.figure(w)
+assert f_out.get_figwidth() > w_in and abs(f_out.plot_area_mm[0] - o.plot_w_mm) < 0.5
+assert [t.get_text() for t in f_out.axes[0].get_legend().get_texts()] == ["Smoke Run"] * 2
+o.legend_loc = "auto"
+
+# ---- selecting none: the steps wait; a click below the runs does it ----
+w._select(None)
+assert w.sel is None and w.step["spikes"]._btn.text().endswith("select a run")
+assert "Select a run" in w.summary.text() and not w.step["peaks"]._content.isEnabled()
+w._run_picked(0)
+assert w.sel is w.runs[0]
+vp = w.run_list.viewport()
+QTest.mouseClick(vp, Qt.LeftButton, pos=QPoint(10, vp.height() - 3))
+assert w.sel is None, "a click below the runs did not select none"
+w._run_picked(0)
+
+# ---- % of total: each run's net counts, per min ----
+w.y_mode.setCurrentIndex(2)
+w.y_mode.activated.emit(2)
+assert w.plot_opts.y_mode == "pct_total"
+assert figure.figure(w).axes[0].get_ylabel() == "% of total per min"
+w.y_mode.setCurrentIndex(0)
+w.y_mode.activated.emit(0)
+
+# ---- finding again: the threshold moves, a region with a name of its own stays ----
+w._find()
+run = w.sel
+n = len(run.regions)
+w.set_region(0, "name", "kept")
+w.find_sens.setValue(12)                                    # 6 σ
+assert run.find_params.n_sigma == 6 and run.regions[0].name == "kept" and len(run.regions) == n
+assert "6 σ above" in " ".join(report.processing(run, w.results[run.id]))
+
+# ---- the regions in full (⤢): a note, a label off the figure; ⧉; Del on several ----
+w.regions_window()
+rg = w.regions_win
+rg.refresh()
+assert rg.t.rowCount() == len(run.regions)
+last = rg.t.columnCount() - 1
+rg.t.item(0, last).setText("checked by hand")
+assert w.sel.regions[0].note == "checked by hand"
+app.processEvents()
+rg.t.item(0, last - 1).setCheckState(Qt.Unchecked)
+assert w.sel.regions[0].label is False
+w._copy_results()
+assert QApplication.clipboard().text().startswith("Region")
+w.table.selectAll()
+w._delete_regions(_rows_of(w.table))
+assert w.sel.regions == []
+w._undo_step()
+assert len(w.sel.regions) == n
+
+# ---- the method's conditions in the report ----
+options.PREFS["method_info"] = [["M", "Column", "C18, 150 × 4.6 mm"], ["M", "Gradient", ""]]
+w.sel.method = "M"
+rep = report.html(w)
+assert "C18, 150 × 4.6 mm" in rep and "Gradient" not in rep
+
+# ---- a new run starts with the options' settings ----
+options.PREFS["spikes"]["n_sigma"] = 15.0
+options.PREFS["find"]["n_sigma"] = 8.0
+w._load(str(src))
+assert w.sel.spike_params.n_sigma == 15 and w.sel.find_params.n_sigma == 8
+options.load_prefs(got={})
+w._options("Chromatogram")
+assert w.options_win.topics.currentItem().text() == "Chromatogram"
+
+# ---- an exported trace, pasted back: the same numbers; as recorded too ----
+src_run = w.runs[0]
+out = TMP / "spikeless_smoke_export.txt"
+appmod.QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (str(out), ""))
+w._export_trace(src_run)
+text = out.read_text("cp1252")
+assert "," not in text.split("\n", 2)[2], "a decimal comma in the export"
+QApplication.clipboard().setText(text)
+n = len(w.runs)
+w._paste()
+assert len(w.runs) == n + 1 and np.allclose(w.runs[-1].y, src_run.trace(), atol=1e-3)
+w._export_trace(src_run, recorded=True)
+assert np.allclose(io_gina.load(out)[0].y, src_run.y, atol=1e-3)
+
+# ---- a session as .json: saved, opened ----
+js = TMP / "spikeless_smoke.json"
+appmod.QFileDialog.getSaveFileName = staticmethod(
+    lambda *a, **k: (str(TMP / "spikeless_smoke"), "JSON — the same session (*.json)"))
+w._save_session()
+assert json.loads(js.read_text("utf-8"))["app"] == "Spikeless"
+n = len(w.runs)
+w._load_paths([str(js)])
+assert len(w.runs) == n and js.name in w.windowTitle()
+
 # ---- the example runs: reference values (devlog) ----
 data = Path(__file__).resolve().parents[2] / "data"
 if data.is_dir():
@@ -269,7 +467,7 @@ if data.is_dir():
     assert r.spike_list() == [1314, 4696, 5660] and res.rows == [] and not res.active
 
 w.close()
-for p in [src, ses, options.OPTIONS_FILE, TMP / "spikeless_smoke_report_plot.png"] + \
+for p in [src, ses, out, js, options.OPTIONS_FILE, TMP / "spikeless_smoke_report_plot.png"] + \
         [TMP / f"spikeless_smoke_report{e}" for e in (".pdf", ".odt", ".xlsx", ".md", ".html")]:
     p.unlink(missing_ok=True)
 print("spikeless smoke OK")

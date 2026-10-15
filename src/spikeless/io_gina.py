@@ -4,7 +4,8 @@ Format (reverse-engineered from real exports):
 - Windows-1252 (cp1252) encoded.
 - Line 1: "<run name>, DD/MM/YYYY HH:MM".
 - Line 2: tab-separated, double-quoted column headers (column set varies per file).
-- Data rows: tab-separated, every field wrapped in double quotes, decimal COMMA.
+- Data rows: tab-separated, every field wrapped in double quotes, decimal COMMA (or a dot:
+  what Spikeless's own export writes, and what a copy of either pastes as).
 - Signal = 2nd column (radiodetector count rate, cps). Col 3 ("Canal A, cps") is usually all-zero.
 - Time column is display-formatted and lossy (SS"cc -> MM'SS" -> HH:MM once past 60 min),
   so we do NOT trust it for values: sampling is assumed uniform and time is rebuilt as i*dt.
@@ -84,13 +85,26 @@ def _infer_dt(time_raw: list[str]) -> float:
     return dt if dt > 0 else 1.0
 
 
+def looks_like(text: str) -> bool:
+    """A GINA export's text: a title line, then quoted headers, the first one a time."""
+    lines = text.lstrip("\ufeff").splitlines()
+    return len(lines) >= 3 and _unquote(lines[1].split("\t")[0]).lower().startswith("time")
+
+
 def load(path: str | Path, signal_col: int = 1) -> tuple[Run, list[str]]:
     """Load a GINA export. Returns (Run, warnings). Warnings are non-fatal."""
     path = Path(path)
-    warnings: list[str] = []
     data = path.read_bytes()
-    text = data.decode("cp1252", errors="replace")
-    lines = text.splitlines()
+    return parse(data.decode("cp1252", errors="replace"), path.stem, path.name,
+                 hashlib.sha256(data).hexdigest(), signal_col)
+
+
+def parse(text: str, stem: str = "", file: str = "", sha256: str = "",
+          signal_col: int = 1) -> tuple[Run, list[str]]:
+    """A GINA export's text (a file's, or pasted) as a run. stem: its name if the title line
+    has none."""
+    warnings: list[str] = []
+    lines = text.lstrip("\ufeff").splitlines()
 
     if len(lines) < 3:
         raise ValueError("File has fewer than 3 lines — not a GINA export.")
@@ -138,10 +152,9 @@ def load(path: str | Path, signal_col: int = 1) -> tuple[Run, list[str]]:
         warnings.append(f"Signal column '{headers[signal_col]}' is all zeros — wrong channel?")
 
     # every GINA export's title starts with its type, "Interval Values": not part of the name
-    name = re.sub(r"^Interval Values\s+", "", run_name.strip()) or path.stem
-    run = new_run(x, y, dt, name=name, file=path.name,
-                  sha256=hashlib.sha256(data).hexdigest(), run_datetime=run_datetime.strip(),
-                  headers=headers, signal_col=signal_col)
+    name = re.sub(r"^Interval Values\s+", "", run_name.strip()) or stem
+    run = new_run(x, y, dt, name=name, file=file, sha256=sha256,
+                  run_datetime=run_datetime.strip(), headers=headers, signal_col=signal_col)
     return run, warnings
 
 
@@ -161,13 +174,13 @@ def _render_time(sec: float) -> str:
     return f"{h:02d}:{m:02d}"
 
 
-def save(run: Run, path: str | Path) -> Path:
+def save(run: Run, path: str | Path, recorded: bool = False) -> Path:
     """Write a run's trace — spikes excluded and bridged, decay-corrected if its isotope is
-    ticked for it — back to a GINA-style .txt.
+    ticked for it; or, recorded, the count rate as read — to a GINA-style .txt.
 
-    cp1252, tab-separated, double-quoted fields, decimal comma, reconstructed time column —
-    the same format our loader reads, so it round-trips (GINA X compatibility is best-effort,
-    since we cannot re-emit channels we never read). Two columns: time + signal.
+    cp1252, tab-separated, double-quoted fields, decimal dot, reconstructed time column —
+    the layout our loader reads, so it round-trips, opened or pasted (GINA X compatibility is
+    best-effort, since we cannot re-emit channels we never read). Two columns: time + signal.
     """
     path = Path(path)
     header1 = f"{run.name}, {run.run_datetime}" if run.run_datetime else run.name
@@ -176,9 +189,8 @@ def save(run: Run, path: str | Path) -> Path:
     else:
         h_time, h_sig = "Time, s", "Taux comptage du canal A, cps"
     lines = [header1, f'"{h_time}"\t"{h_sig}"']
-    for i, v in enumerate(run.trace()):
-        vs = ("%.3f" % float(v)).replace(".", ",")
-        lines.append(f'"{_render_time(i * run.dt_s)}"\t"{vs}"')
+    for i, v in enumerate(run.y if recorded else run.trace()):
+        lines.append(f'"{_render_time(i * run.dt_s)}"\t"{float(v):.3f}"')
     path.write_bytes(("\n".join(lines) + "\n").encode("cp1252", errors="replace"))
     return path
 
@@ -214,6 +226,11 @@ def _self_check():
     assert len(ds2.y) == len(ds.y), (len(ds2.y), len(ds.y))
     assert abs(ds2.y[1] - ds.y[1]) < 1e-3, (ds2.y[1], ds.y[1])
     assert abs(ds2.dt_s - ds.dt_s) < 1e-9, ds2.dt_s
+    assert ',' not in out.read_text("cp1252").split("\n", 2)[2], "a decimal comma was written"
+    assert looks_like(out.read_text("cp1252")) and not looks_like("0\t1\n1\t2\n2\t3\n")
+    ds.spikes[1] = True                       # the recorded trace keeps what the other bridges
+    save(ds, out, recorded=True)
+    assert abs(load(out)[0].y[1] - 2.5) < 1e-9
     out.unlink(missing_ok=True)
 
     p.unlink(missing_ok=True)

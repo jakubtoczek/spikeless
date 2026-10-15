@@ -1,5 +1,6 @@
 """A session file: the runs open — each with its spikes, background and regions — and the
-figure's settings, in one JSON file (.spikeless), to reopen an analysis where it was left.
+figure's settings, in one JSON file (.spikeless, or .json: the same text), to reopen an
+analysis where it was left.
 
 Arrays are written as lists. Reading is forgiving the way the options are: a key it does not
 know is dropped and a missing one keeps its default, so a file from an older or newer version
@@ -100,6 +101,8 @@ def loads(text: str) -> tuple[list[Run], PlotOptions]:
         plot = _make(PlotOptions, got.get("plot") or {})
         if plot.y.title == "Counts (cps)":          # the old default, which said counts
             plot.y.title = Y_TITLE
+        if (got.get("plot") or {}).get("pct_max"):  # before 2026.10.15: a tick, not y_mode
+            plot.y_mode = "pct_max"
         return runs, plot
     except (ValueError, KeyError, TypeError, AttributeError, IndexError) as e:
         raise ValueError(f"Not a Spikeless session file ({e}).") from e
@@ -120,7 +123,11 @@ def _self_check():
     plot = PlotOptions(plot_w_mm=120, stack=True)
     plot.y.vmax = 500.0
 
+    run.name, run.label = "alias", "on the figure"
+    run.find_params.n_sigma = 7.5
     (r2,), plot2 = loads(dumps([run], plot))
+    assert (r2.name, r2.label) == ("alias", "on the figure")
+    assert r2.find_params.n_sigma == 7.5
     assert np.array_equal(r2.y, y) and r2.spikes.dtype == bool and r2.spikes[100]
     assert r2.kept == [100] and r2.id != run.id
     assert r2.regions == run.regions and r2.bg_stretch == [0.5, 2.0]
@@ -146,6 +153,9 @@ def _self_check():
     assert r4.name == "Old" and r4.isotope == "¹⁸F" and r4.conditions == "pH: 7\nnote"
     assert r4.spike_list() == [100] and r4.regions[0].name == "main"
     assert abs(r4.regions[0].start - 280 / 60) < 1e-9 and p4.y.title == Y_TITLE
+    assert r4.source == "Old"                       # an older run: its name is its original
+    old["plot"]["pct_max"] = True
+    assert loads(json.dumps(old))[1].y_mode == "pct_max"
     for bad in ("", "[]", '{"app": "Other"}', '{"app": "Spikeless"}'):
         try:
             loads(bad)

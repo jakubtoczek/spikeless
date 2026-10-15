@@ -1,6 +1,7 @@
 """Spikeless - the figure: what Copy and Export make, set and previewed in a window of its own.
 
-Settings on the left — a preset, what it shows, its size in mm, margins, legend, the axes —
+Settings on the left — a preset, what it shows, its regions, its size in mm, margins, the
+legend (inside or outside the plot: outside, the figure grows for it), the axes —
 the figure on the right exactly as it will be written (zoom with the wheel, double-click to
 fit; the checkerboard is transparency). The settings are the session's (saved with it).
 """
@@ -17,15 +18,16 @@ from PySide6.QtWidgets import (
 )
 
 from .options import PREFS, ColorButton, guard_fields
-from .plotting import LABELS, PlotOptions, auto_extents, build_figure
+from .plotting import LABELS, LEGEND, PlotOptions, auto_extents, build_figure, legend_text
 from .plotview import Background, ZoomableFigureView
 
-_LEGEND_LOCS = ["upper right", "upper left", "lower right", "lower left", "center right", "best"]
 _LINESTYLES = ["solid", "dotted", "dashed", "dashdot"]
 
 
-def _preset(o: PlotOptions, w, h, font, lw):
-    o.plot_w_mm, o.plot_h_mm, o.total_w_mm, o.total_h_mm = w, h, None, None
+def _preset(o: PlotOptions, total_w, w, h, font, lw):
+    """total_w: the whole figure's width (a journal's column), the plot area what is left;
+    None: the plot area w × h."""
+    o.plot_w_mm, o.plot_h_mm, o.total_w_mm, o.total_h_mm = w, h, total_w, None
     o.line_width_pt = lw
     o.legend_font_size = o.label_size = font
     for ax in (o.x, o.y):
@@ -33,9 +35,22 @@ def _preset(o: PlotOptions, w, h, font, lw):
         ax.lw_pt = ax.tick_lw_pt = lw * 0.67
 
 
-PRESETS = {"Article — 80 × 40 mm, 7 pt": (80, 40, 7.0, 0.75),
-           "Half page — 120 × 60 mm, 8 pt": (120, 60, 8.0, 0.9),
-           "Slide — 160 × 90 mm, 14 pt": (160, 90, 14.0, 1.5)}
+# a journal's single column is 82–90 mm wide, its double column 170–180 mm: a panel of a
+# two-panel-wide figure is a single column's width
+# ponytail: one panel per figure; a multi-panel figure is for later
+PRESETS = {"Article panel — 1 column, or ½ of a 2-column figure: 85 mm wide, 7 pt":
+           (85, 70, 40, 7.0, 0.75),
+           "Article — the full 2-column width: 175 mm wide, 7 pt": (175, 160, 60, 7.0, 0.75),
+           "Slide — plot 160 × 90 mm, 14 pt": (None, 160, 90, 14.0, 1.5)}
+
+
+def _link(text, icon, color, fn, tip):
+    """'text icon', both clickable, the icon in colour (text may be empty)."""
+    lab = QLabel((f"<a href='#' style='color:#e0e0e0'>{text}</a> " if text else "")
+                 + f"<a href='#' style='color:{color}; text-decoration:none'>{icon}</a>")
+    lab.setToolTip(tip)
+    lab.linkActivated.connect(lambda _: fn())
+    return lab
 
 
 # ---------------- making it
@@ -179,25 +194,36 @@ class FigureWindow(QMainWindow):
 
         sh = QWidget()
         fs = _cform(sh)
-        for key, label in (("show_regions", "Regions (shaded)"), ("show_background",
-                           "Background line"), ("show_spikes", "Excluded spikes"),
-                           ("show_raw", "Trace as recorded (grey)"), ("legend",
-                           "Legend (2 runs or more)")):
+        for key, label in (("show_background", "Background line"),
+                           ("show_spikes", "Excluded spikes"),
+                           ("show_raw", "Trace as recorded (Options › Chromatogram)"),
+                           ("legend", "Legend (2 runs or more)")):
             c = QCheckBox(label)
             c.setChecked(getattr(o, key))
             c.toggled.connect(lambda on, k=key: self._set(k, on))
             fs.addRow(c)
+        self.d["lw"] = _spin(0.1, 5, o.line_width_pt, 0.1)
+        fs.addRow("Line width (pt)", self.d["lw"])
+
+        rg = QWidget()
+        fr = _cform(rg)
+        for key, label in (("show_regions", "Regions (shaded)"),
+                           ("label_rt", "Their Rt in the labels")):
+            c = QCheckBox(label)
+            c.setChecked(getattr(o, key))
+            c.toggled.connect(lambda on, k=key: self._set(k, on))
+            fr.addRow(c)
         lab = QComboBox()
         lab.addItems(list(LABELS.values()))
         lab.setCurrentIndex(list(LABELS).index(o.region_labels))
         lab.activated.connect(lambda i: self._set("region_labels", list(LABELS)[i]))
-        fs.addRow("Region labels", lab)
+        fr.addRow("Labels", lab)
         self.d["label_size"] = _spin(4, 24, o.label_size, 0.5)
-        fs.addRow("Label size (pt)", self.d["label_size"])
-        self.d["lw"] = _spin(0.1, 5, o.line_width_pt, 0.1)
-        fs.addRow("Line width (pt)", self.d["lw"])
+        fr.addRow("Label size (pt)", self.d["label_size"])
         self.d["alpha"] = _spin(0, 1, o.region_alpha, 0.05)
-        fs.addRow("Region opacity", self.d["alpha"])
+        fr.addRow("Opacity", self.d["alpha"])
+        fr.addRow("Each region", _link("edit", "⤢", "#7fb2e5", self.main.regions_window,
+                                       "Its colour, its label on or off, its note"))
 
         pa = QWidget()
         f1 = _cform(pa)
@@ -241,21 +267,31 @@ class FigureWindow(QMainWindow):
         lg = QWidget()
         f3 = _cform(lg)
         self.d["leg_loc"] = QComboBox()
-        self.d["leg_loc"].addItems(_LEGEND_LOCS)
-        self.d["leg_loc"].setCurrentText(o.legend_loc)
+        for key in LEGEND:
+            self.d["leg_loc"].addItem(legend_text(key), key)
+        self.d["leg_loc"].setCurrentIndex(max(0, self.d["leg_loc"].findData(o.legend_loc)))
+        self.d["leg_loc"].setToolTip("Outside the plot, the figure grows to hold it (or, its "
+                                     "total size fixed, the plot area shrinks)")
+        self.d["leg_dx"] = _spin(-200, 200, o.legend_dx_mm, 0.5)
+        self.d["leg_dy"] = _spin(-200, 200, o.legend_dy_mm, 0.5)
         self.d["leg_font"] = QLineEdit(o.legend_font_family)
         self.d["leg_size"] = _spin(4, 24, o.legend_font_size, 0.5)
         f3.addRow("Position", self.d["leg_loc"])
+        f3.addRow("Then right (mm)", self.d["leg_dx"])
+        f3.addRow("Then up (mm)", self.d["leg_dy"])
         f3.addRow("Font", self.d["leg_font"])
         f3.addRow("Size", self.d["leg_size"])
+        f3.addRow("Labels", _link("edit", "▤", "#4caf50", self.main.names_window,
+                                  "What the legend calls each run (Run names)"))
         self.d["leg_loc"].currentIndexChanged.connect(self._apply)
         self.d["leg_font"].editingFinished.connect(self._apply)
 
         for k in ("w_mm", "h_mm", "bg_a", "out_a", "tot_w", "tot_h", "leg_size", "label_size",
-                  "lw", "alpha"):
+                  "lw", "alpha", "leg_dx", "leg_dy"):
             self.d[k].valueChanged.connect(self._apply)
 
         outer.addWidget(_Collapsible("Shows", sh, expanded=True))
+        outer.addWidget(_Collapsible("Regions", rg, expanded=True))
         outer.addWidget(_Collapsible("Plot area", pa, expanded=True))
         outer.addWidget(_Collapsible("Margins", mg, expanded=False))
         outer.addWidget(_Collapsible("Legend", lg, expanded=False))
@@ -331,25 +367,36 @@ class FigureWindow(QMainWindow):
         self.d[f"{pfx}_lblpad"] = lp
         f.addRow("Title ↔ labels (mm)", tp)
         f.addRow("Labels ↔ axis (mm)", lp)
-        grid = QCheckBox()
-        grid.setChecked(ax.grid_on)
-        gstyle = QComboBox()
-        gstyle.addItems(_LINESTYLES)
-        gstyle.setCurrentText(ax.grid_style)
-        gcolor = ColorButton(ax.grid_color, self._apply)
-        gwidth = _spin(0.1, 3, ax.grid_width, 0.1)
-        self.d[f"{pfx}_grid"] = grid
-        self.d[f"{pfx}_gridstyle"] = gstyle
-        self.d[f"{pfx}_gridcolor"] = gcolor
-        self.d[f"{pfx}_gridwidth"] = gwidth
-        f.addRow("Grid", grid)
-        f.addRow("Grid style", gstyle)
-        f.addRow("Grid colour", gcolor)
-        f.addRow("Grid width (pt)", gwidth)
-        for wdg in (tp, lp, gwidth):
+        mn = _spin(0, 20, ax.minor_n or 0, 1)
+        mn.setSpecialValueText("Auto")
+        mn.setToolTip("Minor intervals per major one (Auto: 5, or 4 for a major of 2, 20…)")
+        self.d[f"{pfx}_minorn"] = mn
+        f.addRow("Minor per major", mn)
+        mn.valueChanged.connect(self._apply)
+        for tag, title, on, style, color, width in (
+                ("grid", "Major grid", ax.grid_on, ax.grid_style, ax.grid_color, ax.grid_width),
+                ("mgrid", "Minor grid", ax.minor_grid_on, ax.minor_grid_style,
+                 ax.minor_grid_color, ax.minor_grid_width)):
+            grid = QCheckBox()
+            grid.setChecked(on)
+            gstyle = QComboBox()
+            gstyle.addItems(_LINESTYLES)
+            gstyle.setCurrentText(style)
+            gcolor = ColorButton(color, self._apply)
+            gwidth = _spin(0.1, 3, width, 0.1)
+            self.d[f"{pfx}_{tag}"] = grid
+            self.d[f"{pfx}_{tag}style"] = gstyle
+            self.d[f"{pfx}_{tag}color"] = gcolor
+            self.d[f"{pfx}_{tag}width"] = gwidth
+            f.addRow(title, grid)
+            f.addRow("   style", gstyle)
+            f.addRow("   colour", gcolor)
+            f.addRow("   width (pt)", gwidth)
+            gwidth.valueChanged.connect(self._apply)
+            grid.toggled.connect(self._apply)
+            gstyle.currentIndexChanged.connect(self._apply)
+        for wdg in (tp, lp):
             wdg.valueChanged.connect(self._apply)
-        grid.toggled.connect(self._apply)
-        gstyle.currentIndexChanged.connect(self._apply)
         return g
 
     def _auto_field(self, form, label, pfx, name, value, lo, hi, step):
@@ -373,7 +420,8 @@ class FigureWindow(QMainWindow):
         o.total_h_mm = None if d["tot_h_auto"].isChecked() else d["tot_h"].value()
         o.bg_color, o.bg_alpha = d["bg"].color, d["bg_a"].value()
         o.outside_color, o.outside_alpha = d["out"].color, d["out_a"].value()
-        o.legend_loc = d["leg_loc"].currentText()
+        o.legend_loc = d["leg_loc"].currentData()
+        o.legend_dx_mm, o.legend_dy_mm = d["leg_dx"].value(), d["leg_dy"].value()
         o.legend_font_family = d["leg_font"].text() or "sans-serif"
         o.legend_font_size = d["leg_size"].value()
         o.label_size, o.line_width_pt = d["label_size"].value(), d["lw"].value()
@@ -395,10 +443,15 @@ class FigureWindow(QMainWindow):
             ax.title_font_size = d[f"{pfx}_tf"].value()
             ax.title_pad_mm = d[f"{pfx}_titlepad"].value()
             ax.tick_label_pad_mm = d[f"{pfx}_lblpad"].value()
+            ax.minor_n = int(d[f"{pfx}_minorn"].value()) or None
             ax.grid_on = d[f"{pfx}_grid"].isChecked()
             ax.grid_style = d[f"{pfx}_gridstyle"].currentText()
             ax.grid_color = d[f"{pfx}_gridcolor"].color
             ax.grid_width = d[f"{pfx}_gridwidth"].value()
+            ax.minor_grid_on = d[f"{pfx}_mgrid"].isChecked()
+            ax.minor_grid_style = d[f"{pfx}_mgridstyle"].currentText()
+            ax.minor_grid_color = d[f"{pfx}_mgridcolor"].color
+            ax.minor_grid_width = d[f"{pfx}_mgridwidth"].value()
         self.main.refresh()
 
     def _fill_auto_fields(self):
@@ -428,7 +481,9 @@ class FigureWindow(QMainWindow):
 
 # ---------------- small widgets (also used by app.py)
 class _Collapsible(QWidget):
-    def __init__(self, title, content, expanded=True):
+    """A bold title that folds its content away; `extra`: a widget beside the title."""
+
+    def __init__(self, title, content, expanded=True, extra=None):
         super().__init__()
         from PySide6.QtWidgets import QToolButton
         self._btn = QToolButton()
@@ -444,7 +499,14 @@ class _Collapsible(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-        lay.addWidget(self._btn)
+        if extra is None:
+            lay.addWidget(self._btn)
+        else:
+            head = QHBoxLayout()
+            head.addWidget(self._btn)
+            head.addWidget(extra)
+            head.addStretch(1)
+            lay.addLayout(head)
         lay.addWidget(self._content)
 
     def set_title(self, text):

@@ -5,7 +5,8 @@ Two layouts, told apart automatically:
 - paired: time1, value1, time2, value2, … — recognised when the count of columns is even
   and every second one rises like a time axis, which a count-rate column never does.
 Either way each value column becomes its own run, so one paste can load several runs
-of unequal length (blank cells are simply dropped from that pair).
+of unequal length (blank cells are simply dropped from that pair). A GINA export copied whole
+(its title line, its quoted headers — Spikeless's own export too) is read as the file is.
 
 Separator may be tab, semicolon or any whitespace; decimal comma is accepted; non-numeric
 lines are skipped, and the last one above the data is taken as column titles if it has any.
@@ -21,6 +22,7 @@ from collections import Counter
 
 import numpy as np
 
+from . import io_gina
 from .run import COLORS, Run, new_run
 
 # integer / decimal / scientific, with '.' or ',' as the decimal mark
@@ -96,6 +98,9 @@ def _is_paired(grid, ncols: int) -> bool:
 def load_text(text: str, name: str = "Clipboard") -> tuple[list[Run], list[str]]:
     """Build one Run per value column of pasted text.
     Returns (datasets, warnings). Raises ValueError on unusable input."""
+    if io_gina.looks_like(text):
+        run, warnings = io_gina.parse(text, name, "(clipboard)")
+        return [run], warnings
     grid, titles = _table(text)
     if len(grid) < 3:
         raise ValueError("No numeric columns on the clipboard — copy time in the first column "
@@ -234,6 +239,12 @@ def _self_check():
     # junk lines between rows are skipped
     dss7, _ = load_text("X Y\n0 5\nrubbish\n1 6\n2 7\n\n")
     assert len(dss7[0].y) == 3, len(dss7[0].y)
+
+    # a GINA export copied whole (here as Spikeless exports one: quoted, decimal dot)
+    gina = ('Demo, 07/07/2026 14:17\n"Time, s"\t"Taux comptage du canal A, cps"\n'
+            + "".join(f'"{i:02d}\"00"\t"{7 + i % 3}.000"\n' for i in range(30)))
+    (g,), _ = load_text(gina, "Clipboard 3")
+    assert g.name == "Demo" and len(g.y) == 30 and g.y[1] == 8 and g.file == "(clipboard)"
 
     for bad in ("", "hello\nworld\n", "only-one-column\n1\n2\n3\n", "0 1\n0 2\n1 3\n"):
         try:
