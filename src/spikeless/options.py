@@ -42,13 +42,19 @@ GREY = "color:#8d8d8d;"
 PREFS: dict = {
     "chrom": {"left_drag": "zoom", "right_drag": "pan",       # "zoom" | "pan"
               "left_click": "centre",                          # "centre" | "line"
-              "wheel_y": False},                               # the wheel zooms the height too
+              "wheel_y": False,                                # the wheel zooms the height too
+              "light": True},                                  # white around the plot, dark text
     "raw_trace": {"color": "#b0b0b0", "width": 0.8, "style": "solid"},   # × the trace's width
+    "spike_line": {"color": "#e02020", "width": 1.0},                    # (the figure too)
+    "bg_line": {"color": "#808080", "width": 0.8, "style": "dashed"},
     "y_below_pct": 3.0,                       # the y axis starts this % of its top below zero
-    "spikes": {"n_sigma": 5.0, "window": 7, "max_width": 1},   # a new run's
+    "spikes": {"n_sigma": 5.0, "window": 7, "max_width": 1,   # a new run's
+               "auto": True},                     # found on load and as the threshold moves
     "bg": {"mode": "auto", "stretch_from": 0.5, "stretch_to": 1.5,   # a new run's
-           "offer_drift": False, "drift": "snip", "n": 40},
-    "find": {"n_sigma": 5.0, "min_gap_s": 10.0, "smooth": 5, "foot_sigma": 2.0},  # a new run's
+           "drift": "snip", "n": 40,
+           "offer": {"none": True, "auto": True, "stretch": True, "drift": False}},  # in the step
+    "find": {"n_sigma": 5.0, "min_gap_s": 10.0, "smooth": 5, "foot_sigma": 2.0,  # a new run's
+             "auto": False},
     "background": asdict(Background()),   # behind the figure preview (transparency)
     "png_dpi": 600,
     "clip_dpi": 600,
@@ -71,10 +77,12 @@ PREFS: dict = {
 }
 _DEFAULTS = copy.deepcopy(PREFS)
 _CHOICES = {("chrom", "left_drag"): ("zoom", "pan"), ("chrom", "right_drag"): ("zoom", "pan"),
-            ("chrom", "left_click"): ("centre", "line"), ("bg", "mode"): ("auto", "stretch",
-                                                                         "drift"),
-            ("bg", "drift"): ("snip", "arpls"),
-            ("raw_trace", "style"): ("solid", "dotted", "dashed", "dashdot")}
+            ("chrom", "left_click"): ("centre", "line"),
+            ("bg", "mode"): ("none", "auto", "stretch", "drift"), ("bg", "drift"): ("snip", "arpls"),
+            ("raw_trace", "style"): ("solid", "dotted", "dashed", "dashdot"),
+            ("bg_line", "style"): ("solid", "dotted", "dashed", "dashdot")}
+BG_MODES = {"none": "None", "auto": "Mean outside the regions", "stretch": "Mean of a stretch",
+            "drift": "Follows a drift"}
 USUAL_FIELDS = ["Column", "Mobile phase A", "Mobile phase B", "Gradient", "Flow rate (mL/min)",
                 "Column temperature (°C)", "Injection volume (µL)", "UV detection (nm)",
                 "Radio-detector"]
@@ -123,9 +131,16 @@ def load_prefs(path: Path | None = None, got=None) -> None:
 
 def sync_style() -> None:
     """The options the drawing reads (plotting.STYLE), from PREFS."""
-    r = PREFS["raw_trace"]
+    r, s, b = PREFS["raw_trace"], PREFS["spike_line"], PREFS["bg_line"]
     plotting.STYLE.update(y_below_pct=PREFS["y_below_pct"], raw_color=r["color"],
-                          raw_width=r["width"], raw_style=r["style"])
+                          raw_width=r["width"], raw_style=r["style"], spike_color=s["color"],
+                          spike_width=s["width"], bg_color=b["color"], bg_width=b["width"],
+                          bg_style=b["style"])
+
+
+def params(key) -> dict:
+    """A new run's settings (Options › Spikes / Regions), its "auto" left out."""
+    return {k: v for k, v in PREFS[key].items() if k != "auto"}
 
 
 def save_prefs(path: Path | None = None) -> bool:
@@ -324,6 +339,11 @@ class OptionsWindow(QMainWindow):
         b._on_change = lambda: self._set(key, b.color, sub)
         return b
 
+    def _offer(self, mode, on):
+        PREFS["bg"]["offer"][mode] = on
+        save_prefs()
+        self.main.apply_prefs()
+
     def _choice(self, key, sub, items):
         """A list of (value, text) for PREFS[key][sub]."""
         c = QComboBox()
@@ -424,16 +444,22 @@ class OptionsWindow(QMainWindow):
         f.addRow(self._tick("chrom", "wheel_y", "The wheel zooms the height too (else the time "
                             "only; Ctrl+wheel the height)", "Unlocked, the height springs back "
                             "to fit the traces when zoomed out past them"))
+        f.addRow(self._tick("chrom", "light", "White around the plot, its axes in dark grey "
+                            "(else the app's dark grey)", "As the figure is: what ⧉ Copy "
+                            "takes reads well on a page"))
         v.addLayout(f)
-        v.addSpacing(8)
-        v.addWidget(QLabel("<b>Trace as recorded</b> (before the spikes were excluded; the "
-                           "figure too)"))
-        f = QFormLayout()
-        f.addRow("Colour", self._color("raw_trace", "color"))
-        f.addRow("Width (× the trace's)", self._number("raw_trace", 0.1, 5, 0.1, "width"))
-        f.addRow("Line", self._choice("raw_trace", "style", [(s, s) for s in _CHOICES[(
-            "raw_trace", "style")]]))
-        v.addLayout(f)
+        styles = [(s, s) for s in _CHOICES[("raw_trace", "style")]]
+        for key, title, line in (("raw_trace", "Trace as recorded", True),
+                                 ("spike_line", "Excluded spikes", False),
+                                 ("bg_line", "Background line", True)):
+            v.addSpacing(8)
+            v.addWidget(QLabel(f"<b>{title}</b> (the figure too)"))
+            f = QFormLayout()
+            f.addRow("Colour", self._color(key, "color"))
+            f.addRow("Width (× the trace's)", self._number(key, 0.1, 5, 0.1, "width"))
+            if line:
+                f.addRow("Line", self._choice(key, "style", styles))
+            v.addLayout(f)
         v.addStretch(1)
         return w
 
@@ -442,6 +468,8 @@ class OptionsWindow(QMainWindow):
                           "a run's own). A rule fixed in advance is what makes spike removal "
                           "defensible: change it here, for your procedure, not run by run.")
         f = QFormLayout()
+        f.addRow(self._tick("spikes", "auto", "Found on their own: when a run is loaded, and "
+                            "as the threshold moves (else: Find spikes)"))
         f.addRow("Threshold", self._number("spikes", 1, 50, 0.5, "n_sigma", " σ"))
         f.addRow("Window (points, odd)", self._number("spikes", 3, 101, 2, "window"))
         f.addRow("Max width (points)", self._number("spikes", 1, 10, 1, "max_width"))
@@ -452,17 +480,20 @@ class OptionsWindow(QMainWindow):
     def _bg_page(self):
         w, v = self._page("Background", "The background a run is loaded with (the "
                           "Background step changes a run's own). A radio-detector's is flat "
-                          "— its count rate, with Poisson noise — so a mean is right; a "
-                          "drifting background is "
-                          "offered only when ticked below.")
+                          "— its count rate, with Poisson noise — so a mean is right; one "
+                          "that follows a drift is not offered at first.")
         f = QFormLayout()
-        f.addRow("A new run's", self._choice("bg", "mode", (
-            ("auto", "Mean outside the regions"), ("stretch", "Mean of a stretch"),
-            ("drift", "Follows a drift (if offered)"))))
+        f.addRow("A new run's", self._choice("bg", "mode", BG_MODES.items()))
+        offer = QHBoxLayout()
+        for mode, text in BG_MODES.items():
+            c = QCheckBox(text)
+            c.setChecked(PREFS["bg"]["offer"][mode])
+            c.toggled.connect(lambda on, m=mode: self._offer(m, on))
+            offer.addWidget(c)
+        offer.addStretch(1)
+        f.addRow("Offered", offer)
         f.addRow("Stretch from", self._number("bg", 0, 1000, 0.1, "stretch_from", " min"))
         f.addRow("Stretch to", self._number("bg", 0, 1000, 0.1, "stretch_to", " min"))
-        f.addRow(self._tick("bg", "offer_drift", "Offer a background that follows a drift "
-                            "(SNIP, arPLS) in the Background step"))
         f.addRow("Drift", self._choice("bg", "drift", (("snip", "SNIP"), ("arpls", "arPLS"))))
         f.addRow("SNIP half-width", self._number("bg", 2, 1000, 1, "n", " points"))
         v.addLayout(f)
@@ -472,10 +503,13 @@ class OptionsWindow(QMainWindow):
     def _find_page(self):
         w, v = self._page("Regions", "How Find regions looks for peaks, for a run loaded from "
                           "now on (the Regions step changes a run's own): an apex of the "
-                          "moving mean standing the threshold above its surroundings, σ the Poisson noise "
-                          "of that mean at the background; its region out to where the mean "
+                          "moving mean standing the threshold above its surroundings, σ the "
+                          "Poisson noise of that mean at the background; its region out to "
+                          "where the mean "
                           "falls back within the feet's σ, or to the valley it shares.")
         f = QFormLayout()
+        f.addRow(self._tick("find", "auto", "Found on their own: when a run is loaded, and as "
+                            "the threshold moves (else: Find regions)"))
         f.addRow("Threshold", self._number("find", 1, 50, 0.5, "n_sigma", " σ"))
         f.addRow("Apexes at least", self._number("find", 0, 600, 1, "min_gap_s", " s apart"))
         f.addRow("Moving mean of", self._number("find", 1, 51, 2, "smooth", " points"))

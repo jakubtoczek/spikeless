@@ -37,10 +37,10 @@ One screen: the chromatogram, its results under it, four steps on the right.
    **% of total** (the radiochemical purity).
 4. **Report** — pick the sections, see it, save it as PDF, Word-compatible `.odt`, Excel,
    Markdown or web page. **Figure…** sets what **Copy / Export** make, at its size in mm.
-5. **Save…** (Ctrl+S) keeps the whole analysis in a `.spikeless` (or `.json`) file.
+5. **Save…** (Ctrl+S) keeps the whole analysis in a `.json` file.
 
-On the plot: click for a reading line, drag to zoom, right-drag to pan, double-click for the
-whole run.
+On the plot: click for a reading line (← → move it), drag to zoom, right-drag to pan,
+double-click for the whole run.
 
 **⚙ Options**: the mouse on the plot, what the Runs panel and the results table show, what a
 new run starts with (spike rule, background, how regions are found), export resolution, the

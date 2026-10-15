@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from .options import PREFS, ColorButton, guard_fields
-from .plotting import LABELS, LEGEND, PlotOptions, auto_extents, build_figure, legend_text
+from .plotting import LEGEND, PlotOptions, auto_extents, build_figure, legend_text
 from .plotview import Background, ZoomableFigureView
 
 _LINESTYLES = ["solid", "dotted", "dashed", "dashdot"]
@@ -256,12 +256,9 @@ class FigureWindow(QMainWindow):
         # regions
         rg, f = _section()
         f.addRow(self._tick("show_regions", "Shaded", o))
-        lab = QComboBox()
-        lab.addItems(list(LABELS.values()))
-        lab.setCurrentIndex(list(LABELS).index(o.region_labels))
-        lab.activated.connect(lambda i: self._set("region_labels", list(LABELS)[i]))
-        f.addRow("Labels", lab)
-        f.addRow(self._tick("label_rt", "Their Rt in the labels", o))
+        labels = self._tick("label_name", "Name", o), self._tick("label_pct", "% of total", o),             self._tick("label_rt", "Rt", o)
+        labels[0].setToolTip("A region's own name (typed, or its method's); not \"peak N\"")
+        f.addRow("Labels", _row(*labels))
         self.d["label_size"] = _spin(4, 24, o.label_size, 0.5)
         f.addRow("Label size (pt)", self.d["label_size"])
         self.d["alpha"] = _spin(0, 1, o.region_alpha, 0.05)
@@ -569,6 +566,16 @@ def _spin(lo, hi, val, step):
     s.setDecimals(2 if step < 1 else 0)
     s.setValue(val)
     return s
+
+
+def _row(*widgets):
+    w = QWidget()
+    h = QHBoxLayout(w)
+    h.setContentsMargins(0, 0, 0, 0)
+    for wdg in widgets:
+        h.addWidget(wdg)
+    h.addStretch(1)
+    return w
 
 
 def _pair(left, right):

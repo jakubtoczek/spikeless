@@ -1,6 +1,5 @@
 """A session file: the runs open — each with its spikes, background and regions — and the
-figure's settings, in one JSON file (.spikeless, or .json: the same text), to reopen an
-analysis where it was left.
+figure's settings, in one JSON file (.json), to reopen an analysis where it was left.
 
 Arrays are written as lists. Reading is forgiving the way the options are: a key it does not
 know is dropped and a missing one keeps its default, so a file from an older or newer version
@@ -21,7 +20,7 @@ from .plotting import Y_TITLE, PlotOptions
 from .run import COLORS, Region, Run
 from .spikes import SpikeParams
 
-EXT = ".spikeless"
+EXT = ".json"
 _ARRAYS = {"x": float, "y": float, "spikes": bool}
 _LISTS = {"regions": Region}
 
@@ -106,6 +105,9 @@ def loads(text: str) -> tuple[list[Run], PlotOptions]:
             plot.y_mode = "pct_max"
         if "font" not in old and isinstance(old.get("legend_font_family"), str):
             plot.font = old["legend_font_family"]   # before 2026.10.15.1: a font per text
+        if old.get("region_labels") in ("none", "name", "pct", "both"):   # before .2: one list
+            plot.label_name = old["region_labels"] in ("name", "both")
+            plot.label_pct = old["region_labels"] in ("pct", "both")
         return runs, plot
     except (ValueError, KeyError, TypeError, AttributeError, IndexError) as e:
         raise ValueError(f"Not a Spikeless session file ({e}).") from e
@@ -159,8 +161,10 @@ def _self_check():
     assert r4.source == "Old"                       # an older run: its name is its original
     old["plot"]["pct_max"] = True
     old["plot"]["legend_font_family"] = "Arial"
+    old["plot"]["region_labels"] = "pct"
     p5 = loads(json.dumps(old))[1]
     assert p5.y_mode == "pct_max" and p5.font == "Arial"
+    assert not p5.label_name and p5.label_pct
     for bad in ("", "[]", '{"app": "Other"}', '{"app": "Spikeless"}'):
         try:
             loads(bad)

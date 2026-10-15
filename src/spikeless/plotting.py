@@ -21,13 +21,14 @@ from matplotlib.transforms import ScaledTranslation
 _MAX_TICKS = 2000
 PT_PER_MM = 2.834645669
 Y_TITLE = "Count rate (cps)"
-LABELS = {"none": "None", "name": "Name", "pct": "% of total", "both": "Name and %"}
-# (a region with no name of its own — no typed name, no method window — shows only its %)
 Y_MODES = {"cps": "Count rate", "pct_max": "% of max", "pct_total": "% of total"}
 _Y_TITLES = {"pct_max": "% of max", "pct_total": "% of total"}
 # set from the options (options.sync_style), for the screen and the figure alike
+# (widths: × the trace's)
 STYLE = {"y_below_pct": 3.0,              # the y axis starts this % of its top below zero
-         "raw_color": "#b0b0b0", "raw_width": 0.8, "raw_style": "solid"}  # trace as recorded
+         "raw_color": "#b0b0b0", "raw_width": 0.8, "raw_style": "solid",    # as recorded
+         "spike_color": "#e02020", "spike_width": 1.0,                       # excluded spikes
+         "bg_color": "#808080", "bg_width": 0.8, "bg_style": "dashed"}       # background line
 
 # legend positions: (matplotlib loc, the point of the plot it is anchored to; None: inside)
 LEGEND = {
@@ -153,9 +154,10 @@ class PlotOptions:
     line_width_pt: float = 0.75
     font: str = "sans-serif"          # every text of the figure
     show_regions: bool = True
-    region_labels: str = "both"       # a key of LABELS
+    label_name: bool = True           # a region's label: its name (if it has its own) …
+    label_pct: bool = True            # … its % of total …
+    label_rt: bool = False            # … its Rt
     label_size: float = 7.0
-    label_rt: bool = False            # the label says the region's Rt too
     region_alpha: float = 0.3
     show_background: bool = False
     show_spikes: bool = False
@@ -281,14 +283,16 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
                     lw=lw * STYLE["raw_width"], ls=STYLE["raw_style"], zorder=1)
         ax.plot(r.x, v, color=r.color, lw=lw, zorder=3, label=r.legend())
         if background and extra:
-            ax.plot(r.x, _f(b, b, k, off, flat), color="#808080", lw=lw * 0.8, ls="--", zorder=2)
+            ax.plot(r.x, _f(b, b, k, off, flat), color=STYLE["bg_color"],
+                    lw=lw * STYLE["bg_width"], ls=STYLE["bg_style"], zorder=2)
         if spikes and extra:
             ex = r.excluded()
             for i in np.flatnonzero(ex):
                 ax.plot([r.x[i], r.x[i]], [v[i], _f(r.y[i], b[i], k, off, flat)],
-                        color="#e02020", lw=lw, zorder=4)
+                        color=STYLE["spike_color"], lw=lw * STYLE["spike_width"], zorder=4)
             for i in r.kept:                      # flagged, put back: a ring on the point
-                ax.plot([r.x[i]], [v[i]], "o", mfc="none", mec="#e02020", ms=5, zorder=4)
+                ax.plot([r.x[i]], [v[i]], "o", mfc="none", mec=STYLE["spike_color"], ms=5,
+                        zorder=4)
         res = results.get(r.id)
         if not (opts.show_regions and res):
             continue
@@ -307,7 +311,7 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
                 for t in (reg.start, reg.end):
                     ax.axvline(t, color=col, lw=1.6 if hl else 0.6, alpha=0.9 if hl else 0.5,
                                zorder=5)
-            txt = _label(row, opts.region_labels, opts.label_rt) if reg.label else ""
+            txt = _label(row, opts) if reg.label else ""
             if txt:
                 top = int(np.argmax(ys - under))
                 px, py = xs[top], _f(ys[top], b[m][top], k, off, flat)
@@ -317,20 +321,17 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
                             color=_readable(col, bg), zorder=6)
 
 
-def _label(row, mode, rt=False):
-    """A region's label: its name if it has one (typed or the method's), its % of total, its
-    Rt if asked. None below the quantification limit: those are in the results, not on the
-    figure, where small neighbours' labels would only pile up."""
+def _label(row, opts):
+    """A region's label, a line each as opts asks: its name (if it has one of its own: typed
+    or the method's, not "peak N"), its % of total, its Rt. None below the quantification
+    limit: those are in the results, not on the figure, where small neighbours' labels would
+    only pile up."""
     if "n.d." in row.flags or "< LOQ" in row.flags:
         return ""
-    parts = []
-    if mode in ("name", "both") and row.named:
-        parts.append(row.name)
-    if mode in ("pct", "both") and row.pct is not None:
-        parts.append(f"{row.pct:.1f} %")
-    if rt:
-        parts.append(f"{row.rt:.2f} min")
-    return "\n".join(parts)
+    return "\n".join(text for on, text in (
+        (opts.label_name and row.named, row.name),
+        (opts.label_pct and row.pct is not None, f"{row.pct or 0:.1f} %"),
+        (opts.label_rt, f"{row.rt:.2f} min")) if on)
 
 
 def y_title(opts):

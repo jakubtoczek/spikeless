@@ -16,20 +16,21 @@ from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QEvent, QLocale, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QPushButton, QRadioButton, QScrollArea, QSlider, QSpinBox, QSplitter, QTableWidget,
-    QTableWidgetItem, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QTableWidgetItem, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from . import __version__, io_gina, io_paste, session
 from .canvas import ChromCanvas
 from .editors import NamesWindow, RegionPanel, RegionsWindow, copy_table
 from .figure import FigureWindow, _Collapsible, _link
-from .options import PREFS, ColorButton, OptionsWindow, guard_fields, load_prefs, method_names
+from .options import (PREFS, ColorButton, OptionsWindow, guard_fields, load_prefs,
+                      method_names, params, save_prefs)
 from .peaks import find_regions, fit, measure, snap
 from .plotting import Y_MODES, PlotOptions
 from .report import HELP, ReportWindow, columns, rows as result_rows
@@ -37,7 +38,7 @@ from .run import COLORS, FindParams, Region
 from .spikes import SpikeParams, remove
 
 APP_NAME = "Spikeless"
-OPENS = (".txt", session.EXT, ".json")      # what Open… and a drop take
+OPENS = (".txt", session.EXT)               # what Open… and a drop take
 GREY = "color:#8d8d8d;"
 TITLES = {"runs": "Runs", "spikes": "Spikes", "background": "Background", "peaks": "Regions"}
 
@@ -62,8 +63,8 @@ class MainWindow(QMainWindow):
         self.sel_region = -1             # its selected region, or -1
         self.results: dict = {}          # run.id -> peaks.Results
         self.plot_opts = PlotOptions()   # the figure (Figure window); saved with the session
-        self.view = {"raw": False, "spikes": True, "background": True,   # screen only
-                     "stretch": True}
+        self.view = {"raw": False, "spikes": True, "stretch": True,     # screen only
+                     "line_auto": True, "line_stretch": True, "line_drift": True}
         self._undo: list = []
         self._redo: list = []
         self._session_path: Path | None = None
@@ -95,10 +96,10 @@ class MainWindow(QMainWindow):
         tb = QToolBar("Main")
         tb.setMovable(False)
         self.addToolBar(tb)
-        for item in (("Open…", "A GINA .txt export, or a saved session (.spikeless or .json) — "
+        for item in (("Open…", "A GINA .txt export, or a saved session (.json) — "
                       "Ctrl+O. Columns copied from Excel or Prism: Ctrl+V", self._browse),
                      ("Save…", "The session: runs, spikes, background, regions, figure — "
-                      "Ctrl+S; as .spikeless, or .json (the same JSON)", self._save_session),
+                      "Ctrl+S, as a .json file", self._save_session),
                      None,
                      ("Figure…", "What the figure's Copy and Export make: its settings and a "
                       "preview", self._figure),
@@ -272,7 +273,7 @@ class MainWindow(QMainWindow):
         self.run_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.run_list.customContextMenuRequested.connect(self._run_menu)
         self.run_list.viewport().installEventFilter(self)
-        v.addWidget(self.run_list)
+        _sized(v, self.run_list)
         self.run_form = QWidget()
         self.run_rows = QFormLayout(self.run_form)
         self.run_rows.setContentsMargins(0, 0, 0, 0)
@@ -310,30 +311,10 @@ class MainWindow(QMainWindow):
 
     def _spikes_step(self):
         w, v = self._section("spikes", (
-            ("spikes", "Spikes", "The excluded spikes in red, from the bridged point to their "
-                                 "height; a ring on one put back"),
+            ("spikes", "Spikes", "The excluded spikes, from the bridged point to their height; "
+                                 "a ring on one put back (their style: Options › Chromatogram)"),
             ("raw", "Trace as recorded", "Before the spikes were excluded; its style: Options "
                                          "› Chromatogram")))
-        self.spike_list = QListWidget()
-        self.spike_list.setToolTip("A spike: one point far above both its neighbours — a "
-                                   "detector artefact, not activity — excluded and bridged by "
-                                   "the straight line between them. Click one: the plot shows "
-                                   "it. Untick it to keep it.")
-        self.spike_list.itemChanged.connect(self._spike_ticked)
-        self.spike_list.itemClicked.connect(self._spike_focus)
-        v.addWidget(self.spike_list)
-        h = QHBoxLayout()
-        h.addWidget(QLabel("Threshold"))
-        self.sens = QSlider(Qt.Horizontal)
-        self.sens.setRange(6, 30)                   # n σ × 2: 3 … 15 σ by 0.5
-        self.sens.setToolTip("How far above the points around it a point must be: lower finds "
-                             "more spikes, higher fewer (a new run's: Options › Spikes)")
-        self.sens.sliderPressed.connect(lambda: self._push("spike threshold"))
-        self.sens.valueChanged.connect(self._threshold)
-        self.sens_lab = QLabel()
-        h.addWidget(self.sens, 1)
-        h.addWidget(self.sens_lab)
-        v.addLayout(h)
         more = QWidget()
         fm = QFormLayout(more)
         self.f_window = QSpinBox()
@@ -347,42 +328,52 @@ class MainWindow(QMainWindow):
             wdg.valueChanged.connect(lambda val, k=key: self._spike_param(k, val))
         fm.addRow("Window (points)", self.f_window)
         fm.addRow("Max width (points)", self.f_width)
-        v.addWidget(_Collapsible("More", more, expanded=False))
+        self.sens = QSlider(Qt.Horizontal)
+        self.sens.setRange(6, 30)                   # n σ × 2: 3 … 15 σ by 0.5
+        self.sens.setToolTip("How far above the points around it a point must be: lower finds "
+                             "more spikes, higher fewer (a new run's: Options › Spikes)")
+        self.sens.sliderPressed.connect(lambda: self._push("spike threshold"))
+        self.sens.valueChanged.connect(self._threshold)
+        self.sens_lab = QLabel()
+        self.spikes_auto = _auto_button(
+            "Spikes found on their own: on load, and as the threshold moves (Options › Spikes)",
+            lambda on: self._auto_set("spikes", on))
+        v.addLayout(_find_row(
+            _button("Find spikes", "Flag the spikes with this rule (the ones put back stay "
+                                   "back)", self._find_spikes),
+            self.spikes_auto, self.sens, self.sens_lab,
+            _gear(more, "The rule's window and widest spike")))
+        self.spike_list = QListWidget()
+        self.spike_list.setToolTip("A spike: one point far above both its neighbours — a "
+                                   "detector artefact, not activity — excluded and bridged by "
+                                   "the straight line between them. Click one: the plot shows "
+                                   "it. Untick it to keep it. Drag the bar below to resize.")
+        self.spike_list.itemChanged.connect(self._spike_ticked)
+        self.spike_list.itemClicked.connect(self._spike_focus)
+        _sized(v, self.spike_list)
         return w
 
     def _bg_step(self):
-        w, v = self._section("background", (
-            ("background", "Line", "The background, dashed"),
-            ("stretch", "Stretch", "The stretch its mean is taken on, shaded, its edges dashed "
-                                   "(Mean of a stretch)")))
+        w, v = self._section("background")
         self.bg_group = QButtonGroup(w)
-        self.bg_radio = {}
+        self.bg_radio, self.bg_rows = {}, {}
+        line_tip = "Its line on the plot (its style: Options › Chromatogram)"
         for mode, text, tip in (
+                ("none", "None", "Nothing subtracted: the counts as recorded"),
                 ("auto", "Mean outside the regions", "The detector's background: the mean of "
                  "every point no region holds (points 4 σ above it left out). A radio-"
                  "detector's background is flat: its count rate, with Poisson noise"),
                 ("stretch", "Mean of a stretch", "The mean of a peak-free stretch: drag its "
                  "edges on the plot, type them, or draw it again"),
                 ("drift", "Follows a drift", "For a trace whose background drifts: SNIP or "
-                 "arPLS (offered when ticked in Options › Background)")):
+                 "arPLS")):
             rb = QRadioButton(text)
             rb.setToolTip(tip)
             self.bg_group.addButton(rb)
             self.bg_radio[mode] = rb
             rb.toggled.connect(lambda on, m=mode: on and self._bg_mode(m))
-            if mode == "stretch":
-                self.bg_draw = QPushButton("Draw stretch")
-                self.bg_draw.setCheckable(True)
-                self.bg_draw.setToolTip("Then drag across a stretch with no peak, or click its "
-                                        "two edges; right-click cancels")
-                self.bg_draw.toggled.connect(lambda on: self._arm("stretch", on))
-                v.addWidget(_row(rb, self.bg_draw))
-                self.bg_from, self.bg_to = _minutes(), _minutes()
-                for s in (self.bg_from, self.bg_to):
-                    s.valueChanged.connect(self._stretch_typed)
-                self.bg_span = _row(QLabel("      from"), self.bg_from, QLabel("to"), self.bg_to)
-                v.addWidget(self.bg_span)
-            elif mode == "drift":
+            parts = [rb]
+            if mode == "drift":
                 self.bg_method = QComboBox()
                 self.bg_method.addItems(["SNIP", "arPLS"])
                 self.bg_method.activated.connect(
@@ -391,32 +382,32 @@ class MainWindow(QMainWindow):
                 self.bg_n.setRange(2, 1000)
                 self.bg_n.setToolTip("SNIP: about a peak's half-width, in points")
                 self.bg_n.valueChanged.connect(lambda val: self._bg_set("bg_n", val))
-                self.drift_row = _row(rb, self.bg_method, self.bg_n)
-                v.addWidget(self.drift_row)
-            else:
-                v.addWidget(rb)
+                parts += [self.bg_method, self.bg_n]
+            if mode == "stretch":
+                parts.append(self._view_tick("stretch", "stretch", "The stretch shaded, its "
+                                                                   "edges dashed"))
+            if mode != "none":                       # last: every row's line tick aligned
+                parts.append(self._view_tick(f"line_{mode}", "line", line_tip))
+            self.bg_rows[mode] = row = QWidget()
+            _row_into(row, parts)
+            v.addWidget(row)
+            if mode == "stretch":
+                self.bg_from, self.bg_to = _minutes(), _minutes()
+                for s in (self.bg_from, self.bg_to):
+                    s.valueChanged.connect(self._stretch_typed)
+                self.bg_draw = QPushButton("Draw")
+                self.bg_draw.setCheckable(True)
+                self.bg_draw.setToolTip("Then drag across a stretch with no peak, or click its "
+                                        "two edges; right-click cancels")
+                self.bg_draw.toggled.connect(lambda on: self._arm("stretch", on))
+                self.bg_span = QWidget()
+                _row_into(self.bg_span, [QLabel("from"), self.bg_from, QLabel("to"),
+                                         self.bg_to, QLabel("min"), self.bg_draw], indent=22)
+                v.addWidget(self.bg_span)
         return w
 
     def _peaks_step(self):
         w, v = self._section("peaks")
-        h = QHBoxLayout()
-        b = QPushButton("Find regions")
-        b.setToolTip("Regions for the peaks no region holds (the ones found before and left "
-                     "untouched are found again): a moving mean standing the threshold above "
-                     "its surroundings, with more counts than the detection limit")
-        b.clicked.connect(self._find)
-        h.addWidget(b)
-        self.find_sens = QSlider(Qt.Horizontal)
-        self.find_sens.setRange(4, 40)               # n σ × 2: 2 … 20 σ by 0.5
-        self.find_sens.setToolTip("How far above its surroundings an apex must stand, in σ of "
-                                  "the background noise: lower finds more, higher fewer — the "
-                                  "regions follow (a new run's: Options › Regions)")
-        self.find_sens.sliderPressed.connect(lambda: self._push("region threshold"))
-        self.find_sens.valueChanged.connect(self._find_threshold)
-        self.find_lab = QLabel()
-        h.addWidget(self.find_sens, 1)
-        h.addWidget(self.find_lab)
-        v.addLayout(h)
         more = QWidget()
         fm = QFormLayout(more)
         self.f_gap = QDoubleSpinBox()
@@ -440,7 +431,24 @@ class MainWindow(QMainWindow):
             wdg.setToolTip(tip)
             wdg.valueChanged.connect(lambda val, k=key: self._find_param(k, val))
             fm.addRow(label, wdg)
-        v.addWidget(_Collapsible("More", more, expanded=False))
+        self.find_sens = QSlider(Qt.Horizontal)
+        self.find_sens.setRange(4, 40)               # n σ × 2: 2 … 20 σ by 0.5
+        self.find_sens.setToolTip("How far above its surroundings an apex must stand, in σ of "
+                                  "the background noise: lower finds more, higher fewer (a new "
+                                  "run's: Options › Regions)")
+        self.find_sens.sliderPressed.connect(lambda: self._push("region threshold"))
+        self.find_sens.valueChanged.connect(self._find_threshold)
+        self.find_lab = QLabel()
+        self.find_auto = _auto_button(
+            "Regions found on their own: on load, and as the threshold moves (Options › "
+            "Regions)", lambda on: self._auto_set("find", on))
+        v.addLayout(_find_row(
+            _button("Find regions", "Regions for the peaks no region holds (the ones found "
+                                    "before and left untouched are found again): a moving "
+                                    "mean standing the threshold above its surroundings, with "
+                                    "more counts than the detection limit", self._find),
+            self.find_auto, self.find_sens, self.find_lab,
+            _gear(more, "Apexes' spacing, the moving mean, the feet")))
         self.reg_draw = QPushButton("Draw region")
         self.reg_draw.setCheckable(True)
         self.reg_draw.setToolTip("A region: a span integrated as one — a peak, or a peak's "
@@ -462,14 +470,23 @@ class MainWindow(QMainWindow):
         t.setSelectionMode(QAbstractItemView.ExtendedSelection)
         t.setEditTriggers(QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed)
         t.setToolTip("Click one to select it; double-click: the plot shows it; right-click: "
-                     "rename, edit, remove; Del removes the selected ones")
+                     "rename, edit, remove; Del removes the selected ones. Drag the bar below "
+                     "to resize.")
         t.currentCellChanged.connect(lambda r, *_: self._filling or self._pick_region(r))
         t.cellDoubleClicked.connect(lambda r, _c: self._region_focus(r))
         t.itemChanged.connect(self._renamed)
         t.setContextMenuPolicy(Qt.CustomContextMenu)
         t.customContextMenuRequested.connect(lambda pos: self._region_menu(t, pos))
-        v.addWidget(t)
+        _sized(v, t)
         return w
+
+    def _view_tick(self, key, text, tip):
+        """A tick for what the plot shows (self.view), kept in step by _fill_steps."""
+        c = QCheckBox(text)
+        c.setToolTip(tip)
+        c.toggled.connect(lambda on: self._view(key, on))
+        self.ticks[key] = c
+        return c
 
     # ================================================================ state
     def refresh(self, table=True):
@@ -498,12 +515,13 @@ class MainWindow(QMainWindow):
         run, res = self.sel, self.results.get(self.sel.id) if self.sel else None
         for key, c in self.ticks.items():
             c.setChecked(self.view[key] if key in self.view else getattr(self.plot_opts, key))
+        self.spikes_auto.setChecked(PREFS["spikes"]["auto"])
+        self.find_auto.setChecked(PREFS["find"]["auto"])
         self.y_mode.setCurrentIndex(max(0, self.y_mode.findData(self.plot_opts.y_mode)))
         _sync(self.run_list, [(r.name, r.shown, None, r.color, None) for r in self.runs],
               Qt.ItemIsEditable)
         for k, r in enumerate(self.runs):
             self.run_list.item(k).setToolTip(r.name)
-        _fit_rows(self.run_list, len(self.runs) + 1, 2, 7)      # a row free: click it, none
         if run is not None:
             if self.run_list.currentRow() != self.runs.index(run):
                 self.run_list.setCurrentRow(self.runs.index(run))
@@ -522,8 +540,6 @@ class MainWindow(QMainWindow):
             self.f_info.setText("")
             self.spike_list.clear()
             self.reg_list.setRowCount(0)
-            _fit_rows(self.spike_list, 0, 1, 5)
-            _fit_rows(self.reg_list, 0, 1, 7)
             self._filling = False
             return
         # runs
@@ -559,7 +575,6 @@ class MainWindow(QMainWindow):
             entries.append((f"{t:6.2f} min   {run.y[i]:.0f} → {bridged[i]:.0f} cps"
                             + (f"   in {reg}" if reg else ""), i not in run.kept, i, None, None))
         _sync(self.spike_list, entries)
-        _fit_rows(self.spike_list, len(entries), 1, 5)
         p = run.spike_params
         self.sens.setValue(int(round(p.n_sigma * 2)))
         self.sens_lab.setText(f"{p.n_sigma:.1f} σ")
@@ -569,7 +584,9 @@ class MainWindow(QMainWindow):
         self.step["background"].set_title(f"{TITLES['background']} · {res.background:.1f} cps")
         self.step["background"].setToolTip(f"{res.background:.2f} cps — {res.background_how}")
         self.bg_radio[run.bg_mode].setChecked(True)
-        self.drift_row.setVisible(PREFS["bg"]["offer_drift"] or run.bg_mode == "drift")
+        for mode, row in self.bg_rows.items():
+            row.setVisible(PREFS["bg"]["offer"][mode] or run.bg_mode == mode)
+        self.bg_span.setVisible(self.bg_rows["stretch"].isVisible())
         a, b = sorted(run.bg_stretch or [PREFS["bg"]["stretch_from"], PREFS["bg"]["stretch_to"]])
         self.bg_from.setValue(a)
         self.bg_to.setValue(b)
@@ -587,7 +604,6 @@ class MainWindow(QMainWindow):
         self.f_foot.setValue(fp.foot_sigma)
         t = self.reg_list
         t.setRowCount(len(run.regions))
-        _fit_rows(t, len(run.regions), 1, 7)
         for k, (reg, row) in enumerate(zip(run.regions, res.rows)):
             pct = (f"{row.pct:.1f}" if row.pct is not None else
                    "n.d." if "n.d." in row.flags else "")
@@ -821,7 +837,8 @@ class MainWindow(QMainWindow):
         if not self.sens.isSliderDown():            # keys / a click on the groove
             self._push("spike threshold")
         run.spike_params.n_sigma = v / 2
-        run.detect_spikes()
+        if PREFS["spikes"]["auto"]:
+            run.detect_spikes()
         self.refresh()
 
     def _spike_param(self, key, val):
@@ -830,8 +847,31 @@ class MainWindow(QMainWindow):
             return
         self._push(f"spike {key.replace('_', ' ')}")
         setattr(run.spike_params, key, val | 1 if key == "window" else val)
+        if PREFS["spikes"]["auto"]:
+            run.detect_spikes()
+        self.refresh()
+
+    def _find_spikes(self):
+        run = self.sel
+        if run is None:
+            return
+        self._push("find spikes")
         run.detect_spikes()
         self.refresh()
+        self.log(f"Find spikes on '{run.name}' ({run.spike_params.n_sigma:g} σ): "
+                 f"{int(run.excluded().sum())} excluded.")
+
+    def _auto_set(self, key, on):
+        """⟳ (Spikes, Regions): found on their own, or on a click — an option, for every run;
+        switched on, it finds at once."""
+        if self._filling or PREFS[key]["auto"] == on:
+            return
+        PREFS[key]["auto"] = on
+        save_prefs()
+        if self.options_win is not None:
+            self.options_win._build()
+        if on and self.sel is not None:
+            (self._find_spikes if key == "spikes" else self._find)()
 
     def _spike_ticked(self, it):
         run = self.sel
@@ -1090,7 +1130,8 @@ class MainWindow(QMainWindow):
         if not self.find_sens.isSliderDown():
             self._push("region threshold")
         run.find_params.n_sigma = v / 2
-        self._refind(run)
+        if PREFS["find"]["auto"]:
+            self._refind(run)
         self.refresh()
 
     def _find_param(self, key, val):
@@ -1099,7 +1140,8 @@ class MainWindow(QMainWindow):
             return
         self._push(f"find regions: {key.replace('_', ' ')}")
         setattr(run.find_params, key, int(val) | 1 if key == "smooth" else val)
-        self._refind(run)
+        if PREFS["find"]["auto"]:
+            self._refind(run)
         self.refresh()
 
     def regions_window(self):
@@ -1129,7 +1171,7 @@ class MainWindow(QMainWindow):
     def _load_paths(self, paths):
         """Open what was dropped or picked: GINA exports, or one session file."""
         for p in paths:
-            if p.lower().endswith((session.EXT, ".json")):
+            if p.lower().endswith(session.EXT):
                 self._open_session(p)
             elif p.lower().endswith(".txt"):
                 self._load(p)
@@ -1137,8 +1179,8 @@ class MainWindow(QMainWindow):
     def _browse(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Open", str(self._dir),
-            f"GINA export or session (*.txt *{session.EXT} *.json);;GINA export (*.txt);;"
-            f"Session (*{session.EXT} *.json)")
+            f"GINA export or session (*.txt *{session.EXT});;GINA export (*.txt);;"
+            f"Session (*{session.EXT})")
         self._load_paths(paths)
 
     def _load(self, path):
@@ -1177,12 +1219,17 @@ class MainWindow(QMainWindow):
         bg = PREFS["bg"]
         for r in runs:
             r.color = COLORS[len(self.runs) % len(COLORS)]
-            r.spike_params = SpikeParams(**PREFS["spikes"])
-            r.detect_spikes()
-            r.find_params = FindParams(**PREFS["find"])
-            r.bg_mode = "auto" if bg["mode"] == "drift" and not bg["offer_drift"] else bg["mode"]
+            r.spike_params = SpikeParams(**params("spikes"))
+            if PREFS["spikes"]["auto"]:
+                r.detect_spikes()
+            else:                                    # left to Find spikes
+                r.spikes, r.kept = np.zeros(len(r.y), bool), []
+            r.find_params = FindParams(**params("find"))
+            r.bg_mode = bg["mode"] if bg["offer"][bg["mode"]] else "auto"
             r.bg_stretch = [bg["stretch_from"], bg["stretch_to"]]
             r.bg_drift, r.bg_n = bg["drift"], bg["n"]
+            if PREFS["find"]["auto"]:
+                self._refind(r)
             self.runs.append(r)
         self.sel, self.sel_region = runs[0], -1
         self.canvas.xlim = self.canvas.ylim = None
@@ -1193,7 +1240,9 @@ class MainWindow(QMainWindow):
                      f"{r.x[-1]:.2f} min) from {r.file}: "
                      + (f"{len(sp)} spike(s) excluded, at "
                         + ", ".join(f"{r.x[i]:.2f}" for i in sp) + " min." if sp
-                        else "no spike."))
+                        else "no spike." if PREFS["spikes"]["auto"]
+                        else "spikes not looked for (Find spikes).")
+                     + (f" {len(r.regions)} region(s) found." if PREFS["find"]["auto"] else ""))
         for w in warnings:
             self.log(f"  ⚠ {w}")
 
@@ -1203,16 +1252,13 @@ class MainWindow(QMainWindow):
             return
         stem = re.sub(r'[\\/:*?"<>|]', "_", self.runs[0].name)
         name = self._session_path or self._dir / f"{stem}{session.EXT}"
-        path, flt = QFileDialog.getSaveFileName(
-            self, "Save session", str(name),
-            f"Spikeless session (*{session.EXT});;JSON — the same session (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "Save session", str(name),
+                                              f"Spikeless session (*{session.EXT})")
         if not path:
             return
         path = Path(path)
-        ext = ".json" if path.name.lower().endswith(".json") or "json" in flt.lower() \
-            else session.EXT
-        if not path.name.lower().endswith(ext):   # not with_suffix: names carry dots
-            path = path.with_name(path.name + ext)
+        if not path.name.lower().endswith(session.EXT):   # not with_suffix: names carry dots
+            path = path.with_name(path.name + session.EXT)
         try:
             path.write_text(session.dumps(self.runs, self.plot_opts), encoding="utf-8")
         except OSError as exc:
@@ -1346,14 +1392,98 @@ def _hline():
     return f
 
 
-def _fit_rows(view, n, lo, hi):
-    """A list or table as tall as its n rows (lo to hi of them): no empty space below a few,
-    a scroll bar past hi."""
-    table = isinstance(view, QTableWidget)
-    row = (view.verticalHeader().defaultSectionSize() if table else
-           view.sizeHintForRow(0) if view.count() else view.fontMetrics().height() + 4)
-    head = view.horizontalHeader().sizeHint().height() if table else 0
-    view.setFixedHeight(head + row * min(max(n, lo), hi) + 2 * view.frameWidth() + 2)
+def _row_into(w, widgets, indent=0):
+    """widgets side by side in w, the first one taking the room."""
+    h = QHBoxLayout(w)
+    h.setContentsMargins(indent, 0, 0, 0)
+    for k, wdg in enumerate(widgets):
+        h.addWidget(wdg, 1 if k == 0 and not indent else 0)
+    if indent:
+        h.addStretch(1)
+
+
+def _button(text, tip, slot):
+    b = QPushButton(text)
+    b.setToolTip(tip)
+    b.clicked.connect(lambda _=False: slot())
+    return b
+
+
+def _auto_button(tip, on_toggle):
+    """⟳: the step runs on its own (green when on)."""
+    b = QToolButton()
+    b.setText("⟳")
+    b.setCheckable(True)
+    b.setToolTip(tip)
+    b.setStyleSheet("QToolButton { font-size: 15px; padding: 0 3px; color: #8d8d8d; }"
+                    "QToolButton:checked { color: #4caf50; }")
+    b.toggled.connect(on_toggle)
+    return b
+
+
+def _gear(content, tip):
+    """⚙: content (a form) in a popup under it."""
+    b = QToolButton()
+    b.setText("⚙")
+    b.setToolTip(tip)
+    b.setPopupMode(QToolButton.InstantPopup)
+    b.setStyleSheet("QToolButton::menu-indicator { image: none; }")
+    m = QMenu(b)
+    act = QWidgetAction(m)
+    act.setDefaultWidget(content)
+    m.addAction(act)
+    b.setMenu(m)
+    guard_fields(content)
+    return b
+
+
+def _find_row(*widgets):
+    """[Find…] [⟳] [threshold ────] [n σ] [⚙]"""
+    h = QHBoxLayout()
+    for wdg in widgets:
+        h.addWidget(wdg, 1 if isinstance(wdg, QSlider) else 0)
+    return h
+
+
+class _Grip(QWidget):
+    """A bar under a list: drag it to make the list taller or shorter."""
+
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+        self.setFixedHeight(7)
+        self.setCursor(Qt.SizeVerCursor)
+        self.setToolTip("Drag to resize")
+        self._from = None
+
+    def paintEvent(self, e):                            # noqa: N802 - Qt's name
+        p = QPainter(self)
+        p.setPen(QColor("#6a6a6a"))
+        c = self.width() // 2
+        for dx in (-8, -4, 0, 4, 8):
+            p.drawPoint(c + dx, 3)
+
+    def mousePressEvent(self, e):                       # noqa: N802
+        self._from = (e.globalPosition().y(), self.target.height())
+
+    def mouseMoveEvent(self, e):                        # noqa: N802
+        if self._from:
+            y, h = self._from
+            self.target.setFixedHeight(max(40, int(h + e.globalPosition().y() - y)))
+
+    def mouseReleaseEvent(self, e):                     # noqa: N802
+        self._from = None
+
+
+def _sized(layout, view, rows=5):
+    """view into layout, as tall as `rows` rows, with a bar under it to drag it taller."""
+    if isinstance(view, QTableWidget):
+        h = view.horizontalHeader().sizeHint().height() + view.verticalHeader().defaultSectionSize() * rows
+    else:
+        h = max(view.fontMetrics().height() + 6, 20) * rows
+    view.setFixedHeight(h + 2 * view.frameWidth() + 2)
+    layout.addWidget(view)
+    layout.addWidget(_Grip(view))
 
 
 def _tool(text, tip, slot):
@@ -1370,7 +1500,8 @@ def _minutes():
     s.setRange(0, 1000)
     s.setDecimals(2)
     s.setSingleStep(0.05)
-    s.setSuffix(" min")
+    s.setButtonSymbols(QDoubleSpinBox.NoButtons)    # compact: type it, or the wheel, ↑ ↓
+    s.setFixedWidth(52)
     return s
 
 

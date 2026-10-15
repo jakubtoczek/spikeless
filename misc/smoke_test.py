@@ -233,7 +233,7 @@ assert not figure.figure(w).axes[0].collections, "regions still shaded"
 w.plot_opts.show_regions = True
 
 # ---- a session comes back as it was saved ----
-ses = TMP / "spikeless_smoke.spikeless"
+ses = TMP / "spikeless_smoke_session.json"
 ses.write_text(session.dumps(w.runs, w.plot_opts), encoding="utf-8")
 before = [(r.start, r.end, r.name, r.how) for r in w.sel.regions]
 w._remove_run()
@@ -394,8 +394,14 @@ w._find()
 run = w.sel
 n = len(run.regions)
 w.set_region(0, "name", "kept")
+w.find_auto.setChecked(True)                                # ⟳: found as the threshold moves
 w.find_sens.setValue(12)                                    # 6 σ
 assert run.find_params.n_sigma == 6 and run.regions[0].name == "kept" and len(run.regions) == n
+w.find_auto.setChecked(False)
+before = list(run.regions)
+w.find_sens.setValue(40)                                    # ⟳ off: only Find regions finds
+assert run.regions == before and run.find_params.n_sigma == 20
+w.find_sens.setValue(12)
 assert "6 σ above" in " ".join(report.processing(run, w.results[run.id]))
 
 # ---- the regions in full (⤢): a note, a label off the figure; ⧉; Del on several ----
@@ -449,12 +455,47 @@ assert np.allclose(io_gina.load(out)[0].y, src_run.y, atol=1e-3)
 # ---- a session as .json: saved, opened ----
 js = TMP / "spikeless_smoke.json"
 appmod.QFileDialog.getSaveFileName = staticmethod(
-    lambda *a, **k: (str(TMP / "spikeless_smoke"), "JSON — the same session (*.json)"))
+    lambda *a, **k: (str(TMP / "spikeless_smoke"), "Spikeless session (*.json)"))
 w._save_session()
 assert json.loads(js.read_text("utf-8"))["app"] == "Spikeless"
 n = len(w.runs)
 w._load_paths([str(js)])
 assert len(w.runs) == n and js.name in w.windowTitle()
+
+# ---- the reading line: ← → a point at a time, a right click takes it away ----
+cv.redraw()
+click(8.0)
+i0 = int(np.argmin(abs(w.sel.x - cv.cursor_t)))
+key = type("K", (), {"key": lambda self: Qt.Key_Right})()
+cv.keyPressEvent(key)
+cv.keyPressEvent(key)
+assert abs(cv.cursor_t - w.sel.x[i0 + 2]) < 1e-12, (cv.cursor_t, w.sel.x[i0 + 2])
+click(8.0, button=3)
+assert cv.cursor_t is None
+assert cv.fig.get_facecolor()[:3] == (1.0, 1.0, 1.0)     # white around the plot, at first
+
+# ---- the background: none, and each mode's own line tick ----
+w.bg_radio["none"].setChecked(True)
+assert w.sel.bg_mode == "none" and w.results[w.sel.id].background == 0
+w.bg_radio["auto"].setChecked(True)
+assert any(t.get_text().startswith("background") for t in cv.ax.texts)
+w.ticks["line_auto"].setChecked(False)
+assert not any(t.get_text().startswith("background") for t in cv.ax.texts)
+w.ticks["line_auto"].setChecked(True)
+assert w.bg_rows["none"].isVisible() and not w.bg_rows["drift"].isVisible()  # as offered
+
+# ---- spikes left to Find spikes (⟳ off); the figure's labels: name, %, Rt alike ----
+w.spikes_auto.setChecked(False)
+w._load(str(src))
+assert w.sel.spike_list() == [] and "not looked for" in last_log()
+w._find_spikes()
+assert w.sel.spike_list() == spike_at
+w.spikes_auto.setChecked(True)
+w._find()
+w.plot_opts.label_pct, w.plot_opts.label_rt = False, True
+texts = [t.get_text() for t in figure.figure(w).axes[0].texts]
+assert texts and all(s.endswith(" min") and "%" not in s for s in texts), texts
+w.plot_opts.label_pct, w.plot_opts.label_rt = True, False
 
 # ---- what the panels show; the regions list; the results' own columns; Copy the screen ----
 assert not w.run_rows.isRowVisible(w.f_iso) and not w.run_rows.isRowVisible(w.f_method)

@@ -23,7 +23,7 @@ see the [README](README.md).
    table.
 6. **Report** (toolbar): tick sections and columns, check the preview, **Save report…** as PDF,
    `.odt`, Excel, Markdown or web page.
-7. **Save…** (Ctrl+S) keeps the whole analysis in a `.spikeless` file (or `.json`: the same).
+7. **Save…** (Ctrl+S) keeps the whole analysis in a `.json` file.
 
 Ctrl+Z / Ctrl+Y undo and redo every change to a run; the log names each. Every field reads and
 writes decimals with a dot, whatever Windows' region says.
@@ -32,9 +32,9 @@ writes decimals with a dot, whatever Windows' region says.
 
 The **plot** in the middle, the **Results** under it (the **Log** in the tab beside), the
 **steps** on the right — Runs, Spikes, Background, Regions. The steps act on the **selected
-run**; with none selected they say *select a run* and wait. Each step's **Show** ticks say what
-it draws on the plot (for the selected run, or every run when none is); hover anything for what
-it does.
+run**; with none selected they say *select a run* and wait. Each step's ticks say what it
+draws on the plot (for the selected run, or every run when none is); hover anything for what it
+does. Drag the bar under a list (runs, spikes, regions: 5 rows at first) to make it taller.
 
 ### The plot
 
@@ -42,11 +42,14 @@ What the buttons do is set in Options › Chromatogram; by default:
 
 - **Left click**: a **reading line** there — the time, the point (e.g. 554 / 1772), the count
   rate in the axis shown and the background excluded from it (a spike excluded there, too) —
-  and a zoomed view slides to centre on it. A click in a region selects it. **Esc** clears it.
+  and a zoomed view slides to centre on it. A click in a region selects it. **← →** move the
+  line a point at a time; a **right click** (or Esc) takes it away.
 - **Left drag**: zoom to that span, the height fitted to it. **Right- or middle-drag**: pan.
 - **Wheel**: zoom the time around the cursor (the height too, if unlocked in the options).
   **Ctrl+wheel**: zoom the height (to see a small peak beside a large one).
   **Double-click**: the whole run.
+- Around the plot: **white**, its axes in dark grey, as the figure is (Options › Chromatogram:
+  or the app's dark grey).
 - The view is **elastic**: dragged past the start or the end of the run, or zoomed out past
   all of it, it springs back. Its edges stay put as the zoom changes the labels.
 - On an **edge** of the selected run's regions, or of its background stretch, the cursor turns
@@ -95,34 +98,40 @@ run.
 ### Spikes
 
 **Show**: the spikes (red, from the bridged point to their height; a ring on one put back), the
-trace as recorded. Each flagged point: time, height as recorded → as bridged, and the region it
+trace as recorded — their colour and line: Options › Chromatogram. **Find spikes** flags them
+with the rule beside it: **Threshold** (default 5 σ; lower finds more, higher fewer) and **⚙**
+(the moving-median window, the widest run of points that can be a spike). **⟳** (on, green, at
+first): found on their own — when a run is loaded, and as the threshold moves; off, only Find
+spikes finds them. Each flagged point: time, height as recorded → as bridged, and the region it
 falls in. **Click** one: the plot zooms on it, its reading line on it. Ticked = excluded;
-**untick to keep it** (the point comes back, everywhere). **Threshold** (default 5 σ): lower
-finds more, higher fewer — the list and the plot follow as you slide. **More**: the
-moving-median window and the widest run of points that can be a spike. A new run starts with
-Options › Spikes.
+**untick to keep it** (the point comes back, everywhere). A new run starts with Options ›
+Spikes, where ⟳ is set too.
 
 ### Background
 
-What lies under the peaks: the detector's background count rate (in the step's title).
-**Show**: its **line** (dashed) and its **stretch** (shaded, for a mean of a stretch).
+What lies under the peaks: the detector's background count rate (in the step's title). Each
+way has its own **line** tick (its line on the plot, dashed; its style: Options ›
+Chromatogram):
 
+- **None**: nothing subtracted — the counts as recorded.
 - **Mean outside the regions** (default): the mean of every point no region holds, leaving out
   any point 4 σ above it (a peak no region holds yet).
-- **Mean of a stretch**: a peak-free stretch: drag its edges on the plot, type them
-  (**from … to**), or **Draw stretch** and drag across one (or click its two edges).
+- **Mean of a stretch**: a peak-free stretch, **stretch** ticked to shade it on the plot: drag
+  its edges there, type them (**from … to** min), or **Draw** and drag across one (or click its
+  two edges).
 - **Follows a drift** (SNIP or arPLS): for a trace whose background drifts. A radio-detector's
-  is flat, so it is offered only when ticked in Options › Background.
+  is flat, so it is not offered at first.
 
-A new run starts with Options › Background.
+Which ways are offered, and a new run's: Options › Background.
 
 ### Regions
 
 A region is a span integrated as one: a peak, or a peak's shoulder. **Find regions** proposes
-them for the peaks no region holds; **Threshold** (default 5 σ) and **More** (apexes at least
-10 s apart, on a 5-point moving mean, feet at 2 σ) say how — move them and the regions found
-follow, as the spikes do: a region found and left untouched is found again, one you named,
-moved, coloured or noted stays. A new run starts with Options › Regions. **Draw region**: see
+them for the peaks no region holds; **Threshold** (default 5 σ) and **⚙** (apexes at least 10 s
+apart, on a 5-point moving mean, feet at 2 σ) say how. **⟳** (off at first): found on their
+own, on load and as the threshold moves. Finding again, a region found and left untouched is
+found again; one you named, moved, coloured or noted stays. A new run starts with Options ›
+Regions, where ⟳ is set too. **Draw region**: see
 below. The **list**: name, Rt, % of total. Click one to select it; double-click: the plot shows
 it; **right-click**: **Rename** (or F2, or click it again), **Edit…**, **Remove** (or Del, the
 selected ones). **Edit…** opens the region on its own, following the selection: its name, what
@@ -158,7 +167,8 @@ opened (the ones you open stay open):
   its labels; fixed, the plot area is what is left);
 - **Text**: one font for every text of the figure;
 - **Traces**: line width, the background line, excluded spikes, the trace as recorded;
-- **Regions**: shaded, their labels (name and/or %, their Rt), label size, opacity, and each
+- **Regions**: shaded, their labels — **Name**, **% of total**, **Rt**, each ticked or not, a
+  line each —, label size, opacity, and each
   region's colour, label and note (**edit ⤢**);
 - **Legend**: shown, where, an offset, its size, what it calls each run (**edit ▤**);
 - **Backgrounds**: of the plot area and around it, and their opacity;
@@ -202,12 +212,15 @@ underneath). Right: the report as it will be written. **Save report…** (Ctrl+S
 ## Options
 
 **⚙ Options** opens its own window, topics on the left. **Chromatogram** — what a left drag, a
-right drag and a left click do on the plot, whether the wheel zooms the height too, and the
-style of the trace as recorded. **Figure** — how far below 0 the count rate starts, PNG and copy
+right drag and a left click do on the plot, whether the wheel zooms the height too, white or
+dark around the plot, and the colour and line of the trace as recorded, the excluded spikes and
+the background line. **Figure** — how far below 0 the count rate starts, PNG and copy
 resolution, copy as PNG or SVG, what shows behind the preview. **Runs** — what the Runs panel
 shows (isotope and method hidden at first). **Spikes**, **Background**, **Regions** — what a new
-run starts with: the spike rule; the background (and whether a drifting one is offered); how
-regions are found. **Results** — the columns of the table under the plot, each explained.
+run starts with: the spike rule, and whether spikes are found on their own (⟳, on at first);
+the background, and which ways the step offers (none, mean outside the regions, mean of a
+stretch — not one that follows a drift, at first); how regions are found, and whether on their
+own (off at first). **Results** — the columns of the table under the plot, each explained.
 **Isotopes** — the Isotope list, half-lives, and a tick per isotope for **decay correction**
 (all off at first). **Methods** — region names by retention time, per HPLC method: a row per
 region (method, name, Rt from, Rt to); and the method's **conditions** for the report, a row per
@@ -219,8 +232,8 @@ carry them to another computer, **Reset to defaults** starts over.
 ## Sessions
 
 **Save…** writes the runs — their data, spikes (and those put back), background, regions with
-their names and notes, their names and legends — and the figure's settings to one `.spikeless`
-file, or a `.json` one (the same JSON text, for other tools). **Open…** or a drop opens either; if something is open, Spikeless asks before replacing it (Ctrl+Z brings it back). The
+their names and notes, their names and legends — and the figure's settings to one `.json`
+file (plain JSON, which other tools read too). **Open…** or a drop opens it; if something is open, Spikeless asks before replacing it (Ctrl+Z brings it back). The
 GINA files are not needed again. Session files from 2026.10.14 open too: each dataset becomes a
 run, its spikes are found again, the peaks of its last processed curve become regions.
 
@@ -267,7 +280,12 @@ it. Each is a Poisson count, whose variance is the count itself, so σ(N) = √(
 ¹⁷⁷Lu product of the example run, 109 778 ± 333 counts: 0.3 %. For a trace at 2.05 min, 92 ± 16:
 17 % — under the quantification limit, where σ falls to 10 % of N, hence its *< LOQ*. The true
 value lies within ± 1 σ about 2 times in 3, within ± 2 σ 19 times in 20; the % of total carries
-the same relative uncertainty (σ/N × its %). Two things to know: B is taken as if counted over
+the same relative uncertainty (σ/N × its %). It holds because a GINA export's value is the
+count of one interval, as is: its detectors count the events per interval and pass that count to
+GINA, and the example files bear it out — whole numbers only, and a background whose variance
+is its mean (7.2 cps, variance 8.0; 6.5 cps, 6.6), as Poisson counts have; a sliding average or a
+factor would leave fractions and shrink the variance. GINA's offset, factor and graphic smoothing
+(its manual) should then be off for the exports read. Two things to know: B is taken as if counted over
 the region alone, though it is the mean of far more points — so ± errs on the safe side; and
 counting is all it holds — not the injection, the sampling, the detector's efficiency. It is the
 floor of the uncertainty, not all of it.
@@ -401,6 +419,7 @@ show and document what was excluded, and why.
 | Ctrl+V | paste columns, or a GINA export, as runs |
 | Del | remove the selected regions (plot, results, Regions list), or run (run list) |
 | F2 · Esc | rename the selected run or region · select none (run list); cancel drawing, clear the reading line (plot) |
+| ← → · right click | the reading line a point along (or the last-dragged edge) · cancel drawing, or take the line away |
 | ← → | move the last-touched region (or stretch) edge one point |
 | click · drag · right-drag · double-click | reading line · zoom to the span · pan · whole run (Options › Chromatogram) |
 | wheel · Ctrl+wheel | zoom the time (and the height, if unlocked) · zoom the height |

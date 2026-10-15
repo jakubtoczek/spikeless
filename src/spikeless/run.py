@@ -68,7 +68,7 @@ class Run:
     spike_params: SpikeParams = field(default_factory=SpikeParams)
     spikes: np.ndarray | None = None     # flagged by the rule (bool per point)
     kept: list = field(default_factory=list)   # flagged points put back by the user (indices)
-    bg_mode: str = "auto"         # "auto" mean outside the regions | "stretch" | "drift"
+    bg_mode: str = "auto"         # "auto" mean outside the regions | "stretch" | "drift" | "none"
     bg_stretch: list | None = None       # [from, to] min, for "stretch"
     bg_drift: str = "snip"        # "snip" | "arpls", for "drift"
     bg_n: int = 40                # SNIP half-width, points
@@ -122,6 +122,8 @@ class Run:
     def background(self, y: np.ndarray | None = None) -> tuple[np.ndarray, str]:
         """(background per point, cps; how it was obtained, in words)."""
         y = self.trace() if y is None else y
+        if self.bg_mode == "none":
+            return np.zeros(len(y)), "none: the counts as recorded"
         if self.bg_mode == "drift":
             b = estimate_baseline(y, self.bg_drift, self.bg_n)
             how = ("SNIP, half-width %d points" % self.bg_n if self.bg_drift == "snip"
