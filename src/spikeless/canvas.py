@@ -30,6 +30,7 @@ from .plotting import curves, draw, fit_y, place_legend, y_span, y_title
 
 _EDGE_PX = 6          # how close to an edge (pixels) the mouse grabs it
 _CLICK_PX = 4         # a press that moves less than this is a click
+_MARGINS = (74, 44, 14, 10)   # left, bottom, right, top, pixels: the labels' room
 _RUBBER = 0.35        # past the data, a drag moves the view this much
 _TEXT, _FIG = "#e0e0e0", "#2b2b2b"
 
@@ -57,7 +58,7 @@ class ChromCanvas(FigureCanvasQTAgg):
     anim_ms = 180                                  # a spring back, a zoom (0: at once)
 
     def __init__(self):
-        self.fig = Figure(facecolor=_FIG, layout="constrained")
+        self.fig = Figure(facecolor=_FIG)
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot()
         self.setFocusPolicy(Qt.ClickFocus)
@@ -81,6 +82,14 @@ class ChromCanvas(FigureCanvasQTAgg):
                        ("button_release_event", self._on_release),
                        ("scroll_event", self._on_scroll)):
             self.mpl_connect(ev, fn)
+
+    def resizeEvent(self, e):                       # noqa: N802 - Qt's name
+        # margins fixed in pixels: the plot's edges stay put, whatever the tick labels say
+        # (a layout fitted to them moved the left edge as a zoom changed their width)
+        w, h = max(e.size().width(), 150), max(e.size().height(), 100)
+        self.fig.subplots_adjust(left=_MARGINS[0] / w, bottom=_MARGINS[1] / h,
+                                 right=1 - _MARGINS[2] / w, top=1 - _MARGINS[3] / h)
+        super().resizeEvent(e)
 
     # ---------------- drawing
     def show(self, runs, opts, results, sel, sel_region, view):
@@ -109,7 +118,8 @@ class ChromCanvas(FigureCanvasQTAgg):
         draw(ax, runs, opts, results, raw=view["raw"], spikes=view["spikes"],
              background=view["background"], only=sel, sel=sel, sel_region=sel_region,
              edges=True)
-        if sel is not None and sel.shown and sel.bg_mode == "stretch" and sel.bg_stretch:
+        if view.get("stretch", True) and sel is not None and sel.shown \
+                and sel.bg_mode == "stretch" and sel.bg_stretch:
             a, b = sorted(sel.bg_stretch)
             ax.axvspan(a, b, color="#9090a0", alpha=0.18, lw=0, zorder=0.5)
             for t in (a, b):
@@ -125,7 +135,7 @@ class ChromCanvas(FigureCanvasQTAgg):
         ax.set_xlabel("Time (min)", color=_TEXT, fontsize=9)
         ax.set_ylabel(y_title(opts), color=_TEXT, fontsize=9)
         self._apply(*self._view())
-        place_legend(ax, opts, 8)
+        place_legend(ax, opts, 8, inside=True)
         self._reading()
         self.draw_idle()
 
@@ -269,7 +279,7 @@ class ChromCanvas(FigureCanvasQTAgg):
         if opts.y_mode == "pct_max":
             lines.append(f"{v[i]:.1f} % of max ({net:.0f} cps net)")
         elif opts.y_mode == "pct_total":
-            lines.append(f"{v[i]:.2f} % of total per min ({net:.0f} cps net)")
+            lines.append(f"{v[i]:.3f} % of total, this point ({net:.0f} cps net)")
         else:
             lines.append(f"{y[i]:.0f} cps: {net:.0f} cps net, {b[i]:.1f} cps background "
                          "excluded")
@@ -280,7 +290,7 @@ class ChromCanvas(FigureCanvasQTAgg):
         ax.plot([t], [v[i]], "o", ms=4, color="#3d6ea5", zorder=8, label="_reading")
         x0, x1 = ax.get_xlim()
         right = t > (x0 + x1) / 2
-        ax.annotate("\n".join(lines), (t, 0.99),
+        ax.annotate("\n".join(lines), (t, 0.99), annotation_clip=True,
                     xycoords=blended_transform_factory(ax.transData, ax.transAxes),
                     xytext=(-5 if right else 5, 0), textcoords="offset points",
                     ha="right" if right else "left", va="top", multialignment="left",

@@ -69,7 +69,7 @@ assert len(w.runs) == 1 and run.name == "Smoke Run", run.name
 assert run.spike_list() == spike_at, run.spike_list()
 assert "3 spike(s) excluded" in w.log_view.toPlainText()
 assert len(run.sha256) == 64
-assert w.spike_list.count() == 3 and w.step["spikes"]._btn.text() == "② Spikes — 3 excluded"
+assert w.spike_list.count() == 3 and w.step["spikes"]._btn.text() == "Spikes · 3 excluded"
 
 # ---- ④ Find peaks: both peaks, % of total with the outside row adding to 100 ----
 w._find()
@@ -148,8 +148,12 @@ run = w.sel
 # a region's line under it, its note, its name typed in the table
 w.sel_region = 1
 w.refresh()
-w.r_under.setCurrentIndex(1)
-w.r_under.activated.emit(1)
+w.region_panel()                                            # Edit…: the region on its own
+rp = w.region_win
+rp.refresh()
+assert rp.form.isEnabled() and "peak 2" in rp.head.text(), rp.head.text()
+rp.under.setCurrentIndex(1)
+rp.under.activated.emit(1)
 assert run.regions[1].under == "line"
 w._undo_step()
 run = w.sel
@@ -206,7 +210,8 @@ unc = next(results_item.child(i) for i in range(results_item.childCount())
            if results_item.child(i).text(0) == "± counts")
 unc.setCheckState(0, Qt.Unchecked)
 assert "± counts" not in report.html(w)
-assert "± counts" not in [w.table.horizontalHeaderItem(c).text() for c in range(w.table.columnCount())]
+assert "± counts" in [w.table.horizontalHeaderItem(c).text()        # the table: its own
+                      for c in range(w.table.columnCount())]
 assert json.loads(options.OPTIONS_FILE.read_text("utf-8"))["report_cols"]["unc"] is False
 unc.setCheckState(0, Qt.Checked)
 
@@ -215,7 +220,7 @@ fig = figure.figure(w)
 assert all(abs(a - b) < 0.5 for a, b in zip(fig.plot_area_mm, (80, 40))), fig.plot_area_mm
 w._figure()
 fw = w.figure_win
-fw._preset(3)                                               # Slide
+fw._preset(4)                                               # Slide
 assert w.plot_opts.plot_w_mm == 160 and w.plot_opts.x.tick_font_size == 14
 assert abs(figure.figure(w).plot_area_mm[0] - 160) < 0.5
 figure.copy_figure(w)
@@ -223,7 +228,7 @@ assert not QApplication.clipboard().image().isNull(), "nothing on the clipboard"
 texts = [t.get_text() for t in figure.figure(w).axes[0].texts]
 assert any("product" in s for s in texts), texts            # named regions labelled
 next(c for c in fw.side.widget().findChildren(QCheckBox)
-     if c.text() == "Regions (shaded)").setChecked(False)
+     if c.text() == "Shaded").setChecked(False)
 assert not figure.figure(w).axes[0].collections, "regions still shaded"
 w.plot_opts.show_regions = True
 
@@ -365,7 +370,8 @@ o.legend_loc = "auto"
 # ---- selecting none: the steps wait; a click below the runs does it ----
 w._select(None)
 assert w.sel is None and w.step["spikes"]._btn.text().endswith("select a run")
-assert "Select a run" in w.summary.text() and not w.step["peaks"]._content.isEnabled()
+assert "Select a run" in w.summary.text() and not w.body["peaks"].isEnabled()
+assert w.ticks["spikes"].isEnabled()                        # its Show ticks stay at hand
 w._run_picked(0)
 assert w.sel is w.runs[0]
 vp = w.run_list.viewport()
@@ -377,7 +383,9 @@ w._run_picked(0)
 w.y_mode.setCurrentIndex(2)
 w.y_mode.activated.emit(2)
 assert w.plot_opts.y_mode == "pct_total"
-assert figure.figure(w).axes[0].get_ylabel() == "% of total per min"
+assert figure.figure(w).axes[0].get_ylabel() == "% of total"
+x_, v_ = w.canvas._curves[0]
+assert abs(v_.sum() - 100) < 1, v_.sum()                   # each point's share: 100 % in all
 w.y_mode.setCurrentIndex(0)
 w.y_mode.activated.emit(0)
 
@@ -447,6 +455,41 @@ assert json.loads(js.read_text("utf-8"))["app"] == "Spikeless"
 n = len(w.runs)
 w._load_paths([str(js)])
 assert len(w.runs) == n and js.name in w.windowTitle()
+
+# ---- what the panels show; the regions list; the results' own columns; Copy the screen ----
+assert not w.run_rows.isRowVisible(w.f_iso) and not w.run_rows.isRowVisible(w.f_method)
+assert w.run_rows.isRowVisible(w.f_mol)                     # no isotope, no method at first
+options.PREFS["run_fields"]["isotope"] = True
+w.refresh()
+assert w.run_rows.isRowVisible(w.f_iso)
+options.PREFS["run_fields"]["isotope"] = False
+if not w.sel.regions:
+    w._find()
+w.reg_list.item(0, 0).setText("renamed in the list")
+assert w.sel.regions[0].name == "renamed in the list"
+assert w.results[w.sel.id].rows[0].name == "renamed in the list"
+options.PREFS["table_cols"]["height"] = True
+w.refresh()
+assert "Height (cps)" in [w.table.horizontalHeaderItem(c).text()
+                          for c in range(w.table.columnCount())]
+assert "Height (cps)" not in report.html(w)                 # the report keeps its own
+options.PREFS["table_cols"]["height"] = False
+w.view["stretch"] = False                                   # Show › Stretch off: not shaded
+w.sel.bg_mode, w.sel.bg_stretch = "stretch", [0.5, 1.5]
+w.refresh()
+assert not any("stretch" in t.get_text() for t in w.canvas.ax.texts)
+w.view["stretch"] = True
+w.refresh()
+assert any("stretch" in t.get_text() for t in w.canvas.ax.texts)
+QApplication.clipboard().clear()
+w._copy_screen()
+img = QApplication.clipboard().image()
+assert not img.isNull() and img.width() == w.canvas.width(), img.size()
+x0 = w.canvas.ax.get_position().x0                          # the plot's left edge stays put
+w.canvas.focus(7.5, 8.5)                                    # as the height (its labels) changes
+w.canvas.redraw()
+assert w.canvas.ax.get_position().x0 == x0
+w.canvas.reset_view()
 
 # ---- the example runs: reference values (devlog) ----
 data = Path(__file__).resolve().parents[2] / "data"

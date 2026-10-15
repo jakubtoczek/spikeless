@@ -1,4 +1,5 @@
-"""Spikeless - two editing windows: the runs' names, and the selected run's regions in full.
+"""Spikeless - editing windows: the runs' names, the selected run's regions in full, and the
+selected region on its own.
 
 Run names (▤): a run keeps the name it came with — its file's, "Clipboard 2" — in the first
 column, hidden unless asked; Name is what the app and the report call it; Legend what the
@@ -7,6 +8,9 @@ white: set by hand. Clearing a cell makes it follow again. Every edit is one und
 
 Regions (⤢): every measure of each region, whatever the report's columns, and how it is drawn
 — its colour (click the swatch), whether the figure labels it — and its note.
+
+Region (Edit… on a region): its name, what its net counts are above, its note, its colour, its
+label on the figure; it follows the region selected.
 """
 
 from __future__ import annotations
@@ -14,11 +18,11 @@ from __future__ import annotations
 from PySide6.QtCore import QMimeData, Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QPushButton,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QMainWindow, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .options import pick_color
+from .options import ColorButton, guard_fields, pick_color
 from .report import COLUMNS, HELP
 
 GREY, WHITE = QColor("#8d8d8d"), QColor("#e0e0e0")
@@ -48,15 +52,16 @@ class _Window(QMainWindow):
     """Shown on demand, kept in step with the main window (refresh), never rebuilt from
     inside one of its own table's signals."""
 
-    def __init__(self, main, title, size):
+    def __init__(self, main, title, size, table=True):
         super().__init__(main)
         self.main = main
         self.setWindowTitle(title)
         self.resize(*size)
-        self.t = QTableWidget()
-        self.t.verticalHeader().setVisible(False)
-        self.t.itemChanged.connect(lambda it: self._filling or self._edited(it))
         self._filling = False
+        if table:
+            self.t = QTableWidget()
+            self.t.verticalHeader().setVisible(False)
+            self.t.itemChanged.connect(lambda it: self._filling or self._edited(it))
 
     def open(self):
         self.show()
@@ -111,6 +116,69 @@ class NamesWindow(_Window):
         self.refresh_later()             # back to grey, if it follows again
 
 
+class RegionPanel(_Window):
+    """The selected region on its own (it follows the selection)."""
+
+    def __init__(self, main):
+        super().__init__(main, "Spikeless — region", (440, 250), table=False)
+        self.head = QLabel()
+        self.head.setWordWrap(True)
+        self.name = QLineEdit()
+        self.name.editingFinished.connect(lambda: self._set("name", self.name.text().strip()))
+        self.under = QComboBox()
+        self.under.addItems(["the background", "a straight line between its ends"])
+        self.under.setToolTip("What its net counts are above: the run's background, or — for "
+                              "a peak on another's tail — a line from its start to its end")
+        self.under.activated.connect(lambda i: self._set("under", ("background", "line")[i]))
+        self.note = QLineEdit()
+        self.note.setPlaceholderText("why it was drawn or moved, if it matters")
+        self.note.editingFinished.connect(lambda: self._set("note", self.note.text()))
+        self.color = ColorButton("#808080", lambda: self._set("color", self.color.color))
+        self.label = QCheckBox("Labelled on the figure")
+        self.label.toggled.connect(lambda on: self._set("label", on))
+        self.form = QWidget()
+        f = QFormLayout(self.form)
+        f.setContentsMargins(0, 0, 0, 0)
+        for text, wdg in (("Name", self.name), ("Under it", self.under), ("Note", self.note),
+                          ("Colour", self.color)):
+            f.addRow(text, wdg)
+        f.addRow(self.label)
+        root = QWidget()
+        v = QVBoxLayout(root)
+        v.addWidget(self.head)
+        v.addWidget(self.form)
+        v.addStretch(1)
+        guard_fields(root)
+        self.setCentralWidget(root)
+
+    def _set(self, key, val):
+        if not self._filling:
+            self.main.set_region(self.main.sel_region, key, val)
+
+    def refresh(self):
+        if not self.isVisible():
+            return
+        self._filling = True
+        run, k = self.main.sel, self.main.sel_region
+        ok = run is not None and 0 <= k < len(run.regions)
+        self.form.setEnabled(ok)
+        if ok:
+            r, row = run.regions[k], self.main.results[run.id].rows[k]
+            self.head.setText(f"<b>{row.name}</b> — {row.start:.2f}–{row.end:.2f} min · "
+                              f"{run.name}")
+            self.name.setText(r.name)
+            self.name.setPlaceholderText(row.name)
+            self.under.setCurrentIndex(1 if r.under == "line" else 0)
+            self.note.setText(r.note)
+            self.color.set_color(r.color or run.color)
+            self.label.setChecked(r.label)
+        else:
+            self.head.setText("Select a region: in Regions, on the plot or in the results.")
+            for wdg in (self.name, self.note):
+                wdg.setText("")
+        self._filling = False
+
+
 class RegionsWindow(_Window):
     STATS = [c for c in COLUMNS if c[0] != "name"]
 
@@ -160,7 +228,7 @@ class RegionsWindow(_Window):
         run = self.main.sel
         regs = run.regions if run is not None else []
         self.what.setText(f"<b>{run.name}</b> — {len(regs)} region(s)" if run is not None
-                          else "Select a run (① Runs).")
+                          else "Select a run (Runs).")
         rows = self.main.results[run.id].rows if run is not None else []
         self.t.setRowCount(len(regs))
         last = self.t.columnCount() - 1

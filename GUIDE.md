@@ -10,15 +10,16 @@ see the [README](README.md).
    whole GINA export, Spikeless's own included — and press **Ctrl+V**; the log says what it
    assumed about units and layout.
 2. **Spikes** are found and excluded at once: red marks on the plot, a line each in
-   **② Spikes** (time, height as recorded → as bridged). Click one to see it; untick one that
+   **Spikes** (time, height as recorded → as bridged). Click one to see it; untick one that
    is not a spike.
-3. **Background** — nothing to do for a radio-detector: **③** shows it (≈ 7 cps here), dashed
+3. **Background** — nothing to do for a radio-detector: its step shows it (≈ 7 cps here), dashed
    on the plot.
-4. **Regions.** **Find regions** (in **④**), or **Draw region** and drag across a peak on the
+4. **Regions.** **Find regions**, or **Draw region** and drag across a peak on the
    plot. Adjust an edge by dragging it. The results table under the plot gives each region's
    net counts, ± and **% of total** — the radiochemical purity.
 5. **Name them** once for all runs of an HPLC method: Options › Methods (e.g. *free ¹⁷⁷Lu*
-   2.3–2.8 min, *product* 7.5–8.5 min), then pick the method in **①**. Or type a name in the
+   2.3–2.8 min, *product* 7.5–8.5 min), then pick the run's method in **Runs** (show its Method
+   in Options › Runs). Or type a name in the
    table.
 6. **Report** (toolbar): tick sections and columns, check the preview, **Save report…** as PDF,
    `.odt`, Excel, Markdown or web page.
@@ -30,8 +31,10 @@ writes decimals with a dot, whatever Windows' region says.
 ## The window
 
 The **plot** in the middle, the **Results** under it (the **Log** in the tab beside), the
-**steps** on the right. The steps act on the **selected run** (① Runs); with none selected
-they say *select a run* and wait.
+**steps** on the right — Runs, Spikes, Background, Regions. The steps act on the **selected
+run**; with none selected they say *select a run* and wait. Each step's **Show** ticks say what
+it draws on the plot (for the selected run, or every run when none is); hover anything for what
+it does.
 
 ### The plot
 
@@ -45,84 +48,87 @@ What the buttons do is set in Options › Chromatogram; by default:
   **Ctrl+wheel**: zoom the height (to see a small peak beside a large one).
   **Double-click**: the whole run.
 - The view is **elastic**: dragged past the start or the end of the run, or zoomed out past
-  all of it, it springs back.
+  all of it, it springs back. Its edges stay put as the zoom changes the labels.
 - On an **edge** of the selected run's regions, or of its background stretch, the cursor turns
   ↔: drag it (see [Drawing regions](#drawing-regions)).
-- Ticks above it: **Trace as recorded** (before spikes were excluded; its colour, width and line
-  in Options › Chromatogram), **Spikes** (red line from the bridged point to the spike's height;
-  a ring on a spike put back), **Background** (dashed), **Stack** (runs one above the other,
-  background subtracted) — for the selected run, or every run when none is. **Y**: the
+- Above it: **Stack** (runs one above the other, background subtracted) and **Y**: the
   **count rate**; or each run, its background subtracted, as **% of max** (of its highest
-  point) or **% of total** (of all its net counts, per min: the area of a peak on the plot is
-  then its % of total, whatever the sampling). Stack and Y apply to the figure too.
-- **⧉ Copy · ⭳ Export · ⚙ Figure…**: the figure, see [Figure](#figure).
+  point) or **% of total** (each point's counts as % of all the run's net counts: the points add
+  up to 100 %, so a peak's points add up to its % of total). Both apply to the figure too.
+- **⧉ Copy** (or Ctrl+C): the plot as it is on screen, to the clipboard. The figure for a paper
+  is the Figure window's.
 
 ### Results
 
-A row per region of the selected run, then **Outside the regions** and **Total**. Columns are
-chosen in the Report window (the report shows the same): region, start, end, Rt, **net
-counts**, **±**, **% of total**, % of regions, height, w½, symmetry, resolution, S/N, flags.
-Hover a header for its meaning. Click a row to select the region; double-click its name to
-rename it; **Del** removes the selected rows (Ctrl+Z brings them back). **⧉** (or Ctrl+C)
-copies the table, to paste into Word or Excel. **⤢** opens every measure of each region,
-whatever the columns, with its **colour** (click the swatch), whether the figure **labels**
-it, and its **note**.
+A row per region of the selected run, then **Outside the regions** and **Total**. The columns
+are chosen in Options › Results (the report picks its own): region, start, end, Rt, **net
+counts**, **±**, **% of total**, % of regions, height, w½, symmetry, resolution, S/N, flags —
+each explained there, and when hovering its header. Click a row to select the region;
+**right-click**: rename, edit, remove; **Del** removes the selected rows (Ctrl+Z brings them
+back). **⧉** (or Ctrl+C) copies the table, to paste into Word or Excel. **⤢** opens every
+measure of each region, whatever the columns, with its **colour** (click the swatch), whether
+the figure **labels** it, and its **note**.
 
 The line above the table says how the numbers were made: background and how it was taken, the
 run's total net counts, spikes excluded, decay correction.
 
-### ① Runs
+### Runs
 
 The runs loaded: **tick** to show, **click** to work on one, **click it again** (or F2) to
 rename it, **double-click**: the plot shows it whole (the height stays that of every run).
 **Right-click**: rename, export the **spikeless trace** (spikes excluded, decay-corrected if
 so) or the trace **as recorded**, as a GINA-style `.txt`, remove. **Del** removes it (Ctrl+Z
 brings it back). A click below the runs, or elsewhere on the panel away from the steps, or
-**Esc**, selects none. For the selected run: **Isotope** (its half-life and whether runs of it
-are decay-corrected: Options › Isotopes), **Method** (names the regions and gives the report
-its conditions: Options › Methods), **Molecule**, **Conditions** (one per line), **Colour**.
-Below: its original name if renamed, its file, run date, points and SHA-256.
+**Esc**, selects none. For the selected run, as Options › Runs chooses: **Molecule**,
+**Conditions** (one per line), **Colour**, and its details (original name if renamed, file,
+run date, points, SHA-256); **Isotope** (its half-life and decay correction: Options ›
+Isotopes) and **Method** (names the regions and gives the report its conditions: Options ›
+Methods) are hidden at first — a hidden field keeps its value.
 
-**Run names** (the green **▤** beside ① Runs, or Figure › Legend › Labels): a run keeps the
-name it came with — its file's, *Clipboard 2* — and has two of its own: its **name**, what the
-app and the report call it, and its **legend**, what the figure says. Grey: as it follows (the
-name the original, the legend the name); white: set by hand. Clear a cell to make it follow
-again. The original column is hidden unless asked for; the report gives the original beside a
-renamed run.
+**Run names** (the green **▤** beside Runs, or Figure › Legend › Labels): a run keeps the name
+it came with — its file's, *Clipboard 2* — and has two of its own: its **name**, what the app
+and the report call it, and its **legend**, what the figure says. Grey: as it follows (the name
+the original, the legend the name); white: set by hand. Clear a cell to make it follow again.
+The original column is hidden unless asked for; the report gives the original beside a renamed
+run.
 
-### ② Spikes
+### Spikes
 
-Each flagged point: time, height as recorded → as bridged, and the region it falls in. **Click**
-one: the plot zooms on it, its reading line on it. Ticked = excluded; **untick to keep it**
-(the point comes back, everywhere). **Threshold** (default 5 σ): lower finds more, higher fewer
-— the list and the plot follow as you slide. **More**: the moving-median window and the widest
-run of points that can be a spike. A new run starts with Options › Spikes.
+**Show**: the spikes (red, from the bridged point to their height; a ring on one put back), the
+trace as recorded. Each flagged point: time, height as recorded → as bridged, and the region it
+falls in. **Click** one: the plot zooms on it, its reading line on it. Ticked = excluded;
+**untick to keep it** (the point comes back, everywhere). **Threshold** (default 5 σ): lower
+finds more, higher fewer — the list and the plot follow as you slide. **More**: the
+moving-median window and the widest run of points that can be a spike. A new run starts with
+Options › Spikes.
 
-### ③ Background
+### Background
 
-What lies under the peaks: the detector's background count rate.
+What lies under the peaks: the detector's background count rate (in the step's title).
+**Show**: its **line** (dashed) and its **stretch** (shaded, for a mean of a stretch).
 
 - **Mean outside the regions** (default): the mean of every point no region holds, leaving out
   any point 4 σ above it (a peak no region holds yet).
-- **Mean of a stretch**: a peak-free stretch, shaded on the plot: drag its edges, type them
+- **Mean of a stretch**: a peak-free stretch: drag its edges on the plot, type them
   (**from … to**), or **Draw stretch** and drag across one (or click its two edges).
 - **Follows a drift** (SNIP or arPLS): for a trace whose background drifts. A radio-detector's
   is flat, so it is offered only when ticked in Options › Background.
 
 A new run starts with Options › Background.
 
-### ④ Regions
+### Regions
 
 A region is a span integrated as one: a peak, or a peak's shoulder. **Find regions** proposes
 them for the peaks no region holds; **Threshold** (default 5 σ) and **More** (apexes at least
 10 s apart, on a 5-point moving mean, feet at 2 σ) say how — move them and the regions found
 follow, as the spikes do: a region found and left untouched is found again, one you named,
-moved, coloured or noted stays. A new run starts with Options › Regions. **Draw region** (see
-below). The **list**: a line per region (name, Rt, %); click one to select it, double-click:
-the plot shows it, Del removes the selected ones. **Selected region**: its name, what its net
-counts are above (**the background**, or **a straight line between its ends** — for a peak on
-another's tail), a note (why it was drawn or moved, if it matters), its colour, whether the
-figure labels it.
+moved, coloured or noted stays. A new run starts with Options › Regions. **Draw region**: see
+below. The **list**: name, Rt, % of total. Click one to select it; double-click: the plot shows
+it; **right-click**: **Rename** (or F2, or click it again), **Edit…**, **Remove** (or Del, the
+selected ones). **Edit…** opens the region on its own, following the selection: its name, what
+its net counts are above (**the background**, or **a straight line between its ends** — for a
+peak on another's tail), a note (why it was drawn or moved, if it matters), its colour, whether
+the figure labels it.
 
 ### Drawing regions
 
@@ -134,30 +140,44 @@ figure labels it.
 - **Adjust**: over an edge the cursor turns ↔; drag it. **← →** move the last-touched edge one
   point. Two regions that touch share their edge (a perpendicular drop at the valley): moving it
   moves both. Regions never overlap: a drag across a neighbour stops at its edge.
-- **Select** a region with a click (or its row, or its line in ④); **Del** removes it.
+- **Select** a region with a click (or its row, or its line in Regions); **Del** removes it.
 - How each was placed is kept and reported: *auto* (Find regions), *drawn*, *moved* (found,
   then adjusted); *copied* in a session from before 2026.10.15.
 
 ## Figure
 
-**Figure…** (or ⚙ above the plot) opens what Copy and Export make. Left: a **preset** — an
-**article panel** (85 mm wide in all: a journal's single column, or half of a two-column
-figure, 7 pt), the **full two-column width** (175 mm, 7 pt), a **slide** (plot 160 × 90 mm,
-14 pt); what it **shows** (the background line, excluded spikes, the trace as recorded, a
-legend); its **regions** (shaded, their labels — name and/or %, their Rt —, label size,
-opacity, and each region's colour, label and note: **edit ⤢**); its **size** in mm, margins;
-the **legend**; the axes (title, limits, ticks, fonts, a major and a minor grid of their own,
-minor intervals per major). Right: the figure as it will be written (wheel to zoom; the
-checkerboard is transparency). **Copy** puts it on the clipboard at its real size (a PNG carries
-its resolution, so it pastes into PowerPoint or Word at its size in mm); **Export…** writes PNG
-(600 dpi) or SVG. Its settings are saved with the session.
+**Figure…** (toolbar) opens what its Copy and Export make. Left, each section folded until
+opened (the ones you open stay open):
+
+- a **preset** — journals' single columns are 80–90 mm wide, their double columns 170–190 mm:
+  **Panel, 80 mm** (fits any single column, and two side by side fit any double column),
+  **Panel, ⅓ of a 2-column figure, 55 mm** (three side by side), **the full 2-column width,
+  170 mm**, all 7 pt; **Slide** (plot 160 × 90 mm, 14 pt). A panel's width is the whole of it,
+  labels included;
+- **Size**: the plot area in mm; the whole figure's width and height (Auto: the plot area plus
+  its labels; fixed, the plot area is what is left);
+- **Text**: one font for every text of the figure;
+- **Traces**: line width, the background line, excluded spikes, the trace as recorded;
+- **Regions**: shaded, their labels (name and/or %, their Rt), label size, opacity, and each
+  region's colour, label and note (**edit ⤢**);
+- **Legend**: shown, where, an offset, its size, what it calls each run (**edit ▤**);
+- **Backgrounds**: of the plot area and around it, and their opacity;
+- **X axis**, **Y axis**: the **title** (text, size, gap to the labels); the **range** (from,
+  to) and the axis line; the **major ticks** (every, first, last, in / out / across, length,
+  thickness, labels size and gap); the **minor ticks** (shown, how many per major interval,
+  length, thickness); the **grid** at the major and at the minor ticks (line, colour, width).
+
+Right: the figure as it will be written (wheel to zoom; the checkerboard is transparency).
+**Copy** puts it on the clipboard at its real size (a PNG carries its resolution, so it pastes
+into PowerPoint or Word at its size in mm); **Export…** writes PNG (600 dpi) or SVG. Its
+settings are saved with the session.
 
 **Legend**: **Auto** puts it inside, upper right or left, where it covers no trace — else
 outside, to the right. Or pick one: inside (upper left, centre or right; centre right; lower
 right, centre or left) or outside (above, left to right; right, top to bottom; below), then move
 it by an offset in mm. Outside the plot the figure grows to hold it, the plot area keeping its
-size (with a total size fixed, the plot area shrinks instead). **Labels: edit ▤** — what it
-calls each run (Run names).
+size (with the whole size fixed, the plot area shrinks instead). On screen the legend stays
+inside.
 
 Axes: the time starts at 0; the count rate a little below 0 (by default 3 % of its top,
 Options › Figure), so the baseline clears the x axis. Labels: a region with a name of its own
@@ -181,19 +201,20 @@ underneath). Right: the report as it will be written. **Save report…** (Ctrl+S
 
 ## Options
 
-**Options** opens its own window, topics on the left. **Chromatogram** — what a left drag, a
+**⚙ Options** opens its own window, topics on the left. **Chromatogram** — what a left drag, a
 right drag and a left click do on the plot, whether the wheel zooms the height too, and the
 style of the trace as recorded. **Figure** — how far below 0 the count rate starts, PNG and copy
-resolution, copy as PNG or SVG, what shows behind the preview. **Spikes**, **Background**,
-**Regions** — what a new run starts with: the spike rule; the background (and whether a
-drifting one is offered); how regions are found. **Isotopes** — the Isotope list, half-lives,
-and a tick per isotope for **decay correction** (all off at first). **Methods** — region names
-by retention time, per HPLC method: a row per region (method, name, Rt from, Rt to); and the
-method's **conditions** for the report, a row per field (**＋ The usual fields** adds the column,
-mobile phases, gradient, flow rate, temperature, injection volume, detectors to fill in).
-**Log** — times in its copy. Every change is saved at once, to `spikeless_options.json` beside
-`Spikeless.bat`; **Export… / Import…** carry them to another computer, **Reset to defaults**
-starts over.
+resolution, copy as PNG or SVG, what shows behind the preview. **Runs** — what the Runs panel
+shows (isotope and method hidden at first). **Spikes**, **Background**, **Regions** — what a new
+run starts with: the spike rule; the background (and whether a drifting one is offered); how
+regions are found. **Results** — the columns of the table under the plot, each explained.
+**Isotopes** — the Isotope list, half-lives, and a tick per isotope for **decay correction**
+(all off at first). **Methods** — region names by retention time, per HPLC method: a row per
+region (method, name, Rt from, Rt to); and the method's **conditions** for the report, a row per
+field (**＋ The usual fields** adds the column, mobile phases, gradient, flow rate,
+temperature, injection volume, detectors to fill in). **Log** — times in its copy. Every change
+is saved at once, to `spikeless_options.json` beside `Spikeless.bat`; **Export… / Import…**
+carry them to another computer, **Reset to defaults** starts over.
 
 ## Sessions
 
@@ -235,11 +256,26 @@ is 0.1 % for ¹⁷⁷Lu, 3 % for ⁹⁹ᵐTc, 17 % for ⁶⁸Ga.
 
 A region's **net counts** are the counts of the trace above what lies under it — the
 background, or a straight line between its ends — integrated by trapezoids (count rate × time).
-**±** is 1 σ of counting statistics, √(gross + background counts). **% of total** is of all the
-net counts of the run (the trace minus the background, over the whole run): the radiochemical
-purity as Ph. Eur. defines it, relative to all the activity of the radionuclide. What no region
-holds is the **Outside the regions** row, so the regions and it add to 100 %. **% of regions**
-is of the regions only.
+**% of total** is of all the net counts of the run (the trace minus the background, over the
+whole run): the radiochemical purity as Ph. Eur. defines it, relative to all the activity of the
+radionuclide. What no region holds is the **Outside the regions** row, so the regions and it add
+to 100 %. **% of regions** is of the regions only.
+
+**±** is the 1 σ uncertainty of the net counts from counting statistics. The net counts are a
+difference, N = G − B: G every count recorded across the region, B the background's counts under
+it. Each is a Poisson count, whose variance is the count itself, so σ(N) = √(G + B). For the
+¹⁷⁷Lu product of the example run, 109 778 ± 333 counts: 0.3 %. For a trace at 2.05 min, 92 ± 16:
+17 % — under the quantification limit, where σ falls to 10 % of N, hence its *< LOQ*. The true
+value lies within ± 1 σ about 2 times in 3, within ± 2 σ 19 times in 20; the % of total carries
+the same relative uncertainty (σ/N × its %). Two things to know: B is taken as if counted over
+the region alone, though it is the mean of far more points — so ± errs on the safe side; and
+counting is all it holds — not the injection, the sampling, the detector's efficiency. It is the
+floor of the uncertainty, not all of it.
+
+**On the plot**, *% of total* shows each point's counts as % of the run's net counts: the points
+add up to 100 %, a peak's points to its % of total. No standard sets a normalized axis for a
+radio-chromatogram (Ph. Eur. 2.2.66 and 0125 define the purity as a ratio of areas, which the
+results give); a figure usually shows the count rate, or % of max to compare runs' shapes.
 
 ### Detection and quantification limits
 
@@ -254,7 +290,7 @@ Maxima of the trace's 5-point mean that stand 5 σ above their surroundings, σ 
 of that mean at the background count rate; at least 10 s apart. Each becomes a region from its
 feet (where the 5-point mean falls back within 2 σ of the background) or the valley it shares
 with a neighbour; it is kept if its net counts exceed L_D. (Those numbers are the defaults:
-④ Regions › Threshold and More, Options › Regions.) On the example runs: both peaks of
+Regions › Threshold and More, Options › Regions.) On the example runs: both peaks of
 the HOPO run; the ¹⁷⁷Lu product at 7.90 min (97.7 %), the impurity at 2.55 min (2.2 %) and two
 traces < LOQ of the Imathera2 run; nothing on a 120-min blank injection.
 
@@ -339,21 +375,21 @@ show and document what was excluded, and why.
 
 ## When something looks wrong
 
-- **A peak is not found.** Lower the threshold (④). Find regions keeps what passes the
+- **A peak is not found.** Lower the threshold (Regions). Find regions keeps what passes the
   detection limit; a peak below it is not distinguishable from background noise. Draw it by
   hand to see its counts (it will say n.d.).
-- **A flagged point is not a spike.** Untick it in ② Spikes; or raise the **Threshold**.
+- **A flagged point is not a spike.** Untick it in Spikes; or raise the **Threshold**.
 - **A region's edge is in the wrong place.** Drag it (Alt for exactly where you let go), or ← →.
 - **A small peak on another's tail.** Select it, set *Under it* to **a straight line between its
   ends**.
 - **% does not match what you expect.** % of total counts everything above background,
   including what lies outside your regions (its own row). % of regions is the other column.
 - **The background looks wrong.** Tick Background above the plot; pick a peak-free stretch
-  (③ Mean of a stretch).
+  (Background › Mean of a stretch).
 - **Can't see a small peak.** Zoom: drag across it, or the wheel over it; Ctrl+wheel for the
   height.
 - **The plot is lost.** Double-click it.
-- **The steps say *select a run*.** Click a run in ① Runs.
+- **The steps say *select a run*.** Click a run in Runs.
 
 ## Shortcuts
 
@@ -361,10 +397,10 @@ show and document what was excluded, and why.
 |---|---|
 | Ctrl+O · Ctrl+S | open · save the session (in the Report window: save the report) |
 | Ctrl+Z / Ctrl+Y | undo / redo every change to a run |
-| Ctrl+C | copy the figure, the results table (when it has focus), or the selected text |
+| Ctrl+C | copy the plot as on screen, the results table (when it has focus), or the selected text; in the Figure window, the figure |
 | Ctrl+V | paste columns, or a GINA export, as runs |
-| Del | remove the selected regions (plot, table, ④ list), or run (run list) |
-| F2 · Esc | rename the selected run · select none (run list); cancel drawing, clear the reading line (plot) |
+| Del | remove the selected regions (plot, results, Regions list), or run (run list) |
+| F2 · Esc | rename the selected run or region · select none (run list); cancel drawing, clear the reading line (plot) |
 | ← → | move the last-touched region (or stretch) edge one point |
 | click · drag · right-drag · double-click | reading line · zoom to the span · pan · whole run (Options › Chromatogram) |
 | wheel · Ctrl+wheel | zoom the time (and the height, if unlocked) · zoom the height |

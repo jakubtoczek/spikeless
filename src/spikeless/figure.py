@@ -1,9 +1,10 @@
 """Spikeless - the figure: what Copy and Export make, set and previewed in a window of its own.
 
-Settings on the left — a preset, what it shows, its regions, its size in mm, margins, the
-legend (inside or outside the plot: outside, the figure grows for it), the axes —
-the figure on the right exactly as it will be written (zoom with the wheel, double-click to
-fit; the checkerboard is transparency). The settings are the session's (saved with it).
+Settings on the left, each section folded until opened — a preset, the size in mm, the font,
+the traces, the regions, the legend (inside or outside the plot: outside, the figure grows for
+it), the backgrounds, each axis (its title, range, major and minor ticks, grid) — the figure on
+the right exactly as it will be written (zoom with the wheel, double-click to fit; the
+checkerboard is transparency). The settings are the session's (saved with it).
 """
 
 from __future__ import annotations
@@ -22,11 +23,12 @@ from .plotting import LABELS, LEGEND, PlotOptions, auto_extents, build_figure, l
 from .plotview import Background, ZoomableFigureView
 
 _LINESTYLES = ["solid", "dotted", "dashed", "dashdot"]
+_DIRS = {"out": "Out", "in": "In", "inout": "Across"}
 
 
 def _preset(o: PlotOptions, total_w, w, h, font, lw):
-    """total_w: the whole figure's width (a journal's column), the plot area what is left;
-    None: the plot area w × h."""
+    """total_w: the whole figure's width (a journal's column, or a share of it), the plot area
+    what is left; None: the plot area w × h."""
     o.plot_w_mm, o.plot_h_mm, o.total_w_mm, o.total_h_mm = w, h, total_w, None
     o.line_width_pt = lw
     o.legend_font_size = o.label_size = font
@@ -35,12 +37,14 @@ def _preset(o: PlotOptions, total_w, w, h, font, lw):
         ax.lw_pt = ax.tick_lw_pt = lw * 0.67
 
 
-# a journal's single column is 82–90 mm wide, its double column 170–180 mm: a panel of a
-# two-panel-wide figure is a single column's width
+# Journals' columns: single 80–90 mm (Springer 84, ACS 82.5, Elsevier 90), double 170–190 mm
+# (Springer 174, ACS 178, Elsevier 190). 80 mm fits any single column, and two side by side
+# fit any double one with a gap; 55 mm, three; 170 mm, any double column.
 # ponytail: one panel per figure; a multi-panel figure is for later
-PRESETS = {"Article panel — 1 column, or ½ of a 2-column figure: 85 mm wide, 7 pt":
-           (85, 70, 40, 7.0, 0.75),
-           "Article — the full 2-column width: 175 mm wide, 7 pt": (175, 160, 60, 7.0, 0.75),
+PRESETS = {"Panel — 1 column, or ½ of a 2-column figure: 80 mm wide, 7 pt":
+           (80, 65, 40, 7.0, 0.75),
+           "Panel — ⅓ of a 2-column figure: 55 mm wide, 7 pt": (55, 41, 32, 7.0, 0.6),
+           "Figure — the full 2-column width: 170 mm wide, 7 pt": (170, 155, 60, 7.0, 0.75),
            "Slide — plot 160 × 90 mm, 14 pt": (None, 160, 90, 14.0, 1.5)}
 
 
@@ -51,6 +55,12 @@ def _link(text, icon, color, fn, tip):
     lab.setToolTip(tip)
     lab.linkActivated.connect(lambda _: fn())
     return lab
+
+
+def _fonts():
+    """What matplotlib can write: the generic families, then every installed font."""
+    from matplotlib import font_manager
+    return ["sans-serif", "serif"] + sorted(set(font_manager.get_font_names()))
 
 
 # ---------------- making it
@@ -116,6 +126,7 @@ def export_figure(main, parent=None):
              f"{fig.get_figheight() * 25.4:.0f} mm" + (f", {dpi} dpi)" if is_png else ")"))
 
 
+
 # ---------------- the window
 class FigureWindow(QMainWindow):
     def __init__(self, main):
@@ -126,7 +137,8 @@ class FigureWindow(QMainWindow):
         self.preview = ZoomableFigureView()
         self.preview.set_background(Background(**PREFS["background"]))
         self.side = QScrollArea(widgetResizable=True)
-        self.side.setFixedWidth(360)
+        self.side.setFixedWidth(420)
+        self.side.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         foot = QHBoxLayout()
         for text, tip, fn in (("Copy", "The figure to the clipboard, at its size in mm (Ctrl+C)",
                                lambda: copy_figure(main)),
@@ -150,6 +162,8 @@ class FigureWindow(QMainWindow):
         self.setCentralWidget(root)
         self._fig = None
         self._loading = False
+        self._sections = []
+        self._open = set()               # the sections unfolded, kept when the panel is rebuilt
         self.load()
 
     def open(self):
@@ -180,6 +194,9 @@ class FigureWindow(QMainWindow):
     def load(self):
         """(Re)build the settings from main.plot_opts: at start, after a preset, and when a
         session brings its own."""
+        if self._sections:
+            self._open = {s._btn.text() for s in self._sections if s._btn.isChecked()}
+        self._sections = []
         self.d = {}
         self._loading = True
         o = self.main.plot_opts
@@ -189,114 +206,111 @@ class FigureWindow(QMainWindow):
         pre = QComboBox()
         pre.addItem("Preset…")
         pre.addItems(list(PRESETS))
+        pre.setToolTip("Sizes for a journal: 80 mm fits any single column, and two side by "
+                       "side any double column; 55 mm, three side by side")
         pre.activated.connect(self._preset)
         outer.addWidget(pre)
 
-        sh = QWidget()
-        fs = _cform(sh)
+        # size
+        sz, f = _section()
+        self.d["w_mm"] = _spin(10, 400, o.plot_w_mm, 1)
+        self.d["h_mm"] = _spin(10, 400, o.plot_h_mm, 1)
+        f.addRow("Plot area width (mm)", self.d["w_mm"])
+        f.addRow("Plot area height (mm)", self.d["h_mm"])
+        for key, val, plot in (("tot_w", o.total_w_mm, "w_mm"), ("tot_h", o.total_h_mm, "h_mm")):
+            spin = _spin(20, 800, val or getattr(o, f"plot_{plot[0]}_mm"), 1)
+            auto = QCheckBox("Auto")
+            auto.setToolTip("The plot area plus the room its labels (and a legend outside) "
+                            "take; fixed, the plot area is what is left")
+            auto.setChecked(val is None)
+            spin.setEnabled(val is not None)
+            self.d[plot].setEnabled(val is None)       # a fixed total owns the plot area
+            auto.toggled.connect(spin.setDisabled)
+            auto.toggled.connect(self.d[plot].setEnabled)
+            auto.toggled.connect(self._apply)
+            self.d[key], self.d[f"{key}_auto"] = spin, auto
+            f.addRow("Whole figure " + ("width" if key == "tot_w" else "height") + " (mm)",
+                     _pair(auto, spin))
+
+        # text
+        tx, f = _section()
+        font = QComboBox()
+        font.setEditable(True)
+        font.addItems(_fonts())
+        font.setCurrentText(o.font)
+        font.setToolTip("Every text of the figure: its axes, labels and legend")
+        font.activated.connect(self._apply)
+        font.lineEdit().editingFinished.connect(self._apply)
+        self.d["font"] = font
+        f.addRow("Font", font)
+
+        # traces
+        tr, f = _section()
+        self.d["lw"] = _spin(0.1, 5, o.line_width_pt, 0.1)
+        f.addRow("Line width (pt)", self.d["lw"])
         for key, label in (("show_background", "Background line"),
                            ("show_spikes", "Excluded spikes"),
-                           ("show_raw", "Trace as recorded (Options › Chromatogram)"),
-                           ("legend", "Legend (2 runs or more)")):
-            c = QCheckBox(label)
-            c.setChecked(getattr(o, key))
-            c.toggled.connect(lambda on, k=key: self._set(k, on))
-            fs.addRow(c)
-        self.d["lw"] = _spin(0.1, 5, o.line_width_pt, 0.1)
-        fs.addRow("Line width (pt)", self.d["lw"])
+                           ("show_raw", "Trace as recorded (its style: Options › Chromatogram)")):
+            f.addRow(self._tick(key, label, o))
 
-        rg = QWidget()
-        fr = _cform(rg)
-        for key, label in (("show_regions", "Regions (shaded)"),
-                           ("label_rt", "Their Rt in the labels")):
-            c = QCheckBox(label)
-            c.setChecked(getattr(o, key))
-            c.toggled.connect(lambda on, k=key: self._set(k, on))
-            fr.addRow(c)
+        # regions
+        rg, f = _section()
+        f.addRow(self._tick("show_regions", "Shaded", o))
         lab = QComboBox()
         lab.addItems(list(LABELS.values()))
         lab.setCurrentIndex(list(LABELS).index(o.region_labels))
         lab.activated.connect(lambda i: self._set("region_labels", list(LABELS)[i]))
-        fr.addRow("Labels", lab)
+        f.addRow("Labels", lab)
+        f.addRow(self._tick("label_rt", "Their Rt in the labels", o))
         self.d["label_size"] = _spin(4, 24, o.label_size, 0.5)
-        fr.addRow("Label size (pt)", self.d["label_size"])
+        f.addRow("Label size (pt)", self.d["label_size"])
         self.d["alpha"] = _spin(0, 1, o.region_alpha, 0.05)
-        fr.addRow("Opacity", self.d["alpha"])
-        fr.addRow("Each region", _link("edit", "⤢", "#7fb2e5", self.main.regions_window,
+        f.addRow("Opacity", self.d["alpha"])
+        f.addRow("Each region", _link("edit", "⤢", "#7fb2e5", self.main.regions_window,
                                        "Its colour, its label on or off, its note"))
 
-        pa = QWidget()
-        f1 = _cform(pa)
-        self.d["w_mm"] = _spin(10, 400, o.plot_w_mm, 1)
-        self.d["h_mm"] = _spin(10, 400, o.plot_h_mm, 1)
-        self.d["bg"] = ColorButton(o.bg_color, self._apply)
-        self.d["bg_a"] = _spin(0, 1, o.bg_alpha, 0.05)
-        f1.addRow("Width (mm)", self.d["w_mm"])
-        f1.addRow("Height (mm)", self.d["h_mm"])
-        f1.addRow("Background", self.d["bg"])
-        f1.addRow("Background alpha", self.d["bg_a"])
-
-        mg = QWidget()
-        f2 = _cform(mg)
-        # total figure size = plot area + label margins; Auto shows the computed value
-        tw = _spin(20, 800, o.total_w_mm if o.total_w_mm else o.plot_w_mm, 1)
-        tw_auto = QCheckBox("Auto")
-        tw_auto.setChecked(o.total_w_mm is None)
-        tw.setEnabled(o.total_w_mm is not None)
-        th = _spin(20, 800, o.total_h_mm if o.total_h_mm else o.plot_h_mm, 1)
-        th_auto = QCheckBox("Auto")
-        th_auto.setChecked(o.total_h_mm is None)
-        th.setEnabled(o.total_h_mm is not None)
-        self.d["tot_w"], self.d["tot_w_auto"] = tw, tw_auto
-        self.d["tot_h"], self.d["tot_h_auto"] = th, th_auto
-        # a fixed total owns the plot area: grey its field out and report what it works out to
-        for auto, spin in ((tw_auto, self.d["w_mm"]), (th_auto, self.d["h_mm"])):
-            spin.setEnabled(auto.isChecked())
-            auto.toggled.connect(spin.setEnabled)
-        tw_auto.toggled.connect(tw.setDisabled)
-        th_auto.toggled.connect(th.setDisabled)
-        for w in (tw_auto, th_auto):
-            w.toggled.connect(self._apply)
-        f2.addRow("Total width (mm)", _pair(tw_auto, tw))
-        f2.addRow("Total height (mm)", _pair(th_auto, th))
-        self.d["out"] = ColorButton(o.outside_color, self._apply)
-        self.d["out_a"] = _spin(0, 1, o.outside_alpha, 0.05)
-        f2.addRow("Background", self.d["out"])
-        f2.addRow("Background alpha", self.d["out_a"])
-
-        lg = QWidget()
-        f3 = _cform(lg)
+        # legend
+        lg, f = _section()
+        f.addRow(self._tick("legend", "Shown (2 runs or more)", o))
         self.d["leg_loc"] = QComboBox()
         for key in LEGEND:
             self.d["leg_loc"].addItem(legend_text(key), key)
         self.d["leg_loc"].setCurrentIndex(max(0, self.d["leg_loc"].findData(o.legend_loc)))
         self.d["leg_loc"].setToolTip("Outside the plot, the figure grows to hold it (or, its "
-                                     "total size fixed, the plot area shrinks)")
+                                     "whole size fixed, the plot area shrinks)")
+        self.d["leg_loc"].currentIndexChanged.connect(self._apply)
         self.d["leg_dx"] = _spin(-200, 200, o.legend_dx_mm, 0.5)
         self.d["leg_dy"] = _spin(-200, 200, o.legend_dy_mm, 0.5)
-        self.d["leg_font"] = QLineEdit(o.legend_font_family)
         self.d["leg_size"] = _spin(4, 24, o.legend_font_size, 0.5)
-        f3.addRow("Position", self.d["leg_loc"])
-        f3.addRow("Then right (mm)", self.d["leg_dx"])
-        f3.addRow("Then up (mm)", self.d["leg_dy"])
-        f3.addRow("Font", self.d["leg_font"])
-        f3.addRow("Size", self.d["leg_size"])
-        f3.addRow("Labels", _link("edit", "▤", "#4caf50", self.main.names_window,
-                                  "What the legend calls each run (Run names)"))
-        self.d["leg_loc"].currentIndexChanged.connect(self._apply)
-        self.d["leg_font"].editingFinished.connect(self._apply)
+        f.addRow("Position", self.d["leg_loc"])
+        f.addRow("Then right (mm)", self.d["leg_dx"])
+        f.addRow("Then up (mm)", self.d["leg_dy"])
+        f.addRow("Size (pt)", self.d["leg_size"])
+        f.addRow("Labels", _link("edit", "▤", "#4caf50", self.main.names_window,
+                                 "What the legend calls each run (Run names)"))
+
+        # backgrounds
+        bg, f = _section()
+        self.d["bg"] = ColorButton(o.bg_color, self._apply)
+        self.d["bg_a"] = _spin(0, 1, o.bg_alpha, 0.05)
+        self.d["out"] = ColorButton(o.outside_color, self._apply)
+        self.d["out_a"] = _spin(0, 1, o.outside_alpha, 0.05)
+        f.addRow("Plot area", self.d["bg"])
+        f.addRow("   opacity", self.d["bg_a"])
+        f.addRow("Around it", self.d["out"])
+        f.addRow("   opacity", self.d["out_a"])
 
         for k in ("w_mm", "h_mm", "bg_a", "out_a", "tot_w", "tot_h", "leg_size", "label_size",
                   "lw", "alpha", "leg_dx", "leg_dy"):
             self.d[k].valueChanged.connect(self._apply)
 
-        outer.addWidget(_Collapsible("Shows", sh, expanded=True))
-        outer.addWidget(_Collapsible("Regions", rg, expanded=True))
-        outer.addWidget(_Collapsible("Plot area", pa, expanded=True))
-        outer.addWidget(_Collapsible("Margins", mg, expanded=False))
-        outer.addWidget(_Collapsible("Legend", lg, expanded=False))
-        outer.addWidget(_Collapsible("Y axis", self._axis_group("y", o.y), expanded=False))
-        outer.addWidget(_Collapsible("X axis", self._axis_group("x", o.x), expanded=False))
+        for title, body in (("Size", sz), ("Text", tx), ("Traces", tr), ("Regions", rg),
+                            ("Legend", lg), ("Backgrounds", bg),
+                            ("X axis", self._axis_group("x", o.x)),
+                            ("Y axis", self._axis_group("y", o.y))):
+            s = _Collapsible(title, body, expanded=title in self._open)
+            self._sections.append(s)
+            outer.addWidget(s)
         outer.addStretch(1)
         guard_fields(host)
         old = self.side.takeWidget()
@@ -304,6 +318,12 @@ class FigureWindow(QMainWindow):
         if old is not None:
             old.deleteLater()
         self._loading = False
+
+    def _tick(self, key, label, o):
+        c = QCheckBox(label)
+        c.setChecked(getattr(o, key))
+        c.toggled.connect(lambda on: self._set(key, on))
+        return c
 
     def _set(self, key, value):
         setattr(self.main.plot_opts, key, value)
@@ -316,91 +336,92 @@ class FigureWindow(QMainWindow):
         self.load()
         self.main.refresh()
 
-    def _axis_group(self, pfx, ax):
-        g = QWidget()
-        f = _cform(g)
+    def _axis_group(self, p, ax):
+        g, f = _section()
+        _head(f, "Title")
         t = QLineEdit(ax.title)
-        self.d[f"{pfx}_title"] = t
-        f.addRow("Axis title", t)
         t.editingFinished.connect(self._apply)
-        self._auto_field(f, "Min", pfx, "min", ax.vmin, -1e9, 1e9, 1)
-        self._auto_field(f, "Max", pfx, "max", ax.vmax, -1e9, 1e9, 1)
-        self._auto_field(f, "Major interval", pfx, "maj", ax.major, 0, 1e9, 0.25)
-        self._auto_field(f, "Ticks from", pfx, "gstart", ax.grad_start, -1e9, 1e9, 1)
-        self._auto_field(f, "Ticks to", pfx, "gend", ax.grad_end, -1e9, 1e9, 1)
-        minor = QCheckBox()
-        minor.setChecked(ax.minor_on)
-        self.d[f"{pfx}_minor"] = minor
-        f.addRow("Minor ticks", minor)
-        minor.toggled.connect(self._apply)
-        for key, lbl, lo, hi, step in [("lw", "Axis thickness (pt)", 0.1, 3, 0.1),
-                                       ("majlen", "Major tick length (mm)", 0, 20, 0.5),
-                                       ("minlen", "Minor tick length (mm)", 0, 20, 0.5),
-                                       ("tick", "Tick font size", 4, 24, 0.5),
-                                       ("tf", "Title font size", 4, 24, 0.5)]:
-            val = {"lw": ax.lw_pt, "majlen": ax.major_len_mm, "minlen": ax.minor_len_mm,
-                   "tick": ax.tick_font_size, "tf": ax.title_font_size}[key]
-            s = _spin(lo, hi, val, step)
-            self.d[f"{pfx}_{key}"] = s
-            f.addRow(lbl, s)
-            s.valueChanged.connect(self._apply)
+        self.d[f"{p}_title"] = t
+        f.addRow("Text", t)
+        self._num(f, p, "tf", "Size (pt)", ax.title_font_size, 4, 24, 0.5)
+        self._num(f, p, "titlepad", "Gap to the labels (mm)", ax.title_pad_mm, 0, 20, 0.1)
+        _head(f, "Range")
+        self._auto_field(f, "From", p, "min", ax.vmin, -1e9, 1e9, 1)
+        self._auto_field(f, "To", p, "max", ax.vmax, -1e9, 1e9, 1)
+        self._num(f, p, "lw", "Axis line (pt)", ax.lw_pt, 0.1, 3, 0.1)
+        _head(f, "Major ticks")
+        self._auto_field(f, "Every", p, "maj", ax.major, 0, 1e9, 0.25)
+        self._auto_field(f, "First", p, "gstart", ax.grad_start, -1e9, 1e9, 1)
+        self._auto_field(f, "Last", p, "gend", ax.grad_end, -1e9, 1e9, 1)
+        d = QComboBox()
+        for key, text in _DIRS.items():
+            d.addItem(text, key)
+        d.setCurrentIndex(max(0, d.findData(ax.tick_dir)))
+        d.currentIndexChanged.connect(self._apply)
+        self.d[f"{p}_dir"] = d
+        f.addRow("Direction (both)", d)
+        self._num(f, p, "majlen", "Length (mm)", ax.major_len_mm, 0, 20, 0.5)
         tlw = _spin(0.1, 3, ax.tick_lw_pt, 0.1)
         tlw_auto = QCheckBox("Auto (= axis)")
         tlw_auto.setChecked(ax.tick_lw_auto)
         tlw.setEnabled(not ax.tick_lw_auto)
-        self.d[f"{pfx}_ticklw"] = tlw
-        self.d[f"{pfx}_ticklw_auto"] = tlw_auto
         tlw_auto.toggled.connect(tlw.setDisabled)
         tlw_auto.toggled.connect(self._apply)
         tlw.valueChanged.connect(self._apply)
-        f.addRow("Tick thickness (pt)", _pair(tlw_auto, tlw))
-        f.addRow(_Collapsible("Advanced", self._axis_advanced(pfx, ax), expanded=False))
-        return g
-
-    def _axis_advanced(self, pfx, ax):
-        g = QWidget()
-        f = _cform(g)
-        f.setContentsMargins(0, 0, 0, 0)
-        tp = _spin(0, 20, ax.title_pad_mm, 0.1)
-        lp = _spin(0, 20, ax.tick_label_pad_mm, 0.1)
-        self.d[f"{pfx}_titlepad"] = tp
-        self.d[f"{pfx}_lblpad"] = lp
-        f.addRow("Title ↔ labels (mm)", tp)
-        f.addRow("Labels ↔ axis (mm)", lp)
+        self.d[f"{p}_ticklw"], self.d[f"{p}_ticklw_auto"] = tlw, tlw_auto
+        f.addRow("Thickness (pt)", _pair(tlw_auto, tlw))
+        self._num(f, p, "tick", "Labels size (pt)", ax.tick_font_size, 4, 24, 0.5)
+        self._num(f, p, "lblpad", "Labels gap (mm)", ax.tick_label_pad_mm, 0, 20, 0.1)
+        _head(f, "Minor ticks")
+        minor = QCheckBox("Shown")
+        minor.setChecked(ax.minor_on)
+        minor.toggled.connect(self._apply)
+        self.d[f"{p}_minor"] = minor
+        f.addRow(minor)
         mn = _spin(0, 20, ax.minor_n or 0, 1)
         mn.setSpecialValueText("Auto")
-        mn.setToolTip("Minor intervals per major one (Auto: 5, or 4 for a major of 2, 20…)")
-        self.d[f"{pfx}_minorn"] = mn
-        f.addRow("Minor per major", mn)
+        mn.setToolTip("Minor intervals per major one (Auto: 5; 4 for a major of 2 or 20; 3 for "
+                      "15; 6 for 30 or 60)")
         mn.valueChanged.connect(self._apply)
+        self.d[f"{p}_minorn"] = mn
+        f.addRow("Per major interval", mn)
+        self._num(f, p, "minlen", "Length (mm)", ax.minor_len_mm, 0, 20, 0.5)
+        self._auto_field(f, "Thickness (pt)", p, "minlw", ax.minor_lw_pt, 0.05, 3, 0.05,
+                         "Auto (= major)")
+        _head(f, "Grid")
         for tag, title, on, style, color, width in (
-                ("grid", "Major grid", ax.grid_on, ax.grid_style, ax.grid_color, ax.grid_width),
-                ("mgrid", "Minor grid", ax.minor_grid_on, ax.minor_grid_style,
+                ("grid", "At the major ticks", ax.grid_on, ax.grid_style, ax.grid_color,
+                 ax.grid_width),
+                ("mgrid", "At the minor ticks", ax.minor_grid_on, ax.minor_grid_style,
                  ax.minor_grid_color, ax.minor_grid_width)):
-            grid = QCheckBox()
+            grid = QCheckBox(title)
             grid.setChecked(on)
+            grid.toggled.connect(self._apply)
             gstyle = QComboBox()
             gstyle.addItems(_LINESTYLES)
             gstyle.setCurrentText(style)
+            gstyle.currentIndexChanged.connect(self._apply)
             gcolor = ColorButton(color, self._apply)
             gwidth = _spin(0.1, 3, width, 0.1)
-            self.d[f"{pfx}_{tag}"] = grid
-            self.d[f"{pfx}_{tag}style"] = gstyle
-            self.d[f"{pfx}_{tag}color"] = gcolor
-            self.d[f"{pfx}_{tag}width"] = gwidth
-            f.addRow(title, grid)
-            f.addRow("   style", gstyle)
+            gwidth.valueChanged.connect(self._apply)
+            self.d[f"{p}_{tag}"] = grid
+            self.d[f"{p}_{tag}style"] = gstyle
+            self.d[f"{p}_{tag}color"] = gcolor
+            self.d[f"{p}_{tag}width"] = gwidth
+            f.addRow(grid)
+            f.addRow("   line", gstyle)
             f.addRow("   colour", gcolor)
             f.addRow("   width (pt)", gwidth)
-            gwidth.valueChanged.connect(self._apply)
-            grid.toggled.connect(self._apply)
-            gstyle.currentIndexChanged.connect(self._apply)
-        for wdg in (tp, lp):
-            wdg.valueChanged.connect(self._apply)
         return g
 
-    def _auto_field(self, form, label, pfx, name, value, lo, hi, step):
-        chk = QCheckBox("Auto")
+    def _num(self, form, p, name, label, value, lo, hi, step):
+        s = _spin(lo, hi, value, step)
+        s.valueChanged.connect(self._apply)
+        self.d[f"{p}_{name}"] = s
+        form.addRow(label, s)
+
+    def _auto_field(self, form, label, pfx, name, value, lo, hi, step, auto="Auto"):
+        chk = QCheckBox(auto)
         chk.setChecked(value is None)
         spin = _spin(lo, hi, value if value is not None else 0.0, step)
         spin.setEnabled(value is not None)
@@ -415,43 +436,46 @@ class FigureWindow(QMainWindow):
         if self._loading or not self.d:
             return
         o, d = self.main.plot_opts, self.d
+
+        def val(k):                          # None when its Auto is ticked
+            return None if d[f"{k}_auto"].isChecked() else d[k].value()
+
         o.plot_w_mm, o.plot_h_mm = d["w_mm"].value(), d["h_mm"].value()
-        o.total_w_mm = None if d["tot_w_auto"].isChecked() else d["tot_w"].value()
-        o.total_h_mm = None if d["tot_h_auto"].isChecked() else d["tot_h"].value()
+        o.total_w_mm, o.total_h_mm = val("tot_w"), val("tot_h")
+        o.font = d["font"].currentText().strip() or "sans-serif"
         o.bg_color, o.bg_alpha = d["bg"].color, d["bg_a"].value()
         o.outside_color, o.outside_alpha = d["out"].color, d["out_a"].value()
         o.legend_loc = d["leg_loc"].currentData()
         o.legend_dx_mm, o.legend_dy_mm = d["leg_dx"].value(), d["leg_dy"].value()
-        o.legend_font_family = d["leg_font"].text() or "sans-serif"
         o.legend_font_size = d["leg_size"].value()
         o.label_size, o.line_width_pt = d["label_size"].value(), d["lw"].value()
         o.region_alpha = d["alpha"].value()
-        for ax, pfx in ((o.x, "x"), (o.y, "y")):
-            ax.title = d[f"{pfx}_title"].text()
-            ax.vmin = None if d[f"{pfx}_min_auto"].isChecked() else d[f"{pfx}_min"].value()
-            ax.vmax = None if d[f"{pfx}_max_auto"].isChecked() else d[f"{pfx}_max"].value()
-            ax.major = None if d[f"{pfx}_maj_auto"].isChecked() else d[f"{pfx}_maj"].value()
-            ax.grad_start = None if d[f"{pfx}_gstart_auto"].isChecked() else d[f"{pfx}_gstart"].value()
-            ax.grad_end = None if d[f"{pfx}_gend_auto"].isChecked() else d[f"{pfx}_gend"].value()
-            ax.minor_on = d[f"{pfx}_minor"].isChecked()
-            ax.lw_pt = d[f"{pfx}_lw"].value()
-            ax.major_len_mm = d[f"{pfx}_majlen"].value()
-            ax.minor_len_mm = d[f"{pfx}_minlen"].value()
-            ax.tick_lw_auto = d[f"{pfx}_ticklw_auto"].isChecked()
-            ax.tick_lw_pt = d[f"{pfx}_ticklw"].value()
-            ax.tick_font_size = d[f"{pfx}_tick"].value()
-            ax.title_font_size = d[f"{pfx}_tf"].value()
-            ax.title_pad_mm = d[f"{pfx}_titlepad"].value()
-            ax.tick_label_pad_mm = d[f"{pfx}_lblpad"].value()
-            ax.minor_n = int(d[f"{pfx}_minorn"].value()) or None
-            ax.grid_on = d[f"{pfx}_grid"].isChecked()
-            ax.grid_style = d[f"{pfx}_gridstyle"].currentText()
-            ax.grid_color = d[f"{pfx}_gridcolor"].color
-            ax.grid_width = d[f"{pfx}_gridwidth"].value()
-            ax.minor_grid_on = d[f"{pfx}_mgrid"].isChecked()
-            ax.minor_grid_style = d[f"{pfx}_mgridstyle"].currentText()
-            ax.minor_grid_color = d[f"{pfx}_mgridcolor"].color
-            ax.minor_grid_width = d[f"{pfx}_mgridwidth"].value()
+        for ax, p in ((o.x, "x"), (o.y, "y")):
+            ax.title = d[f"{p}_title"].text()
+            ax.title_font_size = d[f"{p}_tf"].value()
+            ax.title_pad_mm = d[f"{p}_titlepad"].value()
+            ax.vmin, ax.vmax = val(f"{p}_min"), val(f"{p}_max")
+            ax.lw_pt = d[f"{p}_lw"].value()
+            ax.major = val(f"{p}_maj")
+            ax.grad_start, ax.grad_end = val(f"{p}_gstart"), val(f"{p}_gend")
+            ax.tick_dir = d[f"{p}_dir"].currentData()
+            ax.major_len_mm = d[f"{p}_majlen"].value()
+            ax.tick_lw_auto = d[f"{p}_ticklw_auto"].isChecked()
+            ax.tick_lw_pt = d[f"{p}_ticklw"].value()
+            ax.tick_font_size = d[f"{p}_tick"].value()
+            ax.tick_label_pad_mm = d[f"{p}_lblpad"].value()
+            ax.minor_on = d[f"{p}_minor"].isChecked()
+            ax.minor_n = int(d[f"{p}_minorn"].value()) or None
+            ax.minor_len_mm = d[f"{p}_minlen"].value()
+            ax.minor_lw_pt = val(f"{p}_minlw")
+            ax.grid_on = d[f"{p}_grid"].isChecked()
+            ax.grid_style = d[f"{p}_gridstyle"].currentText()
+            ax.grid_color = d[f"{p}_gridcolor"].color
+            ax.grid_width = d[f"{p}_gridwidth"].value()
+            ax.minor_grid_on = d[f"{p}_mgrid"].isChecked()
+            ax.minor_grid_style = d[f"{p}_mgridstyle"].currentText()
+            ax.minor_grid_color = d[f"{p}_mgridcolor"].color
+            ax.minor_grid_width = d[f"{p}_mgridwidth"].value()
         self.main.refresh()
 
     def _fill_auto_fields(self):
@@ -459,24 +483,37 @@ class FigureWindow(QMainWindow):
         plot area it leaves."""
         if not self.main.runs or not self.d or self._fig is None:
             return
-        ex = auto_extents(self.main.runs, self.main.plot_opts)
+        o = self.main.plot_opts
+        ex = auto_extents(self.main.runs, o)
         self._loading = True
         for k, v in (("x_min", ex["xmin"]), ("x_max", ex["xmax"]), ("x_maj", ex["xmajor"]),
                      ("x_gstart", ex["xmin"]), ("x_gend", ex["xmax"]),
                      ("y_min", ex["ymin"]), ("y_max", ex["ymax"]), ("y_maj", ex["ymajor"]),
-                     ("y_gstart", ex["ymin"]), ("y_gend", ex["ymax"])):
+                     ("y_gstart", ex["ymin"]), ("y_gend", ex["ymax"]),
+                     ("x_minlw", o.x.lw_pt if o.x.tick_lw_auto else o.x.tick_lw_pt),
+                     ("y_minlw", o.y.lw_pt if o.y.tick_lw_auto else o.y.tick_lw_pt),
+                     ("tot_w", self._fig.get_figwidth() * 25.4),
+                     ("tot_h", self._fig.get_figheight() * 25.4)):
             if self.d[f"{k}_auto"].isChecked():
                 self.d[k].setValue(v)
-        if self.d["tot_w_auto"].isChecked():
-            self.d["tot_w"].setValue(self._fig.get_figwidth() * 25.4)
-        if self.d["tot_h_auto"].isChecked():
-            self.d["tot_h"].setValue(self._fig.get_figheight() * 25.4)
         pw, ph = self._fig.plot_area_mm
         if not self.d["tot_w_auto"].isChecked():
             self.d["w_mm"].setValue(pw)
         if not self.d["tot_h_auto"].isChecked():
             self.d["h_mm"].setValue(ph)
         self._loading = False
+
+
+def _section():
+    w = QWidget()
+    return w, _cform(w)
+
+
+def _head(form, text):
+    """A sub-heading inside a section."""
+    lab = QLabel(f"<b>{text}</b>")
+    lab.setStyleSheet("color:#b8c8d8; margin-top:6px;")
+    form.addRow(lab)
 
 
 # ---------------- small widgets (also used by app.py)

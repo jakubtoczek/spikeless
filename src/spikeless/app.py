@@ -1,9 +1,10 @@
 """Spikeless main window: one screen, four steps.
 
 The chromatogram in the middle, its results under it (the log in a tab beside them), and the
-steps on the right, top to bottom — ① Runs, ② Spikes, ③ Background, ④ Regions — each acting
-on the selected run (with none selected, they wait for one). Every change to a run is one undo
-step (Ctrl+Z / Ctrl+Y), named in the log.
+steps on the right, top to bottom — Runs, Spikes, Background, Regions — each acting on the
+selected run (with none selected, they wait for one). Each step shows on the plot what it is
+about (its Show ticks); its explanations are in the tooltips and the user guide. Every change
+to a run is one undo step (Ctrl+Z / Ctrl+Y), named in the log.
 """
 
 from __future__ import annotations
@@ -18,16 +19,16 @@ from PySide6.QtCore import QEvent, QLocale, Qt
 from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
-    QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QRadioButton, QScrollArea, QSlider, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
-    QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QPushButton, QRadioButton, QScrollArea, QSlider, QSpinBox, QSplitter, QTableWidget,
+    QTableWidgetItem, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import __version__, io_gina, io_paste, session
 from .canvas import ChromCanvas
-from .editors import NamesWindow, RegionsWindow, copy_table
-from .figure import FigureWindow, _Collapsible, _link, copy_figure, export_figure
+from .editors import NamesWindow, RegionPanel, RegionsWindow, copy_table
+from .figure import FigureWindow, _Collapsible, _link
 from .options import PREFS, ColorButton, OptionsWindow, guard_fields, load_prefs, method_names
 from .peaks import find_regions, fit, measure, snap
 from .plotting import Y_MODES, PlotOptions
@@ -38,7 +39,7 @@ from .spikes import SpikeParams, remove
 APP_NAME = "Spikeless"
 OPENS = (".txt", session.EXT, ".json")      # what Open… and a drop take
 GREY = "color:#8d8d8d;"
-TITLES = {"spikes": "② Spikes", "background": "③ Background", "peaks": "④ Regions"}
+TITLES = {"runs": "Runs", "spikes": "Spikes", "background": "Background", "peaks": "Regions"}
 
 
 class MainWindow(QMainWindow):
@@ -61,7 +62,8 @@ class MainWindow(QMainWindow):
         self.sel_region = -1             # its selected region, or -1
         self.results: dict = {}          # run.id -> peaks.Results
         self.plot_opts = PlotOptions()   # the figure (Figure window); saved with the session
-        self.view = {"raw": False, "spikes": True, "background": True}   # screen only
+        self.view = {"raw": False, "spikes": True, "background": True,   # screen only
+                     "stretch": True}
         self._undo: list = []
         self._redo: list = []
         self._session_path: Path | None = None
@@ -69,7 +71,9 @@ class MainWindow(QMainWindow):
         self._paste_n = 0
         self._filling = False
         self.options_win = self.report_win = self.figure_win = None
-        self.names_win = self.regions_win = None
+        self.names_win = self.regions_win = self.region_win = None
+        self.ticks = {}
+        self.body = {}
         self._build()
         for key, slot in ((QKeySequence.Undo, self._undo_step), (QKeySequence.Redo, self._redo_step),
                           (QKeySequence.Copy, self._copy), (QKeySequence.Paste, self._paste),
@@ -96,11 +100,12 @@ class MainWindow(QMainWindow):
                      ("Save…", "The session: runs, spikes, background, regions, figure — "
                       "Ctrl+S; as .spikeless, or .json (the same JSON)", self._save_session),
                      None,
-                     ("Figure…", "What Copy and Export make: its settings and a preview",
-                      self._figure),
+                     ("Figure…", "What the figure's Copy and Export make: its settings and a "
+                      "preview", self._figure),
                      ("Report", "Pick its sections and columns, see it, save it", self._report),
-                     ("Options", "The mouse on the plot, a new run's settings, export, isotopes, "
-                      "methods, log", self._options)):
+                     ("⚙ Options", "The mouse on the plot, what the panels and the results "
+                      "show, a new run's settings, export, isotopes, methods, log",
+                      self._options)):
             if item is None:
                 tb.addSeparator()
                 continue
@@ -109,7 +114,7 @@ class MainWindow(QMainWindow):
             b.clicked.connect(lambda _=False, f=item[2]: f())
             tb.addWidget(b)
 
-        # the plot, its view ticks and Copy / Export above it
+        # the plot, and above it what applies to every run, and Copy
         self.canvas = ChromCanvas()
         self.canvas.regionDrawn.connect(self._drawn)
         self.canvas.edgeMoved.connect(self._edge_moved)
@@ -121,38 +126,25 @@ class MainWindow(QMainWindow):
         tv = QVBoxLayout(top)
         tv.setContentsMargins(0, 0, 0, 0)
         bar = QHBoxLayout()
-        self.ticks = {}
-        for key, text, tip in (
-                ("raw", "Trace as recorded", "The selected run (every run, none selected) before "
-                 "spikes were excluded; its style: Options › Chromatogram"),
-                ("spikes", "Spikes", "The excluded spikes in red; a ring on one put back"),
-                ("background", "Background", "The background, dashed"),
-                ("stack", "Stack", "Runs one above the other, background subtracted (the "
-                                   "figure too)")):
-            c = QCheckBox(text)
-            c.setToolTip(tip)
-            c.toggled.connect(lambda on, k=key: self._view(k, on))
-            self.ticks[key] = c
-            bar.addWidget(c)
+        c = QCheckBox("Stack")
+        c.setToolTip("Runs one above the other, background subtracted (the figure too)")
+        c.toggled.connect(lambda on: self._view("stack", on))
+        self.ticks["stack"] = c
+        bar.addWidget(c)
         bar.addSpacing(12)
         bar.addWidget(QLabel("Y:"))
         self.y_mode = QComboBox()
         for key, text in Y_MODES.items():
             self.y_mode.addItem(text, key)
-        self.y_mode.setToolTip("Count rate as measured; or each run, its background subtracted, "
-                               "as % of its highest point, or as % of all its net counts per "
-                               "min — a peak's area on the plot is then its % of total (the "
-                               "figure too)")
+        self.y_mode.setToolTip("The count rate as measured; or each run, its background "
+                               "subtracted, as % of its highest point, or each point's counts "
+                               "as % of all the run's net counts — the points add up to 100 % "
+                               "(the figure too)")
         self.y_mode.activated.connect(lambda i: self._view("y_mode", self.y_mode.itemData(i)))
         bar.addWidget(self.y_mode)
         bar.addStretch(1)
-        for text, tip, slot in (("⧉ Copy", "The figure to the clipboard, at its size in mm "
-                                           "(Ctrl+C)", lambda: copy_figure(self)),
-                                ("⭳ Export…", "The figure as PNG or SVG, at its size in mm",
-                                 lambda: export_figure(self)),
-                                ("⚙ Figure…", "What the figure shows, its size, fonts, axes",
-                                 self._figure)):
-            bar.addWidget(_tool(text, tip, slot))
+        bar.addWidget(_tool("⧉ Copy", "The plot as it is on screen, to the clipboard (Ctrl+C). "
+                                      "The figure for a paper: Figure…", self._copy_screen))
         tv.addLayout(bar)
         tv.addWidget(self.canvas, 1)
 
@@ -167,9 +159,12 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QTableWidget.ExtendedSelection)
         self.table.itemChanged.connect(self._renamed)
         self.table.currentCellChanged.connect(lambda r, *_: self._pick_row(r))
-        self.table.setToolTip("Double-click a region's name to rename it; Del removes the "
-                              "selected regions (Ctrl+Z brings them back); Ctrl+C copies the "
-                              "table. Columns: Report window. ⤢: every measure, colours, notes.")
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(
+            lambda pos: self._region_menu(self.table, pos))
+        self.table.setToolTip("Right-click a region: rename, edit, remove; Del removes the "
+                              "selected ones (Ctrl+Z brings them back). Columns: Options › "
+                              "Results; hover a header for its meaning.")
         res = QWidget()
         rv = QVBoxLayout(res)
         rv.setContentsMargins(4, 4, 4, 4)
@@ -206,15 +201,17 @@ class MainWindow(QMainWindow):
         # the steps
         self.steps = QWidget()
         sv = QVBoxLayout(self.steps)
+        sv.setSpacing(6)
         self.step = {}
         self._names_link = _link("", "▤", "#4caf50", self.names_window, "Run names: the "
                                  "original, the name, the legend's")
-        for key, title, body, extra in (("runs", "① Runs", self._runs_step(), self._names_link),
-                                        ("spikes", TITLES["spikes"], self._spikes_step(), None),
-                                        ("background", TITLES["background"], self._bg_step(),
-                                         None),
-                                        ("peaks", TITLES["peaks"], self._peaks_step(), None)):
-            self.step[key] = _Collapsible(title, body, expanded=True, extra=extra)
+        for i, (key, body, extra) in enumerate((("runs", self._runs_step(), self._names_link),
+                                                ("spikes", self._spikes_step(), None),
+                                                ("background", self._bg_step(), None),
+                                                ("peaks", self._peaks_step(), None))):
+            if i:
+                sv.addWidget(_hline())
+            self.step[key] = _Collapsible(TITLES[key], body, expanded=True, extra=extra)
             sv.addWidget(self.step[key])
         sv.addStretch(1)
         guard_fields(self.steps)
@@ -229,16 +226,44 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(split)
         self.statusBar()
 
-    def _runs_step(self):
+    def _section(self, key, show=()):
+        """A step's widget: its Show ticks (what it draws on the plot: always at hand), then
+        its body (only with a run selected). (outer, body layout)."""
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(6, 2, 6, 6)
+        v.setContentsMargins(6, 0, 6, 4)
+        v.setSpacing(4)
+        if show:
+            h = QHBoxLayout()
+            h.setContentsMargins(0, 0, 0, 0)
+            lab = QLabel("Show")
+            lab.setStyleSheet(GREY)
+            h.addWidget(lab)
+            for k, text, tip in show:
+                c = QCheckBox(text)
+                c.setToolTip(tip)
+                c.toggled.connect(lambda on, k=k: self._view(k, on))
+                self.ticks[k] = c
+                h.addWidget(c)
+            h.addStretch(1)
+            v.addLayout(h)
+        body = QWidget()
+        bv = QVBoxLayout(body)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setSpacing(4)
+        v.addWidget(body)
+        self.body[key] = body
+        return w, bv
+
+    def _runs_step(self):
+        w, v = self._section("runs")
         self.run_list = QListWidget()
-        self.run_list.setMaximumHeight(110)
-        self.run_list.setToolTip("Tick to show; click to work on it, click it again to rename "
-                                 "it; double-click: the plot shows it whole; right-click: "
+        self.run_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.run_list.setTextElideMode(Qt.ElideMiddle)
+        self.run_list.setToolTip("Tick to show; click to work on it, click it again (or F2) to "
+                                 "rename it; double-click: the plot shows it whole; right-click: "
                                  "rename, export, remove; Del removes it (Ctrl+Z brings it "
-                                 "back). Click outside the runs (or Esc) to select none.")
+                                 "back). Click below the runs (or Esc) to select none.")
         self.run_list.setEditTriggers(QAbstractItemView.SelectedClicked
                                       | QAbstractItemView.EditKeyPressed)
         self.run_list.itemChanged.connect(self._run_item_changed)
@@ -249,8 +274,8 @@ class MainWindow(QMainWindow):
         self.run_list.viewport().installEventFilter(self)
         v.addWidget(self.run_list)
         self.run_form = QWidget()
-        f = QFormLayout(self.run_form)
-        f.setContentsMargins(0, 0, 0, 0)
+        self.run_rows = QFormLayout(self.run_form)
+        self.run_rows.setContentsMargins(0, 0, 0, 0)
         self.f_iso = QComboBox()
         self.f_iso.setToolTip("Its half-life and whether it is decay-corrected: Options › "
                               "Isotopes")
@@ -269,31 +294,31 @@ class MainWindow(QMainWindow):
         self.f_cond.textChanged.connect(
             lambda: self._meta("conditions", self.f_cond.toPlainText(), refresh=False))
         self.f_color = ColorButton(COLORS[0], lambda: self._meta("color", self.f_color.color))
-        for label, wdg in (("Isotope", self.f_iso), ("Method", self.f_method),
-                           ("Molecule", self.f_mol), ("Conditions", self.f_cond),
-                           ("Colour", self.f_color)):
-            f.addRow(label, wdg)
+        self.fields = {"isotope": self.f_iso, "method": self.f_method, "molecule": self.f_mol,
+                       "conditions": self.f_cond, "color": self.f_color}
+        for label, key in (("Isotope", "isotope"), ("Method", "method"),
+                           ("Molecule", "molecule"), ("Conditions", "conditions"),
+                           ("Colour", "color")):
+            self.run_rows.addRow(label, self.fields[key])
         v.addWidget(self.run_form)
         self.f_info = QLabel()
         self.f_info.setWordWrap(True)
-        self.f_info.setStyleSheet(GREY)
+        self.f_info.setStyleSheet(GREY + "font-size:11px;")
         self.f_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         v.addWidget(self.f_info)
         return w
 
     def _spikes_step(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(6, 2, 6, 6)
-        g = QLabel("A spike is one point far above the points on both sides of it — an "
-                   "electronic artefact of the detector, not activity. Each is excluded and "
-                   "bridged by a straight line between its neighbours (the same as leaving the "
-                   "point out). Click one to see it; untick it to keep it.")
-        g.setWordWrap(True)
-        g.setStyleSheet(GREY)
-        v.addWidget(g)
+        w, v = self._section("spikes", (
+            ("spikes", "Spikes", "The excluded spikes in red, from the bridged point to their "
+                                 "height; a ring on one put back"),
+            ("raw", "Trace as recorded", "Before the spikes were excluded; its style: Options "
+                                         "› Chromatogram")))
         self.spike_list = QListWidget()
-        self.spike_list.setMaximumHeight(120)
+        self.spike_list.setToolTip("A spike: one point far above both its neighbours — a "
+                                   "detector artefact, not activity — excluded and bridged by "
+                                   "the straight line between them. Click one: the plot shows "
+                                   "it. Untick it to keep it.")
         self.spike_list.itemChanged.connect(self._spike_ticked)
         self.spike_list.itemClicked.connect(self._spike_focus)
         v.addWidget(self.spike_list)
@@ -326,19 +351,18 @@ class MainWindow(QMainWindow):
         return w
 
     def _bg_step(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(6, 2, 6, 6)
-        self.bg_value = QLabel()
-        self.bg_value.setWordWrap(True)
-        v.addWidget(self.bg_value)
+        w, v = self._section("background", (
+            ("background", "Line", "The background, dashed"),
+            ("stretch", "Stretch", "The stretch its mean is taken on, shaded, its edges dashed "
+                                   "(Mean of a stretch)")))
         self.bg_group = QButtonGroup(w)
         self.bg_radio = {}
         for mode, text, tip in (
                 ("auto", "Mean outside the regions", "The detector's background: the mean of "
-                 "every point no region holds (points 4 σ above it left out)"),
-                ("stretch", "Mean of a stretch", "The mean of a peak-free stretch, shaded on "
-                 "the plot: drag its edges, type them, or draw it again"),
+                 "every point no region holds (points 4 σ above it left out). A radio-"
+                 "detector's background is flat: its count rate, with Poisson noise"),
+                ("stretch", "Mean of a stretch", "The mean of a peak-free stretch: drag its "
+                 "edges on the plot, type them, or draw it again"),
                 ("drift", "Follows a drift", "For a trace whose background drifts: SNIP or "
                  "arPLS (offered when ticked in Options › Background)")):
             rb = QRadioButton(text)
@@ -371,25 +395,10 @@ class MainWindow(QMainWindow):
                 v.addWidget(self.drift_row)
             else:
                 v.addWidget(rb)
-        g = QLabel("A radio-detector's background is flat: its count rate, with Poisson noise. "
-                   "A new run's: Options › Background.")
-        g.setWordWrap(True)
-        g.setStyleSheet(GREY)
-        v.addWidget(g)
         return w
 
     def _peaks_step(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(6, 2, 6, 6)
-        g = QLabel("A region is a span integrated as one: a peak, or a peak's shoulder. Find "
-                   "regions proposes them; Draw region places one — drag across it on the plot, "
-                   "or click its two edges (right-click cancels); its edges land in the valleys "
-                   "(hold Alt to place them exactly). Drag an edge to move it, ← → to nudge it "
-                   "a point; Del removes the selected regions.")
-        g.setWordWrap(True)
-        g.setStyleSheet(GREY)
-        v.addWidget(g)
+        w, v = self._section("peaks")
         h = QHBoxLayout()
         b = QPushButton("Find regions")
         b.setToolTip("Regions for the peaks no region holds (the ones found before and left "
@@ -434,40 +443,32 @@ class MainWindow(QMainWindow):
         v.addWidget(_Collapsible("More", more, expanded=False))
         self.reg_draw = QPushButton("Draw region")
         self.reg_draw.setCheckable(True)
-        self.reg_draw.setToolTip("Then drag across the region on the plot, or click its two "
-                                 "edges; right-click or Esc cancels")
+        self.reg_draw.setToolTip("A region: a span integrated as one — a peak, or a peak's "
+                                 "shoulder. Then drag across it on the plot, or click its two "
+                                 "edges (right-click or Esc cancels); its edges land in the "
+                                 "valleys (hold Alt to place them exactly). On the plot, drag "
+                                 "an edge to move it, ← → to nudge it a point.")
         self.reg_draw.toggled.connect(lambda on: self._arm("region", on))
         v.addWidget(self.reg_draw)
-        self.reg_list = QListWidget()
-        self.reg_list.setMaximumHeight(130)
-        self.reg_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.reg_list.setToolTip("Click one to select it; double-click: the plot shows it; Del "
-                                 "removes the selected ones")
-        self.reg_list.currentRowChanged.connect(
-            lambda r: self._filling or self._pick_region(r))
-        self.reg_list.itemDoubleClicked.connect(self._region_focus)
-        v.addWidget(self.reg_list)
-        self.reg_box = QGroupBox("Selected region")
-        f = QFormLayout(self.reg_box)
-        self.r_name = QLineEdit()
-        self.r_name.editingFinished.connect(lambda: self._reg_set("name", self.r_name.text().strip()))
-        self.r_under = QComboBox()
-        self.r_under.addItems(["the background", "a straight line between its ends"])
-        self.r_under.setToolTip("What its net counts are above: the run's background, or — for "
-                                "a peak on another's tail — a line from its start to its end")
-        self.r_under.activated.connect(
-            lambda i: self._reg_set("under", ("background", "line")[i]))
-        self.r_note = QLineEdit()
-        self.r_note.setPlaceholderText("why it was drawn or moved, if it matters")
-        self.r_note.editingFinished.connect(lambda: self._reg_set("note", self.r_note.text()))
-        self.r_color = ColorButton("#808080", lambda: self._reg_set("color", self.r_color.color))
-        self.r_label = QCheckBox("Labelled on the figure")
-        self.r_label.toggled.connect(lambda on: self._reg_set("label", on))
-        for label, wdg in (("Name", self.r_name), ("Under it", self.r_under),
-                           ("Note", self.r_note), ("Colour", self.r_color)):
-            f.addRow(label, wdg)
-        f.addRow(self.r_label)
-        v.addWidget(self.reg_box)
+        t = self.reg_list = QTableWidget(0, 3)
+        t.setHorizontalHeaderLabels(["Region", "Rt (min)", "%"])
+        t.verticalHeader().setVisible(False)
+        t.verticalHeader().setDefaultSectionSize(22)
+        t.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for c in (1, 2):
+            t.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        t.setShowGrid(False)
+        t.setSelectionBehavior(QAbstractItemView.SelectRows)
+        t.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        t.setEditTriggers(QAbstractItemView.SelectedClicked | QAbstractItemView.EditKeyPressed)
+        t.setToolTip("Click one to select it; double-click: the plot shows it; right-click: "
+                     "rename, edit, remove; Del removes the selected ones")
+        t.currentCellChanged.connect(lambda r, *_: self._filling or self._pick_region(r))
+        t.cellDoubleClicked.connect(lambda r, _c: self._region_focus(r))
+        t.itemChanged.connect(self._renamed)
+        t.setContextMenuPolicy(Qt.CustomContextMenu)
+        t.customContextMenuRequested.connect(lambda pos: self._region_menu(t, pos))
+        v.addWidget(t)
         return w
 
     # ================================================================ state
@@ -484,7 +485,7 @@ class MainWindow(QMainWindow):
         self._fill_steps()
         if table:
             self._fill_table()
-        for w in (self.names_win, self.regions_win):
+        for w in (self.names_win, self.regions_win, self.region_win):
             if w is not None:
                 w.refresh_later()
         if self.figure_win is not None:
@@ -500,26 +501,32 @@ class MainWindow(QMainWindow):
         self.y_mode.setCurrentIndex(max(0, self.y_mode.findData(self.plot_opts.y_mode)))
         _sync(self.run_list, [(r.name, r.shown, None, r.color, None) for r in self.runs],
               Qt.ItemIsEditable)
+        for k, r in enumerate(self.runs):
+            self.run_list.item(k).setToolTip(r.name)
+        _fit_rows(self.run_list, len(self.runs) + 1, 2, 7)      # a row free: click it, none
         if run is not None:
             if self.run_list.currentRow() != self.runs.index(run):
                 self.run_list.setCurrentRow(self.runs.index(run))
         else:
             self.run_list.setCurrentRow(-1)
             self.run_list.clearSelection()
+        for key, wdg in self.fields.items():
+            self.run_rows.setRowVisible(wdg, PREFS["run_fields"][key])
+        self.f_info.setVisible(PREFS["run_fields"]["details"])
         for key in ("spikes", "background", "peaks"):
-            self.step[key]._content.setEnabled(run is not None)
+            self.body[key].setEnabled(run is not None)
         self.run_form.setEnabled(run is not None)
         if run is None:
-            for key, title in TITLES.items():
-                self.step[key].set_title(f"{title} — select a run")
-            self.f_info.setText("Select a run above (or open one)." if self.runs else "")
+            for key in ("spikes", "background", "peaks"):
+                self.step[key].set_title(f"{TITLES[key]} · select a run")
+            self.f_info.setText("")
             self.spike_list.clear()
-            self.reg_list.clear()
-            self.bg_value.setText("")
-            self.reg_box.setEnabled(False)
+            self.reg_list.setRowCount(0)
+            _fit_rows(self.spike_list, 0, 1, 5)
+            _fit_rows(self.reg_list, 0, 1, 7)
             self._filling = False
             return
-        # ① runs
+        # runs
         _fill_iso(self.f_iso, run.isotope)
         self.f_method.clear()
         self.f_method.addItem("—", "")
@@ -538,10 +545,10 @@ class MainWindow(QMainWindow):
                             f"{len(run.y)} points, one every {run.dt_s:g} s, "
                             f"{run.x[-1]:.2f} min · {decay}"
                             + (f" · SHA-256 {run.sha256[:12]}…" if run.sha256 else "")
-                            ).replace("_", "_\u200b"))   # a long file name wraps, not the panel
-        # ② spikes
+                            ).replace("_", "_​"))   # a long file name wraps, not the panel
+        # spikes
         n_ex = int(run.excluded().sum())
-        self.step["spikes"].set_title(f"{TITLES['spikes']} — {n_ex} excluded"
+        self.step["spikes"].set_title(f"{TITLES['spikes']} · {n_ex} excluded"
                                       + (f", {len(run.kept)} kept" if run.kept else ""))
         bridged = remove(run.y, run.excluded())
         where = [(r.start, r.end, row.name) for r, row in zip(run.regions, res.rows)]
@@ -552,13 +559,15 @@ class MainWindow(QMainWindow):
             entries.append((f"{t:6.2f} min   {run.y[i]:.0f} → {bridged[i]:.0f} cps"
                             + (f"   in {reg}" if reg else ""), i not in run.kept, i, None, None))
         _sync(self.spike_list, entries)
+        _fit_rows(self.spike_list, len(entries), 1, 5)
         p = run.spike_params
         self.sens.setValue(int(round(p.n_sigma * 2)))
         self.sens_lab.setText(f"{p.n_sigma:.1f} σ")
         self.f_window.setValue(p.window)
         self.f_width.setValue(p.max_width)
-        # ③ background
-        self.step["background"].set_title(f"{TITLES['background']} — {res.background:.1f} cps")
+        # background
+        self.step["background"].set_title(f"{TITLES['background']} · {res.background:.1f} cps")
+        self.step["background"].setToolTip(f"{res.background:.2f} cps — {res.background_how}")
         self.bg_radio[run.bg_mode].setChecked(True)
         self.drift_row.setVisible(PREFS["bg"]["offer_drift"] or run.bg_mode == "drift")
         a, b = sorted(run.bg_stretch or [PREFS["bg"]["stretch_from"], PREFS["bg"]["stretch_to"]])
@@ -568,39 +577,36 @@ class MainWindow(QMainWindow):
         self.bg_method.setCurrentIndex(1 if run.bg_drift == "arpls" else 0)
         self.bg_n.setValue(run.bg_n)
         self.bg_n.setEnabled(run.bg_drift == "snip")
-        self.bg_value.setText(f"<b>{res.background:.2f} cps</b> — {res.background_how}")
-        # ④ regions
-        self.step["peaks"].set_title(f"{TITLES['peaks']} — {len(run.regions)}")
+        # regions
+        self.step["peaks"].set_title(f"{TITLES['peaks']} · {len(run.regions)}")
         fp = run.find_params
         self.find_sens.setValue(int(round(fp.n_sigma * 2)))
         self.find_lab.setText(f"{fp.n_sigma:.1f} σ")
         self.f_gap.setValue(fp.min_gap_s)
         self.f_smooth.setValue(fp.smooth)
         self.f_foot.setValue(fp.foot_sigma)
-        _sync(self.reg_list, [
-            (f"{row.name}   {row.rt:.2f} min" + (f"   {row.pct:.1f} %" if row.pct is not None
-                                                  else "   n.d." if "n.d." in row.flags else ""),
-             None, k, None, reg.color or run.color)
-            for k, (reg, row) in enumerate(zip(run.regions, res.rows))])
+        t = self.reg_list
+        t.setRowCount(len(run.regions))
+        _fit_rows(t, len(run.regions), 1, 7)
+        for k, (reg, row) in enumerate(zip(run.regions, res.rows)):
+            pct = (f"{row.pct:.1f}" if row.pct is not None else
+                   "n.d." if "n.d." in row.flags else "")
+            for c, text in enumerate((row.name, f"{row.rt:.2f}", pct)):
+                it = t.item(k, c)
+                if it is None:
+                    it = QTableWidgetItem()
+                    t.setItem(k, c, it)
+                it.setText(text)
+                it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable
+                            | (Qt.ItemIsEditable if c == 0 else Qt.NoItemFlags))
+                if c:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            t.item(k, 0).setIcon(_swatch(reg.color or run.color))
         k = self.sel_region
         if k < 0:
-            self.reg_list.clearSelection()
-        elif self.reg_list.currentRow() != k:
-            self.reg_list.setCurrentRow(k)
-        self.reg_box.setEnabled(k >= 0)
-        if k >= 0:
-            r, row = run.regions[k], res.rows[k]
-            self.reg_box.setTitle(f"Selected region — {row.start:.2f}–{row.end:.2f} min")
-            self.r_name.setText(r.name)
-            self.r_name.setPlaceholderText(row.name)
-            self.r_under.setCurrentIndex(1 if r.under == "line" else 0)
-            self.r_note.setText(r.note)
-            self.r_color.set_color(r.color or run.color)
-            self.r_label.setChecked(r.label)
-        else:
-            self.reg_box.setTitle("Selected region — click one")
-            for wdg in (self.r_name, self.r_note):
-                wdg.setText("")
+            t.clearSelection()
+        elif t.currentRow() != k:
+            t.setCurrentCell(k, 0)
         self._filling = False
 
     def _fill_table(self):
@@ -610,13 +616,13 @@ class MainWindow(QMainWindow):
         if res is None:
             t.setRowCount(0)
             t.setColumnCount(0)
-            self.summary.setText("Select a run (① Runs) to see its results." if self.runs
+            self.summary.setText("Select a run (Runs) to see its results." if self.runs
                                  else "")
             self._filling = False
             return
         run = self.sel
-        cols = columns()
-        head, body, extra = result_rows(res)
+        cols = columns("table_cols")
+        head, body, extra = result_rows(res, "table_cols")
         t.setColumnCount(len(head))
         t.setHorizontalHeaderLabels(head)
         for c, (key, _, _) in enumerate(cols):
@@ -742,7 +748,7 @@ class MainWindow(QMainWindow):
         m.addAction("Export the spikeless trace…", lambda: self._export_trace(run))
         m.addAction("Export the trace as recorded…", lambda: self._export_trace(run, True))
         m.addSeparator()
-        m.addAction("Remove   Del", lambda: self._remove_run(run))
+        m.addAction("Remove", lambda: self._remove_run(run))
         m.exec(self.run_list.viewport().mapToGlobal(pos))
 
     def rename(self, run, text):
@@ -994,10 +1000,23 @@ class MainWindow(QMainWindow):
         if not self._filling and self.sel is not None:
             self._pick_region(r if r < len(self.sel.regions) else -1, table=False)
 
-    def _region_focus(self, it):
+    def _region_menu(self, view, pos):
+        """Right-click on a region, in the Regions list or the results: rename, edit, remove."""
+        run, k = self.sel, view.rowAt(pos.y())
+        if run is None or not 0 <= k < len(run.regions):
+            return
+        if k not in _rows_of(view):
+            self._pick_region(k)
+        m = QMenu(self)
+        m.addAction("Rename", lambda: view.editItem(view.item(k, 0)))
+        m.addAction("Edit…", self.region_panel)
+        m.addSeparator()
+        m.addAction("Remove", lambda: self._delete_regions(_rows_of(view) or [k]))
+        m.exec(view.viewport().mapToGlobal(pos))
+
+    def _region_focus(self, k):
         run = self.sel
-        k = it.data(Qt.UserRole)
-        if run is not None and k is not None and k < len(run.regions):
+        if run is not None and 0 <= k < len(run.regions):
             r = run.regions[k]
             w = max(r.end - r.start, 0.2)
             self.canvas.focus(r.start - w, r.end + w)
@@ -1012,10 +1031,6 @@ class MainWindow(QMainWindow):
             net = float(np.trapezoid((y - run.background(y)[0])[m], run.x[m])) * 60
             self.statusBar().showMessage(f"{a:.2f}–{b:.2f} min: {net:.0f} net counts", 2000)
 
-    def _reg_set(self, key, val):
-        if self.sel_region >= 0:
-            self.set_region(self.sel_region, key, val)
-
     def set_region(self, k, key, val):
         """One thing about region k of the selected run (name, under, note, colour, label)."""
         run = self.sel
@@ -1028,8 +1043,9 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _renamed(self, it):
+        """A region's name typed in the results or the Regions list (its first column)."""
         run = self.sel
-        if self._filling or run is None or it.row() >= len(run.regions):
+        if self._filling or run is None or it.column() or it.row() >= len(run.regions):
             return
         name = it.text().strip()
         auto = self.results[run.id].rows[it.row()].name
@@ -1240,12 +1256,18 @@ class MainWindow(QMainWindow):
         elif fw is self.table:
             self._copy_results()
         else:
-            copy_figure(self)
+            self._copy_screen()
+
+    def _copy_screen(self):
+        """The plot as it is on screen, to the clipboard (the figure has its own Copy)."""
+        pm = self.canvas.grab()
+        QApplication.clipboard().setPixmap(pm)
+        self.log(f"Plot copied as on screen ({pm.width()} × {pm.height()} px).")
 
     def _copy_results(self):
         if self.sel is None:
             return
-        head, body, extra = result_rows(self.results[self.sel.id])
+        head, body, extra = result_rows(self.results[self.sel.id], "table_cols")
         copy_table([head] + body + extra)
         self.log(f"Results of '{self.sel.name}' copied ({len(body)} region(s)).")
 
@@ -1289,6 +1311,11 @@ class MainWindow(QMainWindow):
             self.report_win = ReportWindow(self)
         self.report_win.open()
 
+    def region_panel(self):
+        if self.region_win is None:
+            self.region_win = RegionPanel(self)
+        self.region_win.open()
+
     def _figure(self):
         if self.figure_win is None:
             self.figure_win = FigureWindow(self)
@@ -1296,7 +1323,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         for w in (self.options_win, self.report_win, self.figure_win, self.names_win,
-                  self.regions_win):
+                  self.regions_win, self.region_win):
             if w is not None:      # or the app stays up with them
                 w.close()
         super().closeEvent(e)
@@ -1310,6 +1337,23 @@ def _row(*widgets):
     for k, wdg in enumerate(widgets):
         h.addWidget(wdg, 1 if k == 0 else 0)
     return w
+
+
+def _hline():
+    f = QFrame()
+    f.setFrameShape(QFrame.HLine)
+    f.setStyleSheet("color:#3a3a3a;")
+    return f
+
+
+def _fit_rows(view, n, lo, hi):
+    """A list or table as tall as its n rows (lo to hi of them): no empty space below a few,
+    a scroll bar past hi."""
+    table = isinstance(view, QTableWidget)
+    row = (view.verticalHeader().defaultSectionSize() if table else
+           view.sizeHintForRow(0) if view.count() else view.fontMetrics().height() + 4)
+    head = view.horizontalHeader().sizeHint().height() if table else 0
+    view.setFixedHeight(head + row * min(max(n, lo), hi) + 2 * view.frameWidth() + 2)
 
 
 def _tool(text, tip, slot):

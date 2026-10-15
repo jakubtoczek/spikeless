@@ -101,8 +101,11 @@ def loads(text: str) -> tuple[list[Run], PlotOptions]:
         plot = _make(PlotOptions, got.get("plot") or {})
         if plot.y.title == "Counts (cps)":          # the old default, which said counts
             plot.y.title = Y_TITLE
-        if (got.get("plot") or {}).get("pct_max"):  # before 2026.10.15: a tick, not y_mode
+        old = got.get("plot") or {}
+        if old.get("pct_max"):                      # before 2026.10.15: a tick, not y_mode
             plot.y_mode = "pct_max"
+        if "font" not in old and isinstance(old.get("legend_font_family"), str):
+            plot.font = old["legend_font_family"]   # before 2026.10.15.1: a font per text
         return runs, plot
     except (ValueError, KeyError, TypeError, AttributeError, IndexError) as e:
         raise ValueError(f"Not a Spikeless session file ({e}).") from e
@@ -155,7 +158,9 @@ def _self_check():
     assert abs(r4.regions[0].start - 280 / 60) < 1e-9 and p4.y.title == Y_TITLE
     assert r4.source == "Old"                       # an older run: its name is its original
     old["plot"]["pct_max"] = True
-    assert loads(json.dumps(old))[1].y_mode == "pct_max"
+    old["plot"]["legend_font_family"] = "Arial"
+    p5 = loads(json.dumps(old))[1]
+    assert p5.y_mode == "pct_max" and p5.font == "Arial"
     for bad in ("", "[]", '{"app": "Other"}', '{"app": "Spikeless"}'):
         try:
             loads(bad)

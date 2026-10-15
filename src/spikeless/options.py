@@ -60,6 +60,11 @@ PREFS: dict = {
     "report_format": ".pdf",
     "report_sections": {"plot": True, "runs": True, "processing": True, "spikes": True,
                         "results": True},
+    "run_fields": {"isotope": False, "method": False, "molecule": True,   # the Runs panel's
+                   "conditions": True, "color": True, "details": True},
+    "table_cols": {"start": True, "end": True, "rt": True, "net": True,       # under the plot
+                   "unc": True, "pct": True, "pct_reg": False, "height": False,
+                   "w_half": False, "sym": False, "rs": False, "sn": False, "flags": True},
     "report_cols": {"start": True, "end": True, "rt": True, "net": True,      # + Region, always
                     "unc": True, "pct": True, "pct_reg": False, "height": False,
                     "w_half": False, "sym": False, "rs": False, "sn": False, "flags": True},
@@ -143,7 +148,8 @@ def method_info(method: str) -> list[tuple[str, str]]:
 
 def pick_color(parent, color) -> str | None:
     """A colour from the dialog (dark like the app), or None if cancelled."""
-    dlg = QColorDialog(QColor(color), parent)
+    # the window, not the button: a ColorButton's style (its colour) would paint the dialog
+    dlg = QColorDialog(QColor(color), parent.window() if parent is not None else None)
     dlg.setOption(QColorDialog.DontUseNativeDialog, True)
     dlg.setPalette(QApplication.palette())
     if dlg.exec() != QDialog.Accepted or not dlg.currentColor().isValid():
@@ -209,7 +215,7 @@ class OptionsWindow(QMainWindow):
         super().__init__(main)
         self.main = main
         self.setWindowTitle("Spikeless — options")
-        self.resize(760, 560)
+        self.resize(860, 720)
         self.topics = QListWidget()
         self.topics.setFixedWidth(170)
         self.pages = QStackedWidget()
@@ -269,8 +275,9 @@ class OptionsWindow(QMainWindow):
             self.pages.removeWidget(w)
             w.deleteLater()
         for name, page in (("Chromatogram", self._chrom_page()), ("Figure", self._figure_page()),
-                           ("Spikes", self._spikes_page()), ("Background", self._bg_page()),
-                           ("Regions", self._find_page()), ("Isotopes", self._iso_page()),
+                           ("Runs", self._runs_page()), ("Spikes", self._spikes_page()),
+                           ("Background", self._bg_page()), ("Regions", self._find_page()),
+                           ("Results", self._results_page()), ("Isotopes", self._iso_page()),
                            ("Methods", self._methods_page()), ("Log", self._log_page())):
             self.topics.addItem(name)
             sc = QScrollArea(widgetResizable=True)
@@ -333,15 +340,18 @@ class OptionsWindow(QMainWindow):
         c.toggled.connect(lambda on: self._set(key, on, sub))
         return c
 
-    def _table(self, v, key, heads, kinds, need=None):
+    def _table(self, v, key, heads, kinds, need=None, rows_shown=6, extra=()):
         """An editable list of rows (kinds: str / float / bool per column): typing saves it;
-        + adds a row, − removes the selected ones. A row missing a value of the columns `need`
-        (all of them by default) is left out."""
+        + adds a row, − removes the selected ones (extra: more widgets beside them). A row
+        missing a value of the columns `need` (all of them by default) is left out. Tall
+        enough for rows_shown rows without a scroll bar."""
         need = range(len(heads)) if need is None else need
         t = QTableWidget(0, len(heads))
         t.setHorizontalHeaderLabels(heads)
         t.verticalHeader().setVisible(False)
+        t.verticalHeader().setDefaultSectionSize(22)
         t.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        t.setMinimumHeight(t.horizontalHeader().sizeHint().height() + 22 * rows_shown + 4)
         rows = PREFS[key]
         t.setRowCount(len(rows))
         for r, row in enumerate(rows):
@@ -394,6 +404,8 @@ class OptionsWindow(QMainWindow):
             b.setFixedWidth(34)
             b.clicked.connect(fn)
             h.addWidget(b)
+        for wdg in extra:
+            h.addWidget(wdg)
         h.addStretch(1)
         v.addLayout(h)
         return t
@@ -401,7 +413,7 @@ class OptionsWindow(QMainWindow):
     def _chrom_page(self):
         w, v = self._page("Chromatogram", "What the mouse does on the plot. A double-click "
                           "always shows the whole run; on a region's edge a left drag moves "
-                          "it; Draw region (④) and Draw stretch (③) arm drawing.")
+                          "it; Draw region (Regions) and Draw stretch (Background) arm drawing.")
         f = QFormLayout()
         drag = (("zoom", "Zoom to the span (the height fitted)"), ("pan", "Pan"))
         f.addRow("Left drag", self._choice("chrom", "left_drag", drag))
@@ -426,8 +438,8 @@ class OptionsWindow(QMainWindow):
         return w
 
     def _spikes_page(self):
-        w, v = self._page("Spikes", "The rule a run is loaded with (② Spikes changes a run's "
-                          "own). A rule fixed in advance is what makes spike removal "
+        w, v = self._page("Spikes", "The rule a run is loaded with (the Spikes step changes "
+                          "a run's own). A rule fixed in advance is what makes spike removal "
                           "defensible: change it here, for your procedure, not run by run.")
         f = QFormLayout()
         f.addRow("Threshold", self._number("spikes", 1, 50, 0.5, "n_sigma", " σ"))
@@ -438,9 +450,10 @@ class OptionsWindow(QMainWindow):
         return w
 
     def _bg_page(self):
-        w, v = self._page("Background", "The background a run is loaded with (③ Background "
-                          "changes a run's own). A radio-detector's is flat — its count rate, "
-                          "with Poisson noise — so a mean is right; a drifting background is "
+        w, v = self._page("Background", "The background a run is loaded with (the "
+                          "Background step changes a run's own). A radio-detector's is flat "
+                          "— its count rate, with Poisson noise — so a mean is right; a "
+                          "drifting background is "
                           "offered only when ticked below.")
         f = QFormLayout()
         f.addRow("A new run's", self._choice("bg", "mode", (
@@ -449,7 +462,7 @@ class OptionsWindow(QMainWindow):
         f.addRow("Stretch from", self._number("bg", 0, 1000, 0.1, "stretch_from", " min"))
         f.addRow("Stretch to", self._number("bg", 0, 1000, 0.1, "stretch_to", " min"))
         f.addRow(self._tick("bg", "offer_drift", "Offer a background that follows a drift "
-                            "(SNIP, arPLS) in ③"))
+                            "(SNIP, arPLS) in the Background step"))
         f.addRow("Drift", self._choice("bg", "drift", (("snip", "SNIP"), ("arpls", "arPLS"))))
         f.addRow("SNIP half-width", self._number("bg", 2, 1000, 1, "n", " points"))
         v.addLayout(f)
@@ -458,8 +471,8 @@ class OptionsWindow(QMainWindow):
 
     def _find_page(self):
         w, v = self._page("Regions", "How Find regions looks for peaks, for a run loaded from "
-                          "now on (④ Regions changes a run's own): an apex of the moving mean "
-                          "standing the threshold above its surroundings, σ the Poisson noise "
+                          "now on (the Regions step changes a run's own): an apex of the "
+                          "moving mean standing the threshold above its surroundings, σ the Poisson noise "
                           "of that mean at the background; its region out to where the mean "
                           "falls back within the feet's σ, or to the valley it shares.")
         f = QFormLayout()
@@ -467,6 +480,39 @@ class OptionsWindow(QMainWindow):
         f.addRow("Apexes at least", self._number("find", 0, 600, 1, "min_gap_s", " s apart"))
         f.addRow("Moving mean of", self._number("find", 1, 51, 2, "smooth", " points"))
         f.addRow("Feet at", self._number("find", 0.5, 20, 0.5, "foot_sigma", " σ"))
+        v.addLayout(f)
+        v.addStretch(1)
+        return w
+
+    def _runs_page(self):
+        w, v = self._page("Runs", "What the Runs panel shows for the selected run. A field "
+                          "hidden keeps its value: a run's isotope still corrects its decay, "
+                          "its method still names its regions.")
+        for key, text, tip in (
+                ("isotope", "Isotope", "Its half-life, and its decay correction if ticked in "
+                 "Isotopes"),
+                ("method", "Method", "Names its regions and gives the report its conditions "
+                 "(Methods)"),
+                ("molecule", "Molecule", "Free text, in the report"),
+                ("conditions", "Conditions", "Free text, a line each (pH: 7), in the report"),
+                ("color", "Colour", "Its trace's colour"),
+                ("details", "Details", "Its original name, file, run date, points, SHA-256")):
+            v.addWidget(self._tick("run_fields", key, text, tip))
+        v.addStretch(1)
+        return w
+
+    def _results_page(self):
+        from .report import COLUMNS, HELP           # report imports this module
+        w, v = self._page("Results", "The columns of the results table under the plot; the "
+                          "region's name is always there. The report picks its own, in the "
+                          "Report window; ⤢ above the table shows them all.")
+        f = QFormLayout()
+        f.setVerticalSpacing(6)
+        for key, head, _ in COLUMNS[1:]:
+            g = QLabel(HELP.get(key, ""))
+            g.setWordWrap(True)
+            g.setStyleSheet(GREY)
+            f.addRow(self._tick("table_cols", key, head, HELP.get(key, "")), g)
         v.addLayout(f)
         v.addStretch(1)
         return w
@@ -502,40 +548,37 @@ class OptionsWindow(QMainWindow):
         return w
 
     def _iso_page(self):
-        w, v = self._page("Isotopes", "The isotopes the runs' Isotope list offers, their "
-                          "half-lives, and whether runs of each are decay-corrected: each "
-                          "point back to the run start before integration, which the results "
-                          "then say. Within a 15-min run that is 0.1 % for ¹⁷⁷Lu, 3 % for "
-                          "⁹⁹ᵐTc, 17 % for ⁶⁸Ga. Edit a cell; + adds a row, − removes the "
-                          "selected ones.")
+        w, v = self._page("Isotopes", "The isotopes a run's Isotope offers (shown when ticked "
+                          "in Runs), their half-lives, and whether runs of each are "
+                          "decay-corrected — each point back to the run start, before "
+                          "integration. Within a 15-min run that is 0.1 % for ¹⁷⁷Lu, 3 % for "
+                          "⁹⁹ᵐTc, 17 % for ⁶⁸Ga.")
         self._table(v, "isotopes", ["isotope", "half-life (h)", "decay-correct runs"],
-                    (str, float, bool))
+                    (str, float, bool), rows_shown=len(ISOTOPES))
         return w
 
     def _methods_page(self):
-        w, v = self._page("Methods", "Region names by retention time, per HPLC method. A run "
-                          "picks its method (Runs step); a region whose apex falls in a window "
-                          "of that method takes its name, unless one was typed. Without a "
-                          "match, a region is “peak N (Rt)”. A row per region: the "
-                          "method, the name, the window in minutes.")
+        w, v = self._page("Methods", "A run picks its method in Runs (its Method shown when "
+                          "ticked in Runs). Its regions take their names from the method's "
+                          "retention-time windows, unless one was typed; else “peak N (Rt)”.")
         self._table(v, "methods", ["method", "region", "Rt from (min)", "Rt to (min)"],
-                    (str, str, float, float))
+                    (str, str, float, float), rows_shown=5)
         v.addSpacing(8)
-        g = QLabel("<b>Conditions</b> — what the report gives for a run of each method, a row "
-                   "per field: what a chromatographic method states — the column, the mobile "
-                   "phases, the gradient, the flow rate, the temperature, the injection, the "
-                   "detectors. A field left empty is left out.")
+        g = QLabel("<b>Conditions</b> — in the report, for a run of the method: a row per "
+                   "field; one left empty is left out.")
         g.setWordWrap(True)
         v.addWidget(g)
-        t = self._table(v, "method_info", ["method", "field", "value"], (str, str, str),
-                        need=(0, 1))
-        h = QHBoxLayout()
         pick = QComboBox()
         pick.setEditable(True)
         pick.addItems(method_names())
         pick.lineEdit().setPlaceholderText("method")
+        pick.setMinimumWidth(160)
         b = QPushButton("＋ The usual fields for")
-        b.setToolTip("A row for each usual field of this method, to fill in")
+        b.setToolTip("A row for each field a chromatographic method states — column, mobile "
+                     "phases, gradient, flow rate, temperature, injection volume, detectors — "
+                     "to fill in")
+        t = self._table(v, "method_info", ["method", "field", "value"], (str, str, str),
+                        need=(0, 1), rows_shown=len(USUAL_FIELDS), extra=(b, pick))
 
         def usual():
             m = pick.currentText().strip()
@@ -553,9 +596,6 @@ class OptionsWindow(QMainWindow):
             t.read()
 
         b.clicked.connect(usual)
-        h.addWidget(b)
-        h.addWidget(pick, 1)
-        v.addLayout(h)
         return w
 
     def _log_page(self):

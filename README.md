@@ -29,10 +29,10 @@ removes it: the whole private folder, or only Spikeless's part of the shared one
 One screen: the chromatogram, its results under it, four steps on the right.
 
 1. **Drop** a GINA `.txt` on the window (or **Open…**, or **Ctrl+V** columns copied from Excel
-   or Prism). Its **spikes** are excluded at once — red on the plot, listed in **② Spikes**,
+   or Prism). Its **spikes** are excluded at once — red on the plot, listed in **Spikes**,
    where one can be put back.
-2. **③ Background**: the detector's background, shown dashed — nothing to do.
-3. **④ Regions**: **Find regions**, or **Draw region** and drag across a peak on the plot; drag
+2. **Background**: the detector's background, shown dashed — nothing to do.
+3. **Regions**: **Find regions**, or **Draw region** and drag across a peak on the plot; drag
    an edge to adjust it. The table under the plot gives each region's **net counts ± σ** and
    **% of total** (the radiochemical purity).
 4. **Report** — pick the sections, see it, save it as PDF, Word-compatible `.odt`, Excel,
@@ -42,9 +42,9 @@ One screen: the chromatogram, its results under it, four steps on the right.
 On the plot: click for a reading line, drag to zoom, right-drag to pan, double-click for the
 whole run.
 
-**Options**: the mouse on the plot, what a new run starts with (spike rule, background, how
-regions are found), export resolution, the isotopes (and which are decay-corrected), region
-names and conditions per HPLC method. Ctrl+Z / Ctrl+Y undo and redo every change.
+**⚙ Options**: the mouse on the plot, what the Runs panel and the results table show, what a
+new run starts with (spike rule, background, how regions are found), export resolution, the
+isotopes (and which are decay-corrected), region names and conditions per HPLC method. Ctrl+Z / Ctrl+Y undo and redo every change.
 
 Every panel and setting, how the numbers are made, and how to report spike removal in a
 publication: **[the user guide](GUIDE.md)**.

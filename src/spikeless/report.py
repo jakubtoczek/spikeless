@@ -3,7 +3,7 @@
 One HTML text, built from the session as it stands, is both the preview and every format:
 PDF and .odt are Qt's print of it, .md Qt's markdown of it, .html it with the figure inlined;
 the workbook takes the same tables, a sheet each. The Report window picks the format, the
-sections and the results' columns (the results table under the plot shows the same columns),
+sections and the results' columns (the table under the plot has its own: Options › Results),
 saved with the options the moment they change.
 """
 
@@ -54,12 +54,31 @@ COLUMNS = [
     ("sn", "S/N", lambda r: _n(r.sn, ".0f")),
     ("flags", "Flags", lambda r: ", ".join(r.flags)),
 ]
-HELP = {"pct": "% of all the net counts of the run (Ph. Eur.: radiochemical purity)",
-        "pct_reg": "% of the regions' net counts",
-        "unc": "1 σ, counting statistics: √(gross + background counts)",
-        "w_half": "width at half height", "sym": "symmetry factor w₀.₀₅ / 2d (Ph. Eur. 2.2.46)",
-        "rs": "resolution from the region before (Ph. Eur. 2.2.46)",
-        "sn": "2H / h, h the range of the background around the region (Ph. Eur. 2.2.46)",
+HELP = {"start": "Where the region begins, in min",
+        "end": "Where it ends, in min",
+        "rt": "Retention time: where it is highest above what lies under it, in min",
+        "net": "Its counts above the background (or a straight line between its ends): the "
+               "count rate × time, by trapezoids",
+        "unc": "The 1 σ uncertainty of the net counts from counting statistics. Net counts "
+               "N = G − B: G every count recorded across the region, B the background's counts "
+               "under it. Each is a Poisson count, whose variance is the count itself, so "
+               "σ = √(G + B). The true value lies within ± 1 σ about 2 times in 3, within "
+               "± 2 σ 19 times in 20. Divided by N, the relative uncertainty: 10 % at the "
+               "quantification limit (< LOQ). B is taken as if counted over the region alone "
+               "— it is the mean of far more points, so this errs on the safe side — and "
+               "nothing but counting is in it (not the injection, the detector's efficiency…)",
+        "pct": "% of all the net counts of the run, inside and outside the regions: the "
+               "radiochemical purity as Ph. Eur. defines it (of the total radioactivity). The "
+               "regions and Outside the regions add up to 100 %",
+        "pct_reg": "% of the regions' net counts only (those below the detection limit left "
+                   "out): what a purity over the integrated peaks alone would say",
+        "height": "Its highest point above what lies under it, in cps",
+        "w_half": "Width at half height, in min",
+        "sym": "Symmetry factor w₀.₀₅ / 2d (Ph. Eur. 2.2.46): 1 symmetric, above 1 tailing",
+        "rs": "Resolution from the region before, 1.18 (t₂ − t₁) / (w½₁ + w½₂) (Ph. Eur. "
+              "2.2.46): 1.5 and above, separated to the baseline",
+        "sn": "Signal-to-noise 2H / h, h the range of the background around the region "
+              "(Ph. Eur. 2.2.46)",
         "flags": "drawn / moved / copied: placed by hand · < LOQ: below the quantification "
                  "limit · n.d.: below the detection limit (Currie) · spike excluded: a spike "
                  "inside the region was excluded"}
@@ -82,14 +101,15 @@ LEGEND = ("Net counts above the background (or a straight line between a region'
           "inside the region was excluded.")
 
 
-def columns():
-    """The Region column, always (it names the row), then the ones ticked."""
-    return [(k, h, f) for k, h, f in COLUMNS if k == "name" or PREFS["report_cols"].get(k)]
+def columns(which="report_cols"):
+    """The Region column, always (it names the row), then the ones ticked: for the report
+    ("report_cols", the Report window) or the table under the plot ("table_cols", Options)."""
+    return [(k, h, f) for k, h, f in COLUMNS if k == "name" or PREFS[which].get(k)]
 
 
-def rows(res):
+def rows(res, which="report_cols"):
     """The ticked columns of each region, then outside the regions and total."""
-    cols = columns()
+    cols = columns(which)
     body = [[f(r) for _, _, f in cols] for r in res.rows]
     extra = []
     for name, net, pct in (("Outside the regions", res.outside,
@@ -289,7 +309,7 @@ class ReportWindow(QMainWindow):
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setToolTip("Tick what goes in; the results' columns are under Results (the "
-                             "table under the plot shows the same)")
+                             "table under the plot has its own: Options › Results)")
         self.tree.itemChanged.connect(self._ticked)
         v.addWidget(self.tree, 1)
         h = QHBoxLayout()
@@ -346,8 +366,6 @@ class ReportWindow(QMainWindow):
         PREFS[key][sub] = it.checkState(0) == Qt.Checked
         save_prefs()
         self.refresh()
-        if key == "report_cols":
-            self.main.refresh()          # the results table shows the same columns
 
     def _format_set(self, i):
         PREFS["report_format"] = FORMATS[i][0]
