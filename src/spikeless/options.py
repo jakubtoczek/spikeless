@@ -40,7 +40,8 @@ PREFS: dict = {
     "chrom": {"left_drag": "zoom", "right_drag": "pan",       # "zoom" | "pan"
               "left_click": "centre",                          # "centre" | "line"
               "wheel_y": False,                                # the wheel zooms the height too
-              "light": True},                                  # white around the plot, dark text
+              "light": True,                                   # white around the plot, dark text
+              "edge_unit": "min"},                             # a region's typed edges: point | s | min
     "raw_trace": {"color": "#b0b0b0", "width": 0.8, "style": "solid"},   # × the trace's width
     "spike_line": {"color": "#e02020", "width": 1.0},                    # (the figure too)
     "bg_line": {"color": "#808080", "width": 0.8, "style": "dashed"},
@@ -50,8 +51,9 @@ PREFS: dict = {
     "bg": {"mode": "auto", "stretch_from": 0.5, "stretch_to": 1.5,   # a new run's
            "drift": "snip", "n": 40,
            "offer": {"none": True, "auto": True, "stretch": True, "drift": False}},  # in the step
-    "find": {"n_sigma": 5.0, "min_gap_s": 10.0, "smooth": 5, "foot_sigma": 2.0,  # a new run's
-             "auto": False},
+    "find": {"n_sigma": 8.0, "min_gap_s": 10.0, "smooth": 5, "foot_sigma": 2.0,  # a new run's
+             "auto": False,
+             "sigma_at": "base"},     # σ where the apex stands (2026.10.16): marks the rule
     "background": asdict(Background()),   # behind the figure preview (transparency)
     "png_dpi": 600,
     "clip_dpi": 600,
@@ -61,6 +63,7 @@ PREFS: dict = {
     "methods": [],                            # [method, region name, Rt from, Rt to] (min)
     "method_info": [],                        # [method, field, value]: its conditions
     "report_format": ".pdf",
+    "report_scope": "summary",                # report.SCOPES
     "report_sections": {"plot": True, "runs": True, "processing": True, "spikes": True,
                         "results": True},
     "run_fields": {"isotope": False, "method": False, "molecule": True,   # the Runs panel's
@@ -75,6 +78,7 @@ PREFS: dict = {
 _DEFAULTS = copy.deepcopy(PREFS)
 _CHOICES = {("chrom", "left_drag"): ("zoom", "pan"), ("chrom", "right_drag"): ("zoom", "pan"),
             ("chrom", "left_click"): ("centre", "line"),
+            ("chrom", "edge_unit"): ("point", "s", "min"),
             ("bg", "mode"): ("none", "auto", "stretch", "drift"), ("bg", "drift"): ("snip", "arpls"),
             ("raw_trace", "style"): ("solid", "dotted", "dashed", "dashdot"),
             ("bg_line", "style"): ("solid", "dotted", "dashed", "dashdot")}
@@ -109,6 +113,9 @@ def load_prefs(path: Path | None = None, got=None) -> None:
         except (OSError, ValueError):
             got = {}
     got = got if isinstance(got, dict) else {}
+    find = got.get("find")
+    if isinstance(find, dict) and find.get("sigma_at") != "base":
+        find.pop("n_sigma", None)          # a threshold of the old rule (σ of the background)
     for k, v in _DEFAULTS.items():
         PREFS[k] = _merge(v, got.get(k))
     PREFS["isotopes"] = [[r[0], float(r[1]), bool(r[2]) if len(r) > 2 else False]
@@ -136,8 +143,8 @@ def sync_style() -> None:
 
 
 def params(key) -> dict:
-    """A new run's settings (Options › Spikes / Regions), its "auto" left out."""
-    return {k: v for k, v in PREFS[key].items() if k != "auto"}
+    """A new run's settings (Options › Spikes / Regions), its "auto" (and marker) left out."""
+    return {k: v for k, v in PREFS[key].items() if k not in ("auto", "sigma_at")}
 
 
 def save_prefs(path: Path | None = None) -> bool:

@@ -34,7 +34,7 @@ from PySide6.QtWidgets import QApplication
 
 from .options import PREFS
 from .peaks import snap
-from .plotting import curves, draw, fit_y, place_legend, y_span, y_title
+from .plotting import curves, draw, fit_y, place_legend, spread_labels, y_span, y_title
 
 _EDGE_PX = 6          # how close to an edge (pixels) the mouse grabs it
 _SNAP_PX = 8          # a region's edge lands on the lowest point this close to the mouse
@@ -130,11 +130,13 @@ class ChromCanvas(FigureCanvasQTAgg):
             self.draw_idle()
             return
         # screen-sized lines and labels; the figure keeps its own (Figure window)
-        opts = replace(opts, line_width_pt=1.3, label_size=8.5)
+        lw_scale = 1.3 / opts.line_width_pt
+        opts = replace(opts, label_size=8.5)
         mode = sel.bg_mode if sel is not None else "auto"
         line = mode != "none" and view.get(f"line_{mode}", True)
         draw(ax, runs, opts, results, raw=view["raw"], spikes=view["spikes"],
-             background=line, only=sel, sel=sel, sel_region=sel_region, edges=True)
+             background=line, only=sel, sel=sel, sel_region=sel_region, edges=True,
+             lw_scale=lw_scale)
         if view.get("stretch", True) and sel is not None and sel.shown \
                 and sel.bg_mode == "stretch" and sel.bg_stretch:
             a, b = sorted(sel.bg_stretch)
@@ -159,6 +161,13 @@ class ChromCanvas(FigureCanvasQTAgg):
     def redraw(self):
         if self.state:
             self.show(*self.state)
+
+    def draw(self):
+        """A full draw, the regions' labels placed for the view first (what fits depends
+        on it)."""
+        if self.state:
+            spread_labels(self.ax)
+        super().draw()
 
     def _on_draw(self, _ev):
         """After a full draw: keep it, then draw what is blitted over it (animated, so the full

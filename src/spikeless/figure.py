@@ -12,42 +12,61 @@ from __future__ import annotations
 import io
 
 from PySide6.QtCore import QByteArray, QMimeData, Qt, QTimer
-from PySide6.QtGui import QImage, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QMainWindow, QPushButton, QScrollArea, QSizePolicy, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .options import PREFS
-from .plotting import LEGEND, PlotOptions, build_figure, legend_text
+from .plotting import DASHES, LEGEND, PlotOptions, build_figure, legend_text
 from .plotview import Background, ZoomableFigureView
-from .widgets import Collapsible, ColorButton, guard_fields, link
+from .run import COLORS
+from .widgets import Collapsible, ColorButton, guard_fields, link, pick_color
 
 _LINESTYLES = ["solid", "dotted", "dashed", "dashdot"]
 _DIRS = {"out": "Out", "in": "In", "inout": "Across"}
 
 
-def _preset(o: PlotOptions, total_w, w, h, font, lw, labels):
+def apply_size(o: PlotOptions, total_w, w, h, font, lw, labels):
     """total_w: the whole figure's width (a journal's column, or a share of it), the plot area
     what is left; None: the plot area w × h. labels: the regions' labels, pt."""
     o.plot_w_mm, o.plot_h_mm, o.total_w_mm, o.total_h_mm = w, h, total_w, None
     o.line_width_pt = lw
-    o.legend_font_size, o.label_size = font, labels
+    o.legend_font_size, o.label_size, o.title_size = font, labels, font + 1
     for ax in (o.x, o.y):
         ax.tick_font_size, ax.title_font_size = font, font + 1
-        ax.lw_pt = ax.tick_lw_pt = lw * 0.67
+        ax.lw_pt = ax.tick_lw_pt = round(lw * 2 / 3, 2)
+
+
+def apply_style(main, bw):
+    """Every run's colour, line and fill, and the regions' shading: in colour — each run its
+    own, solid — or in black and white, as Flowless — each run black, its own dashes, the
+    shading grey. The runs shown first, in their order."""
+    runs = [r for r in main.runs if r.shown] + [r for r in main.runs if not r.shown]
+    for i, r in enumerate(runs):
+        r.color = "#000000" if bw else COLORS[i % len(COLORS)]
+        r.dash = list(DASHES)[i % len(DASHES)] if bw else "solid"
+        r.width, r.fill = None, 0.0
+        for g in r.regions:
+            g.color = None
+    main.plot_opts.region_alpha = 0.2 if bw else 0.3
 
 
 # Journals' columns: single 80–90 mm (Springer 84, ACS 82.5, Elsevier 90), double 170–190 mm
 # (Springer 174, ACS 178, Elsevier 190). 80 mm fits any single column, and two side by side
 # fit any double one with a gap; 55 mm, three; 170 mm, any double column.
 # ponytail: one panel per figure; a multi-panel figure is for later
-PRESETS = {"Panel — 1 column, or ½ of a 2-column figure: 80 mm wide, 7 pt":
+# The first is the default (PlotOptions' own).
+SIZES = {"Panel — 1 column, or ½ of a 2-column figure: 80 mm wide, 7 pt":
            (80, 65, 40, 7.0, 0.75, 6.0),
            "Panel — ⅓ of a 2-column figure: 55 mm wide, 7 pt": (55, 41, 32, 7.0, 0.6, 6.0),
            "Figure — the full 2-column width: 170 mm wide, 7 pt":
            (170, 155, 60, 7.0, 0.75, 7.0),
            "Slide — plot 160 × 90 mm, 14 pt": (None, 160, 90, 14.0, 1.5, 14.0)}
+STYLES = {"Colour — each run its colour, solid lines": False,
+          "Black and white — each run its dashes, grey shading": True}
 
 
 def _fonts():
@@ -157,6 +176,7 @@ class FigureWindow(QMainWindow):
         self._loading = False
         self._sections = []
         self._open = set()               # the sections unfolded, kept when the panel is rebuilt
+        self._run_ids = None             # the runs the Traces table has rows for
         # the preview (a figure, then an SVG of it: 80 ms and more) once a burst of changes ends
         self._later = QTimer(self, singleShot=True, interval=120, timeout=self.refresh)
         self.load()
@@ -176,6 +196,7 @@ class FigureWindow(QMainWindow):
         if not self.isVisible():
             return
         self._later.stop()
+        self._fill_runs()
         n = sum(r.shown for r in self.main.runs)
         leg = self.d["legend"]                       # no legend for one run: unticked, greyed
         leg.blockSignals(True)
@@ -209,13 +230,23 @@ class FigureWindow(QMainWindow):
         host = QWidget()
         outer = QVBoxLayout(host)
 
-        pre = QComboBox()
-        pre.addItem("Preset…")
-        pre.addItems(list(PRESETS))
-        pre.setToolTip("Sizes for a journal: 80 mm fits any single column, and two side by "
-                       "side any double column; 55 mm, three side by side")
-        pre.activated.connect(self._preset)
-        outer.addWidget(pre)
+        presets = QHBoxLayout()
+        for name, items, slot, tip in (
+                ("Size…", SIZES, self._size, "Sizes for a journal: 80 mm fits any single "
+                 "column, and two side by side any double column; 55 mm, three side by side "
+                 "(the first: a new figure's)"),
+                ("Style…", STYLES, self._style, "Every run's colour, line and fill, and the "
+                 "regions' shading (Ctrl+Z gives them back)")):
+            c = QComboBox()
+            c.addItem(name)
+            c.addItems(list(items))
+            c.setToolTip(tip)
+            c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            c.setMinimumContentsLength(8)            # side by side in the panel; the list is wide
+            c.view().setMinimumWidth(c.view().sizeHintForColumn(0) + 24)
+            c.activated.connect(slot)
+            presets.addWidget(c, 1)
+        outer.addLayout(presets)
 
         # size
         sz, f = _section()
@@ -249,11 +280,21 @@ class FigureWindow(QMainWindow):
         font.lineEdit().editingFinished.connect(self._apply)
         self.d["font"] = font
         f.addRow("Font", font)
+        self.d["title"] = QLineEdit(o.title)
+        self.d["title"].setPlaceholderText("none")
+        self.d["title"].setToolTip("Above the plot (a panel's name); the figure grows for it")
+        self.d["title"].editingFinished.connect(self._apply)
+        f.addRow("Title", self.d["title"])
+        self.d["title_size"] = _spin(4, 30, o.title_size, 0.5)
+        f.addRow("Title size (pt)", self.d["title_size"])
 
         # traces
         tr, f = _section()
         self.d["lw"] = _spin(0.1, 5, o.line_width_pt, 0.1)
         f.addRow("Line width (pt)", self.d["lw"])
+        self.runs_t = _runs_table(self._run_clicked)
+        f.addRow(self.runs_t)
+        self._run_ids = None
         for key, label in (("show_background", "Background line"),
                            ("show_spikes", "Excluded spikes"),
                            ("show_raw", "Trace as recorded (its style: Options › Chromatogram)")):
@@ -306,7 +347,7 @@ class FigureWindow(QMainWindow):
         f.addRow("   opacity", self.d["out_a"])
 
         for k in ("w_mm", "h_mm", "bg_a", "out_a", "tot_w", "tot_h", "leg_size", "label_size",
-                  "lw", "alpha", "leg_dx", "leg_dy"):
+                  "lw", "alpha", "leg_dx", "leg_dy", "title_size"):
             self.d[k].valueChanged.connect(self._apply)
 
         for title, body in (("Size", sz), ("Text", tx), ("Traces", tr), ("Regions", rg),
@@ -334,12 +375,72 @@ class FigureWindow(QMainWindow):
         setattr(self.main.plot_opts, key, value)
         self.main.refresh()
 
-    def _preset(self, i):
-        if i == 0:
-            return
-        _preset(self.main.plot_opts, *PRESETS[list(PRESETS)[i - 1]])
-        self.load()
-        self.main.refresh()
+    def _size(self, i):
+        if i:
+            apply_size(self.main.plot_opts, *SIZES[list(SIZES)[i - 1]])
+            self.load()
+            self.main.refresh()
+
+    def _style(self, i):
+        if i and self.main.runs:
+            self.main._push("figure style")
+            apply_style(self.main, list(STYLES.values())[i - 1])
+            self.load()
+            self.main.refresh()
+
+    # ---------------- each run's line (Traces)
+    def _fill_runs(self):
+        """The Traces table: a row per run — its colour, name, line, width, fill. Rebuilt
+        when the runs change; its fields act on the run in their row at the time."""
+        runs, t = self.main.runs, self.runs_t
+        set_run = self.main.set_run
+
+        def on(k, key, conv):
+            return lambda v: k < len(self.main.runs) and set_run(self.main.runs[k], key, conv(v))
+
+        if [r.id for r in runs] != self._run_ids:
+            self._run_ids = [r.id for r in runs]
+            t.setRowCount(len(runs))
+            for k in range(len(runs)):
+                line = QComboBox()
+                line.addItems(list(DASHES))
+                line.activated.connect(on(k, "dash", lambda i: list(DASHES)[i]))
+                width = _spin(0, 5, 0, 0.1)
+                width.setSpecialValueText("Auto")
+                width.valueChanged.connect(on(k, "width", lambda v: v or None))
+                fill = _spin(0, 1, 0, 0.05)
+                fill.setSpecialValueText("None")
+                fill.valueChanged.connect(on(k, "fill", float))
+                for c, wdg, px in ((2, line, 104), (3, width, 60), (4, fill, 60)):
+                    wdg.setFixedWidth(px)           # the table fits the panel
+                    t.setCellWidget(k, c, wdg)
+            guard_fields(t)
+            t.setFixedHeight(t.horizontalHeader().sizeHint().height()
+                             + 24 * max(1, min(len(runs), 8)) + 4)
+        for k, r in enumerate(runs):
+            pm = QPixmap(12, 12)
+            pm.fill(QColor(r.color))
+            sw = QTableWidgetItem(QIcon(pm), "")
+            sw.setFlags(Qt.ItemIsEnabled)
+            t.setItem(k, 0, sw)
+            name = QTableWidgetItem(r.legend())
+            name.setFlags(Qt.ItemIsEnabled)
+            if not r.shown:
+                name.setForeground(QColor("#8d8d8d"))
+            t.setItem(k, 1, name)
+            for c, value in ((2, list(DASHES).index(r.dash) if r.dash in DASHES else 0),
+                             (3, r.width or 0.0), (4, r.fill)):
+                wdg = t.cellWidget(k, c)
+                wdg.blockSignals(True)
+                (wdg.setCurrentIndex if c == 2 else wdg.setValue)(value)
+                wdg.blockSignals(False)
+
+    def _run_clicked(self, row, col):
+        if col == 0 and row < len(self.main.runs):
+            run = self.main.runs[row]
+            c = pick_color(self, run.color)
+            if c:
+                self.main.set_run(run, "color", c)
 
     def _axis_group(self, p, ax):
         g, f = _section()
@@ -463,6 +564,7 @@ class FigureWindow(QMainWindow):
         o.plot_w_mm, o.plot_h_mm = d["w_mm"].value(), d["h_mm"].value()
         o.total_w_mm, o.total_h_mm = val("tot_w"), val("tot_h")
         o.font = d["font"].currentText().strip() or "sans-serif"
+        o.title, o.title_size = d["title"].text(), d["title_size"].value()
         o.bg_color, o.bg_alpha = d["bg"].color, d["bg_a"].value()
         o.outside_color, o.outside_alpha = d["out"].color, d["out_a"].value()
         o.legend_loc = d["leg_loc"].currentData()
@@ -542,6 +644,25 @@ def _head(form, text):
 
 
 # ---------------- small widgets
+def _runs_table(on_click):
+    t = QTableWidget(0, 5)
+    t.setHorizontalHeaderLabels(["", "Run", "Line", "Width (pt)", "Fill"])
+    t.verticalHeader().setVisible(False)
+    t.verticalHeader().setDefaultSectionSize(24)
+    t.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+    for c in (0, 2, 3, 4):
+        t.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
+    t.setShowGrid(False)
+    t.setSelectionMode(QTableWidget.NoSelection)
+    t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    t.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)   # the panel's width, not its own
+    t.setToolTip("Each run: click its swatch for its colour; its line; its width (Auto: the "
+                 "line width above); a fill under its trace, its opacity (None: no fill). "
+                 "Grey: not shown. On screen too.")
+    t.cellClicked.connect(on_click)
+    return t
+
+
 def _cform(w):
     f = QFormLayout(w)
     f.setVerticalSpacing(4)

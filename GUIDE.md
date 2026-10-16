@@ -77,8 +77,9 @@ run's total net counts, spikes excluded, decay correction.
 
 ### Runs
 
-The runs loaded: **tick** to show, **click** to work on one, **click it again** (or F2) to
-rename it, **double-click**: the plot shows it whole (the height stays that of every run).
+The runs loaded: **tick** to show, **click** to work on one, **double-click** (or F2) to
+rename it, **drag** one up or down to reorder them — the legend, the figure's styles and the
+report follow the list's order (Ctrl+Z puts it back).
 **Right-click**: rename, export the **spikeless trace** (spikes excluded, decay-corrected if
 so) or the trace **as recorded**, as a GINA-style `.txt`, remove. **Del** removes it (Ctrl+Z
 brings it back). A click below the runs, or elsewhere on the panel away from the steps, or
@@ -127,14 +128,17 @@ Which ways are offered, and a new run's: Options › Background.
 ### Regions
 
 A region is a span integrated as one: a peak, or a peak's shoulder. **Find regions** proposes
-them for the peaks no region holds; **Threshold** (default 5 σ) and **⚙** (apexes at least 10 s
+them for the peaks no region holds; **Threshold** (default 8 σ) and **⚙** (apexes at least 10 s
 apart, on a 5-point moving mean, feet at 2 σ) say how. **⟳** (off at first): found on their
 own, on load and as the threshold moves. Finding again, a region found and left untouched is
 found again; one you named, moved, coloured or noted stays. A new run starts with Options ›
 Regions, where ⟳ is set too. **Draw region**: see
 below. The **list**: name, Rt, % of total. Click one to select it; double-click: the plot shows
 it; **right-click**: **Rename** (or F2, or click it again), **Edit…**, **Remove** (or Del, the
-selected ones). **Edit…** opens the region on its own, following the selection: its name, what
+selected ones). **Edit…** opens the region on its own, following the selection: its name, its
+**edges** typed — **from … to …**, in data points (1 the first), seconds or minutes from the
+run start, as you choose beside them; grey as found, white once placed by hand; typed, an edge
+goes exactly there, a neighbour sharing it moves with it, the others stop it —, what
 its net counts are above (**the background**, or **a straight line between its ends** — for a
 peak on another's tail), a note (why it was drawn or moved, if it matters), its colour, whether
 the figure labels it.
@@ -160,15 +164,23 @@ the figure labels it.
 **Figure…** (toolbar) opens what its Copy and Export make. Left, each section folded until
 opened (the ones you open stay open):
 
-- a **preset** — journals' single columns are 80–90 mm wide, their double columns 170–190 mm:
-  **Panel, 80 mm** (fits any single column, and two side by side fit any double column),
-  **Panel, ⅓ of a 2-column figure, 55 mm** (three side by side), **the full 2-column width,
-  170 mm**, all 7 pt (the two panels' region labels 6 pt); **Slide** (plot 160 × 90 mm, 14 pt).
-  A panel's width is the whole of it, labels included;
+- **Size…** — journals' single columns are 80–90 mm wide, their double columns 170–190 mm:
+  **Panel, 80 mm** (fits any single column, and two side by side fit any double column; a new
+  figure's size), **Panel, ⅓ of a 2-column figure, 55 mm** (three side by side), **the full
+  2-column width, 170 mm**, all 7 pt (the two panels' region labels 6 pt); **Slide** (plot
+  160 × 90 mm, 14 pt). A panel's width is the whole of it, labels included;
+- **Style…** — **Colour**: each run its colour, solid lines; **Black and white** (as Flowless):
+  each run black with its own dashes — solid, dashed, dotted, dash-dot… in the list's order,
+  the runs shown first —, the regions shaded grey. Every run's colour, line and fill are reset
+  (Ctrl+Z gives them back), then each can be changed (Traces);
 - **Size**: the plot area in mm; the whole figure's width and height (Auto: the plot area plus
   its labels; fixed, the plot area is what is left);
-- **Text**: one font for every text of the figure;
-- **Traces**: line width, the background line, excluded spikes, the trace as recorded;
+- **Text**: one font for every text of the figure; a **title** above the plot (a panel's name:
+  the figure grows for it) and its size;
+- **Traces**: line width; **each run** — its colour (click the swatch), its line (solid,
+  dashed, dotted…), its width (Auto: the line width above), a fill under its trace and its
+  opacity (None: no fill), on screen too; the background line, excluded spikes, the trace as
+  recorded;
 - **Regions**: shaded, their labels — **Name**, **% of total**, **Rt**, each ticked or not, a
   line each —, label size, opacity, and each
   region's colour, label and note (**edit ⤢**);
@@ -201,11 +213,19 @@ between two majors (majors every 5 or 10 min). On a figure 80 mm wide or less, c
 3 digits or more are labelled in 6 pt (Y axis › *6 pt for counts ≥ 100*: untick to keep the
 size set). Labels: a region with a name of its own
 shows it; every region shows its % of total; regions below the quantification limit carry no
-label (they are in the results).
+label (they are in the results). Each label goes above its apex, else to its right, else to its
+left — where it overlaps no other label nor the legend, stays in the plot and, if it can,
+crosses no trace —, the tallest apexes first; else above the labels in its way. A white edge
+keeps a label readable where it must cross a trace. On screen they are placed again as you zoom.
 
 ## Report
 
-**Report** opens its own window. Left: the **format** (PDF; `.odt`, opens in Word and
+**Report** opens its own window. Left: the **runs** — **the ticked runs: a summary, each
+run, their details** (a line per run — spikes excluded, background, net counts, regions, decay
+— and every run's results in one table; then what was done to each run, its spikes and notes;
+last the runs' details, what they all share once and what differs run by run), **the ticked
+runs, each in full, one after the other**, or **the selected run only**; one run is reported in
+full whichever is chosen. Then the **format** (PDF; `.odt`, opens in Word and
 LibreOffice; Excel, a sheet per table and the figure; Markdown, the figure saved beside it; web
 page) and the **sections**: the **figure**; the **runs** (the original name of a renamed run,
 the file and its SHA-256, run date, isotope, molecule, the method and its conditions — column,
@@ -313,13 +333,22 @@ net counts are below its own detection limit has no activity above background: n
 
 ### Find regions
 
-Maxima of the trace's 5-point mean that stand 5 σ above their surroundings, σ the Poisson noise
-of that mean at the background count rate; at least 10 s apart. Each becomes a region from its
+Maxima of the trace's 5-point mean that stand 8 σ above their surroundings, σ the Poisson noise
+of that mean at the level the apex rises from — the background, or the tail of a bigger peak:
+on a tail at 50 cps where the background is 10, the noise is √5 times larger, and a bump there
+must stand that much higher to be a peak of its own; at least 10 s apart. Each becomes a region from its
 feet (where the 5-point mean falls back within 2 σ of the background) or the valley it shares
 with a neighbour; it is kept if its net counts exceed L_D. (Those numbers are the defaults:
 Regions › Threshold and More, Options › Regions.) On the example runs: both peaks of
 the HOPO run; the ¹⁷⁷Lu product at 7.90 min (97.7 %), the impurity at 2.55 min (2.2 %) and two
-traces < LOQ of the Imathera2 run; nothing on a 120-min blank injection.
+traces < LOQ of the Imathera2 run; nothing on a 120-min blank injection; the impurity
+and the product of each of the six September ⁹⁹ᵐTc runs, their tails whole.
+
+Why 8 σ: on those nine runs, the noise bumps reach 5.2 σ (7.2 on the 2-h blank, which has 8
+times the points), the real peaks 9.8 σ and up. Measured against the background's noise
+instead, a bump on a product's tail reached 10.4 σ, and only 12 σ kept that tail in one region
+— a threshold that missed isolated peaks below ~15 cps tall on a 10-cps background, which 8 σ
+finds from ~10 cps. A threshold saved in the options before 2026.10.16 (the old rule) becomes 8.
 
 ### System suitability (Ph. Eur. 2.2.46)
 

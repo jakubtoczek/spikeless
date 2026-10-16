@@ -1,5 +1,9 @@
 """Spikeless - the report: what was loaded, what was done to it, the results, the figure.
 
+On the ticked runs or the selected one (SCOPES). Several runs: a summary first — a line per
+run, every run's results in one table — then what was done to each, then their details, what
+they share once and what differs a column each; or each run in full, one after the other.
+
 One HTML text, built from the session as it stands, is both the preview and every format:
 PDF and .odt are Qt's print of it, .md Qt's markdown of it, .html it with the figure inlined;
 the workbook takes the same tables, a sheet each. The Report window picks the format, the
@@ -90,6 +94,10 @@ SECTIONS = [("plot", "Figure", "As Copy / Export make it (Figure window)"),
             ("spikes", "Spikes", "Each spike: time, as recorded, as bridged, in which region"),
             ("results", "Results", "A row per region, outside the regions, total — in the "
                                    "columns ticked")]
+SCOPES = [("summary", "Ticked runs: a summary, each run, their details"),
+          ("each", "Ticked runs, each in full, one after the other"),
+          ("selected", "The selected run only")]
+SUMMARY = ("Run", "Spikes excluded", "Background (cps)", "Net counts", "Regions", "Decay")
 FORMATS = [(".pdf", "PDF"), (".odt", "Document (.odt) — opens in Word and LibreOffice"),
            (".xlsx", "Excel workbook — a sheet per table"), (".md", "Markdown text"),
            (".html", "Web page")]
@@ -186,6 +194,51 @@ def run_info(run) -> list[tuple[str, str]]:
         if v]
 
 
+def scope() -> str:
+    return PREFS["report_scope"] if PREFS["report_scope"] in dict(SCOPES) else SCOPES[0][0]
+
+
+def report_runs(main) -> list:
+    """The runs the report is on: the selected one (else the first ticked), or every ticked
+    one, in the list's order."""
+    shown = [r for r in main.runs if r.shown]
+    if scope() == "selected":
+        run = main.sel if main.sel is not None else next(iter(shown), None)
+        return [run] if run is not None else []
+    return shown
+
+
+def summary_rows(main, runs) -> list[list]:
+    """A line per run (SUMMARY's columns)."""
+    out = []
+    for r in runs:
+        res = main.results[r.id]
+        out.append([r.name, int(r.excluded().sum()), f"{res.background:.1f}",
+                    f"{res.total:.0f}", len(r.regions),
+                    f"corrected ({r.isotope})" if r.decayed() else "not corrected"])
+    return out
+
+
+def all_results(main, runs):
+    """Every run's results in one table, a Run column first: (head, body)."""
+    body = []
+    for r in runs:
+        head, rows_, extra = rows(main.results[r.id])
+        body += [[r.name] + row for row in rows_ + extra]
+    return ["Run"] + [h for _, h, _ in columns()], body
+
+
+def info_split(runs):
+    """The runs' details (run_info): (what all share, as rows; the fields that differ; a row
+    per run of those)."""
+    infos = [dict(run_info(r)) for r in runs]
+    keys = list(dict.fromkeys(k for i in infos for k in i))
+    same = [(k, infos[0][k]) for k in keys
+            if all(k in i and i[k] == infos[0][k] for i in infos)]
+    diff = [k for k in keys if k not in dict(same)]
+    return same, diff, [[r.name] + [i.get(k, "") for k in diff] for r, i in zip(runs, infos)]
+
+
 def _table(head, body, border=1) -> str:
     h = "<tr>" + "".join(f"<th>{esc(c)}</th>" for c in head) + "</tr>" if head else ""
     return (f"<table border='{border}' cellspacing='0' cellpadding='3'>{h}"
@@ -196,16 +249,24 @@ def _table(head, body, border=1) -> str:
 def html(main, plot_width_px: int | None = None) -> str:
     """The report as HTML. With plot_width_px, the figure is the image named PLOT."""
     on = PREFS["report_sections"]
+    runs = report_runs(main)
+    summary = scope() == "summary" and len(runs) > 1
     out = ["<h1>Radio-HPLC report</h1>",
            f"<p>{_dt.datetime.now():%Y-%m-%d %H:%M} · Spikeless {__version__}</p>"]
-    if not main.runs:
-        out.append("<p>Nothing loaded.</p>")
-    if on["plot"] and plot_width_px and main.runs:
+    if not runs:
+        out.append("<p>Nothing to report: tick a run.</p>" if main.runs else
+                   "<p>Nothing loaded.</p>")
+    if on["plot"] and plot_width_px and runs:
         out.append(f"<p><img src='{PLOT}' width='{plot_width_px}'></p>")
-    for run in main.runs:
+    if summary:
+        out.append(f"<h2>Summary — {len(runs)} runs</h2>" + _table(SUMMARY,
+                                                                  summary_rows(main, runs)))
+        if on["results"]:
+            out.append("<h3>Results</h3>" + _table(*all_results(main, runs)))
+    for run in runs:
         res = main.results[run.id]
         out.append(f"<h2>{esc(run.name)}</h2>")
-        if on["runs"]:
+        if on["runs"] and not summary:
             out.append(_table(None, run_info(run), border=0))
         if on["processing"]:
             out.append("<p>" + "<br>".join(esc(s) for s in processing(run, res)) + "</p>")
@@ -214,12 +275,19 @@ def html(main, plot_width_px: int | None = None) -> str:
                                "Status"), spike_rows(run, res)))
         if on["results"]:
             head, body, extra = rows(res)
-            if head:
+            if head and not summary:
                 out.append("<h3>Results</h3>" + _table(head, body + extra))
             notes = [f"{row.name}: {r.note}" for r, row in zip(run.regions, res.rows) if r.note]
             if notes:
                 out.append("<p>" + "<br>".join(esc(s) for s in notes) + "</p>")
-    if on["results"] and main.runs:
+    if summary and on["runs"]:
+        same, diff, per = info_split(runs)
+        out.append("<h2>The runs' details</h2>")
+        if same:
+            out.append("<p>The same for every run:</p>" + _table(None, same, border=0))
+        if diff:
+            out.append("<p>Run by run:</p>" + _table(["Run"] + diff, per))
+    if on["results"] and runs:
         out.append(f"<p><small>{esc(LEGEND)}</small></p>")
     return "".join(out)
 
@@ -238,12 +306,13 @@ def to_xlsx(main, path, png: bytes | None = None, width_px: int | None = None) -
     from openpyxl import Workbook
 
     on = PREFS["report_sections"]
+    runs = report_runs(main)
     wb = Workbook()
     ws = wb.active
     ws.title = "Report"
     ws.append(["Radio-HPLC report", f"{_dt.datetime.now():%Y-%m-%d %H:%M}",
                f"Spikeless {__version__}"])
-    for run in main.runs:
+    for run in runs:
         res = main.results[run.id]
         ws.append([])
         ws.append([run.name])
@@ -257,7 +326,7 @@ def to_xlsx(main, path, png: bytes | None = None, width_px: int | None = None) -
         rs = wb.create_sheet("Results")
         head = [h for _, h, _ in columns()]
         rs.append(["Run"] + head)
-        for run in main.runs:
+        for run in runs:
             _, body, extra = rows(main.results[run.id])
             for r in body + extra:
                 rs.append([run.name] + [num(c) for c in r])
@@ -267,7 +336,7 @@ def to_xlsx(main, path, png: bytes | None = None, width_px: int | None = None) -
         sp = wb.create_sheet("Spikes")
         sp.append(["Run", "Time (min)", "Recorded (cps)", "Bridged (cps)", "Region",
                    "Status"])
-        for run in main.runs:
+        for run in runs:
             for r in spike_rows(run, main.results[run.id]):
                 sp.append([run.name] + [num(c) for c in r])
     if on["plot"] and png:
@@ -302,6 +371,17 @@ class ReportWindow(QMainWindow):
         self.c_format.addItems([lab for _, lab in FORMATS])
         self.c_format.setToolTip("What Save report writes")
         self.c_format.activated.connect(self._format_set)
+        self.c_scope = QComboBox()
+        for key, text in SCOPES:
+            self.c_scope.addItem(text, key)
+        self.c_scope.setToolTip("Several runs: a summary — a line per run, all their results in "
+                                "one table — then what was done to each, then their details "
+                                "(what they share once, what differs run by run); or each run "
+                                "in full in turn. Tick runs in Runs")
+        self.c_scope.activated.connect(self._scope_set)
+        v.addWidget(QLabel("<b>Runs</b>"))
+        v.addWidget(self.c_scope)
+        v.addSpacing(8)
         v.addWidget(QLabel("<b>Format</b>"))
         v.addWidget(self.c_format)
         v.addSpacing(8)
@@ -340,6 +420,7 @@ class ReportWindow(QMainWindow):
         exts = [e for e, _ in FORMATS]
         fmt = PREFS["report_format"]
         self.c_format.setCurrentIndex(exts.index(fmt) if fmt in exts else 0)
+        self.c_scope.setCurrentIndex(self.c_scope.findData(scope()))
         self.tree.blockSignals(True)
         self.tree.clear()
         for key, label, tip in SECTIONS:
@@ -370,6 +451,11 @@ class ReportWindow(QMainWindow):
     def _format_set(self, i):
         PREFS["report_format"] = FORMATS[i][0]
         save_prefs()
+
+    def _scope_set(self, i):
+        PREFS["report_scope"] = SCOPES[i][0]
+        save_prefs()
+        self.refresh()
 
     def open(self):
         self.show()

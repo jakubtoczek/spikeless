@@ -13,6 +13,7 @@ import colorsys
 from dataclasses import dataclass, field
 
 import numpy as np
+from matplotlib import patheffects
 from matplotlib.colors import to_hex, to_rgb, to_rgba
 from matplotlib.figure import Figure
 from matplotlib.ticker import FixedLocator, MultipleLocator
@@ -29,6 +30,12 @@ STYLE = {"y_below_pct": 3.0,              # the y axis starts this % of its top 
          "raw_color": "#b0b0b0", "raw_width": 0.8, "raw_style": "solid",    # as recorded
          "spike_color": "#e02020", "spike_width": 1.0,                       # excluded spikes
          "bg_color": "#808080", "bg_width": 0.8, "bg_style": "dashed"}       # background line
+
+# a run's line (Run.dash), as in Flowless: black and white tells runs apart by these
+DASHES = {"solid": "-", "dashed": (0, (4, 1.6)), "dotted": (0, (1, 1.3)),
+          "dash-dot": (0, (6, 1.5, 1, 1.5)), "long dashes": (0, (9, 2.5)),
+          "short dashes": (0, (2.5, 2.5)), "dash-dot-dot": (0, (6, 1.5, 1, 1.5, 1, 1.5)),
+          "sparse dots": (0, (1, 3))}
 
 # legend positions: (matplotlib loc, the point of the plot it is anchored to; None: inside)
 LEGEND = {
@@ -82,12 +89,59 @@ def _readable(fg_hex: str, bg_hex: str, target: float = 3.0) -> str:
     return to_hex(cand)
 
 
-def _label_offset(px, py, x_end, y_top, pad=3):
-    """(dx, dy in points, ha, va) of a peak's label: above its apex; near the top, beside it —
-    on its left near the right edge too — where above would leave the plot."""
-    if py > 0.88 * y_top:
-        return (-pad, 0, "right", "center") if px > 0.85 * x_end else (pad, 0, "left", "center")
-    return 0, pad, "center", "bottom"
+_PAD = 3                  # a label's gap to its apex, points
+_SPOTS = ((0, _PAD, "center", "bottom"), (_PAD, 0, "left", "center"),     # above, right,
+          (-_PAD, 0, "right", "center"))                                   # left of the apex
+
+
+def spread_labels(ax):
+    """The regions' labels, each in the plot where it overlaps no other label nor the legend,
+    and crosses no trace if it can: above its apex, else to its right, else to its left; else
+    above the labels in its way. The tallest apexes choose first. Call it with the limits set,
+    before drawing: where a label fits depends on the view."""
+    labels = [t for t in ax.texts if getattr(t, "region_label", False)]
+    if not labels:
+        return
+    r = _renderer(ax.figure)
+    box = ax.get_window_extent(r)
+    leg = ax.get_legend()
+    taken = [leg.get_window_extent(r)] if leg is not None else []
+    pt = ax.figure.dpi / 72
+    traces = [ln.get_transform().transform(ln.get_xydata()) for ln in ax.get_lines()
+              if len(ln.get_xydata()) > 2]          # not the region edges, nor the reading dot
+
+    def crosses(bb):
+        # ponytail: a trace's points inside the box; a segment crossing it between two points
+        # (zoomed far in) is missed
+        return any(((p[:, 0] >= bb.x0) & (p[:, 0] <= bb.x1) & (p[:, 1] >= bb.y0)
+                    & (p[:, 1] <= bb.y1)).any() for p in traces)
+
+    def put(t, spot):
+        t.xyann = spot[:2]
+        t.set_ha(spot[2])
+        t.set_va(spot[3])
+        return t.get_window_extent(r)
+
+    def inside(bb):
+        return (bb.x0 >= box.x0 - 1 and bb.x1 <= box.x1 + 1 and bb.y0 >= box.y0 - 1
+                and bb.y1 <= box.y1 + 1)
+
+    shown = [t for t in labels if box.contains(*ax.transData.transform(t.xy))]
+    for t in sorted(shown, key=lambda t: -ax.transData.transform(t.xy)[1]):
+        for spot in [*_SPOTS, *(s + ("over",) for s in _SPOTS)]:     # clear of the traces first
+            bb = put(t, spot)
+            if inside(bb) and not any(bb.overlaps(o) for o in taken) and (
+                    len(spot) > 4 or not crosses(bb)):
+                break
+        else:                                  # stacked above whatever is in the way
+            bb = put(t, _SPOTS[0])
+            for _ in range(len(taken)):
+                hit = [o for o in taken if bb.overlaps(o)]
+                if not hit:
+                    break
+                bb = put(t, (0, t.xyann[1] + (max(o.y1 for o in hit) - bb.y0) / pt + 1,
+                             "center", "bottom"))
+        taken.append(bb)
 
 
 @dataclass
@@ -128,9 +182,9 @@ class PlotOptions:
     """The figure as exported (Figure window). stack, y_mode and the region labels apply on
     screen too, so the screen shows what the figure will."""
 
-    plot_w_mm: float = 80.0
+    plot_w_mm: float = 65.0           # the defaults: figure.SIZES' first, an 80-mm panel
     plot_h_mm: float = 40.0
-    total_w_mm: float | None = None   # None = auto (plot area + label margins); else fixes figure width
+    total_w_mm: float | None = 80.0   # None = auto (plot area + label margins); else fixes figure width
     total_h_mm: float | None = None   # (plot area then shrinks to fit the total)
     bg_color: str = "#ffffff"
     bg_alpha: float = 1.0
@@ -143,11 +197,13 @@ class PlotOptions:
     legend_font_size: float = 7.0
     line_width_pt: float = 0.75
     font: str = "sans-serif"          # every text of the figure
+    title: str = ""                   # above the plot area
+    title_size: float = 8.0
     show_regions: bool = True
     label_name: bool = True           # a region's label: its name (if it has its own) …
     label_pct: bool = True            # … its % of total …
     label_rt: bool = False            # … its Rt
-    label_size: float = 7.0
+    label_size: float = 6.0
     region_alpha: float = 0.3
     show_background: bool = False
     show_spikes: bool = False
@@ -283,16 +339,16 @@ def y_span(lo, hi):
 
 
 def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, only=None,
-         sel=None, sel_region=None, edges=False, bg="#ffffff"):
-    """Every shown run on ax. results: {run.id: peaks.Results}. raw / spikes / background:
-    draw the trace as recorded, the excluded spikes, the background line — for every shown run,
-    or only for `only`. sel: the selected run (its regions' edges drawn when `edges`,
-    sel_region highlighted)."""
+         sel=None, sel_region=None, edges=False, bg="#ffffff", lw_scale=1.0):
+    """Every shown run on ax, in its colour, line, width and fill. results: {run.id:
+    peaks.Results}. raw / spikes / background: draw the trace as recorded, the excluded
+    spikes, the background line — for every shown run, or only for `only`. sel: the selected
+    run (its regions' edges drawn when `edges`, sel_region highlighted). lw_scale: every line
+    width × this (the screen's lines are thicker). The labels are placed by spread_labels."""
     sc = _scales(runs, opts)
     flat = _flat(opts)
-    lw = opts.line_width_pt
-    x_end = max((float(r.x[-1]) for r in runs if r.shown), default=1.0)
-    y_top = visible_range(runs, opts)[1] * 1.05
+    lw = opts.line_width_pt * lw_scale
+    halo = [patheffects.withStroke(linewidth=2, foreground=bg)]   # readable over a trace
     for r in runs:
         if not r.shown:
             continue
@@ -303,7 +359,11 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
         if raw and extra:
             ax.plot(r.x, _f(r.trace(raw=True), b, k, off, flat), color=STYLE["raw_color"],
                     lw=lw * STYLE["raw_width"], ls=STYLE["raw_style"], zorder=1)
-        ax.plot(r.x, v, color=r.color, lw=lw, zorder=3, label=r.legend())
+        if r.fill > 0:
+            ax.fill_between(r.x, v, 0.0 if flat else off, color=r.color, alpha=r.fill, lw=0,
+                            zorder=2)
+        ax.plot(r.x, v, color=r.color, lw=(r.width or opts.line_width_pt) * lw_scale,
+                ls=DASHES.get(r.dash, "-"), zorder=3, label=r.legend())
         if background and extra:
             ax.plot(r.x, _f(b, b, k, off, flat), color=STYLE["bg_color"],
                     lw=lw * STYLE["bg_width"], ls=STYLE["bg_style"], zorder=2)
@@ -337,10 +397,11 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
             if txt:
                 top = int(np.argmax(ys - under))
                 px, py = xs[top], _f(ys[top], b[m][top], k, off, flat)
-                dx, dy, ha, va = _label_offset(px, py, x_end, y_top)
-                ax.annotate(txt, (px, py), textcoords="offset points", xytext=(dx, dy),
-                            ha=ha, va=va, fontsize=opts.label_size, fontfamily=opts.font,
-                            color=_readable(col, bg), zorder=6)
+                a = ax.annotate(txt, (px, py), textcoords="offset points",
+                                xytext=_SPOTS[0][:2], ha="center", va="bottom",
+                                fontsize=opts.label_size, fontfamily=opts.font,
+                                color=_readable(col, bg), zorder=6, path_effects=halo)
+                a.region_label = True
 
 
 def _label(row, opts):
@@ -445,6 +506,11 @@ def resolve_limits(runs, opts):
     return xmin, xmax, ymin, ymax
 
 
+def _title_mm(opts):
+    """The room the figure's title takes above the plot area (none without one)."""
+    return opts.title_size * 0.352777778 * 1.25 + 1.5 if opts.title.strip() else 0.0
+
+
 def _margins_mm(opts, y_max, ytick_pt):
     ndigits = max(1, len(f"{int(round(y_max)):d}")) if np.isfinite(y_max) else 4
     ytick_w = ndigits * ytick_pt * 0.6 * 0.352777778
@@ -452,7 +518,7 @@ def _margins_mm(opts, y_max, ytick_pt):
             + opts.y.title_font_size * 0.352777778 + 1.5)
     bottom = (opts.x.major_len_mm + 1.0 + opts.x.tick_font_size * 0.352777778
               + opts.x.title_pad_mm + opts.x.title_font_size * 0.352777778 + 1.5)
-    return max(left, 12.0), max(bottom, 10.0), 3.0, 3.0
+    return max(left, 12.0), max(bottom, 10.0), 3.0, 3.0 + _title_mm(opts)
 
 
 def _apply_axis(ax, which, axis, vmin, vmax, span_mm, major, tick_pt, font):
@@ -524,12 +590,16 @@ def build_figure(runs, opts: PlotOptions, results) -> Figure:
                   fontsize=opts.x.title_font_size, labelpad=opts.x.title_pad_mm * PT_PER_MM)
     ax.set_ylabel(y_title(opts), fontfamily=opts.font,
                   fontsize=opts.y.title_font_size, labelpad=opts.y.title_pad_mm * PT_PER_MM)
+    if opts.title.strip():
+        ax.set_title(opts.title, fontfamily=opts.font, fontsize=opts.title_size,
+                     pad=1.5 * PT_PER_MM)
     x = opts.x
     below = ((x.major_len_mm + x.tick_label_pad_mm + x.title_pad_mm) * PT_PER_MM
              + 1.2 * (x.tick_font_size + x.title_font_size))
     leg = place_legend(ax, opts, opts.legend_font_size, opts.font, below)
     if leg is not None:
         _make_room(fig, ax, leg, opts, left, bottom, plot_w, plot_h)
+    spread_labels(ax)
     return fig
 
 
@@ -566,11 +636,12 @@ def _self_check():
     run = Run(x=t / 60, y=y)
     run.detect_spikes()
     run.regions = find_regions(run)
-    fig = build_figure([run], PlotOptions(), {run.id: measure(run)})
+    fig = build_figure([run], PlotOptions(total_w_mm=None, plot_w_mm=80), {run.id: measure(run)})
     ax = fig.axes[0]
     bb = ax.get_position()
     assert abs(bb.width * fig.get_figwidth() * 25.4 - 80) < 0.5
     assert abs(bb.height * fig.get_figheight() * 25.4 - 40) < 0.5
+    assert abs(build_figure([run], PlotOptions(), {}).get_figwidth() * 25.4 - 80) < 0.5
     assert len(ax.collections) == 1 and "100.0 %" in ax.texts[0].get_text()   # the region
     o = PlotOptions(y_mode="pct_max")
     assert y_title(o) == "% of max" and abs(visible_range([run], o)[1] - 100) < 1e-9
@@ -606,15 +677,27 @@ def _self_check():
     run.name = "a"
     both = [run, other]
     res = {r.id: measure(r) for r in both}
-    fig = build_figure(both, PlotOptions(), res)
+    auto_w = PlotOptions(total_w_mm=None, plot_w_mm=80)
+    fig = build_figure(both, auto_w, res)
     w_in = fig.get_figwidth()
     assert fig.axes[0].get_legend() is not None
+    twin = Run(x=t / 60, y=y, name="c")             # the same peak twice: labels stacked
+    twin.detect_spikes()
+    twin.regions = list(run.regions)
+    fig = build_figure([run, twin], auto_w, {q.id: measure(q) for q in (run, twin)})
+    a, b = (q.get_window_extent(_renderer(fig)) for q in fig.axes[0].texts
+            if getattr(q, "region_label", False))
+    assert not a.overlaps(b), (a, b)
     other.label = "a legend label far too long to fit inside the plot area " * 2
-    fig = build_figure(both, PlotOptions(), res)
+    fig = build_figure(both, auto_w, res)
     assert fig.get_figwidth() > w_in + 1 / 25.4, (fig.get_figwidth(), w_in)
     assert abs(fig.plot_area_mm[0] - 80) < 0.5       # the plot area keeps its size
     fixed = build_figure(both, PlotOptions(total_w_mm=100), res)
     assert abs(fixed.get_figwidth() * 25.4 - 100) < 0.5 and fixed.plot_area_mm[0] < 80
+    # a title: the figure grows above for it, the plot area keeps its size
+    titled = build_figure(both, PlotOptions(title="Panel A"), res)
+    assert titled.get_figheight() > fixed.get_figheight() and titled.axes[0].get_title() == "Panel A"
+    assert abs(titled.plot_area_mm[1] - 40) < 0.5
     print("plotting self-check OK")
 
 

@@ -9,23 +9,28 @@ white: set by hand. Clearing a cell makes it follow again. Every edit is one und
 Regions (⤢): every measure of each region, whatever the report's columns, and how it is drawn
 — its colour (click the swatch), whether the figure labels it — and its note.
 
-Region (Edit… on a region): its name, what its net counts are above, its note, its colour, its
-label on the figure; it follows the region selected.
+Region (Edit… on a region): its name, its edges typed (in points, s or min: grey as found,
+white placed by hand), what its net counts are above, its note, its colour, its label on the
+figure; it follows the region selected.
 """
 
 from __future__ import annotations
 
+import numpy as np
 from PySide6.QtCore import QMimeData, Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMainWindow, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView,
+    QLabel, QLineEdit, QMainWindow, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QWidget,
 )
 
+from .options import PREFS, save_prefs
 from .report import COLUMNS, HELP
 from .widgets import ColorButton, guard_fields, pick_color
 
 GREY, WHITE = QColor("#8d8d8d"), QColor("#e0e0e0")
+UNITS = {"point": "point", "s": "s", "min": "min"}       # a typed edge's unit
 
 
 def copy_table(rows) -> None:
@@ -132,6 +137,27 @@ class RegionPanel(_Window):
         self.under.setToolTip("What its net counts are above: the run's background, or — for "
                               "a peak on another's tail — a line from its start to its end")
         self.under.activated.connect(lambda i: self._set("under", ("background", "line")[i]))
+        self.edges = {}
+        for side in ("start", "end"):
+            sp = QDoubleSpinBox()
+            sp.setRange(0, 1e6)
+            sp.setToolTip("Typed, the edge goes exactly there (in points: on that point); a "
+                          "neighbour sharing it moves with it, the others stop it. Grey: as "
+                          "found; white: placed by hand")
+            sp.valueChanged.connect(lambda v, s=side: self._edge(s, v))
+            self.edges[side] = sp
+        self.unit = QComboBox()
+        for key, text in UNITS.items():
+            self.unit.addItem(text, key)
+        self.unit.setToolTip("The edges in data points (1 the first), seconds or minutes from "
+                             "the run start")
+        self.unit.activated.connect(self._unit_set)
+        span = QWidget()
+        h = QHBoxLayout(span)
+        h.setContentsMargins(0, 0, 0, 0)
+        for wdg in (QLabel("from"), self.edges["start"], QLabel("to"), self.edges["end"],
+                    self.unit):
+            h.addWidget(wdg)
         self.note = QLineEdit()
         self.note.setPlaceholderText("why it was drawn or moved, if it matters")
         self.note.editingFinished.connect(lambda: self._set("note", self.note.text()))
@@ -141,8 +167,8 @@ class RegionPanel(_Window):
         self.form = QWidget()
         f = QFormLayout(self.form)
         f.setContentsMargins(0, 0, 0, 0)
-        for text, wdg in (("Name", self.name), ("Under it", self.under), ("Note", self.note),
-                          ("Colour", self.color)):
+        for text, wdg in (("Name", self.name), ("Edges", span), ("Under it", self.under),
+                          ("Note", self.note), ("Colour", self.color)):
             f.addRow(text, wdg)
         f.addRow(self.label)
         root = QWidget()
@@ -157,6 +183,22 @@ class RegionPanel(_Window):
         if not self._filling:
             self.main.set_region(self.main.sel_region, key, val)
 
+    def _edge(self, side, v):
+        """An edge typed, in the unit shown: to minutes, then moved as a dragged one is."""
+        run = self.main.sel
+        if self._filling or run is None:
+            return
+        unit = self.unit.currentData()
+        t = (float(run.x[int(np.clip(round(v) - 1, 0, len(run.x) - 1))]) if unit == "point"
+             else v / 60 if unit == "s" else v)
+        self.main._edge_moved(self.main.sel_region, side, t)
+        self.refresh_later()             # back to where it went, if a neighbour stopped it
+
+    def _unit_set(self, _i):
+        PREFS["chrom"]["edge_unit"] = self.unit.currentData()
+        save_prefs()
+        self.refresh()
+
     def refresh(self):
         if not self.isVisible():
             return
@@ -170,6 +212,23 @@ class RegionPanel(_Window):
                               f"{run.name}")
             self.name.setText(r.name)
             self.name.setPlaceholderText(row.name)
+            unit = PREFS["chrom"]["edge_unit"]
+            self.unit.setCurrentIndex(max(0, self.unit.findData(unit)))
+            dtm = run.dt_s / 60
+            for side, sp in self.edges.items():
+                t = getattr(r, side)
+                if unit == "point":
+                    sp.setDecimals(0)
+                    sp.setRange(1, len(run.x))
+                    sp.setSingleStep(1)
+                    sp.setValue(int(np.argmin(np.abs(run.x - t))) + 1)
+                else:
+                    k = 60 if unit == "s" else 1
+                    sp.setDecimals(1 if unit == "s" else 3)
+                    sp.setRange(float(run.x[0]) * k, float(run.x[-1]) * k)
+                    sp.setSingleStep(dtm * k)
+                    sp.setValue(t * k)
+                sp.setStyleSheet(f"color:{(GREY if r.how == 'auto' else WHITE).name()};")
             self.under.setCurrentIndex(1 if r.under == "line" else 0)
             self.note.setText(r.note)
             self.color.set_color(r.color or run.color)
@@ -236,7 +295,9 @@ class RegionsWindow(_Window):
         last = self.t.columnCount() - 1
         for k, (reg, row) in enumerate(zip(regs, rows)):
             sw = _item("")
-            sw.setBackground(QColor(reg.color or run.color))
+            pm = QPixmap(14, 14)
+            pm.fill(QColor(reg.color or run.color))
+            sw.setIcon(QIcon(pm))
             self.t.setItem(k, 0, sw)
             self.t.setItem(k, 1, _item(row.name, WHITE if reg.name else GREY, True))
             for c, (_, _, f) in enumerate(self.STATS, start=2):

@@ -21,9 +21,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
 from matplotlib.backend_bases import MouseEvent  # noqa: E402
-from PySide6.QtCore import QEvent, QLocale, QPoint, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QLocale, QModelIndex, QPoint, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import (QApplication, QCheckBox, QMessageBox,  # noqa: E402
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,  # noqa: E402
+                               QMessageBox,
                                QTableWidget)
 
 from spikeless import figure, io_gina, options, report, session  # noqa: E402
@@ -218,14 +219,15 @@ unc.setCheckState(0, Qt.Checked)
 
 # ---- the figure: its size in mm, presets, copy ----
 fig = figure.figure(w)
-assert all(abs(a - b) < 0.5 for a, b in zip(fig.plot_area_mm, (80, 40))), fig.plot_area_mm
+assert abs(fig.get_figwidth() * 25.4 - 80) < 0.5, fig.get_figwidth()   # default: the 80-mm panel
+assert abs(fig.plot_area_mm[1] - 40) < 0.5, fig.plot_area_mm
 w._figure()
 fw = w.figure_win
 assert not fw.d["legend"].isChecked() and not fw.d["legend"].isEnabled()   # one run: no legend
 assert w.plot_opts.legend                                   # … but kept for when there are two
 assert "#4a9782" in next(b for b in w.findChildren(appmod.QPushButton)
                          if b.text() == "Figure…").styleSheet()
-fw._preset(4)                                               # Slide
+fw._size(4)                                                 # Slide
 assert w.plot_opts.plot_w_mm == 160 and w.plot_opts.x.tick_font_size == 14
 assert abs(figure.figure(w).plot_area_mm[0] - 160) < 0.5
 figure.copy_figure(w)
@@ -477,6 +479,90 @@ w._paste()
 assert len(w.runs) == n + 1 and np.allclose(w.runs[-1].y, src_run.trace(), atol=1e-3)
 w._export_trace(src_run, recorded=True)
 assert np.allclose(io_gina.load(out)[0].y, src_run.y, atol=1e-3)
+
+# ---- runs: renamed by a double-click, dragged into a new order (Ctrl+Z puts it back) ----
+assert w.run_list.editTriggers() & QAbstractItemView.DoubleClicked
+names = [r.name for r in w.runs]
+w.run_list.model().moveRow(QModelIndex(), 0, QModelIndex(), len(w.runs))   # the first, last
+assert [r.name for r in w.runs] == names[1:] + names[:1], [r.name for r in w.runs]
+w._undo_step()
+assert [r.name for r in w.runs] == names
+src_run = w.runs[0]                                         # undo: the runs are copies
+
+# ---- a region's edges typed: in points, s or min; grey as found, white once placed ----
+w._select(src_run)
+if not src_run.regions:
+    w._find()
+reg = src_run.regions[-1]
+w._pick_region(len(src_run.regions) - 1)
+w.region_panel()
+rp = w.region_win
+rp.refresh()
+assert ("8d8d8d" if reg.how == "auto" else "e0e0e0") in rp.edges["start"].styleSheet()
+rp.unit.setCurrentIndex(rp.unit.findData("point"))
+rp._unit_set(0)
+i = int(np.argmin(abs(src_run.x - reg.start))) + 1
+assert rp.edges["start"].value() == i, (rp.edges["start"].value(), i)
+rp.edges["start"].setValue(i - 3)                           # 3 points earlier, on a point
+assert abs(reg.start - src_run.x[i - 4]) < 1e-9 and reg.how != "auto"
+rp.refresh()
+assert "e0e0e0" in rp.edges["start"].styleSheet()          # placed by hand: white
+rp.unit.setCurrentIndex(rp.unit.findData("s"))
+rp._unit_set(0)
+t0 = reg.start
+rp.edges["start"].setValue(t0 * 60 + 2.5)                   # 2.5 s later, exactly there
+assert abs(reg.start - (t0 + 2.5 / 60)) < 1e-6, (reg.start, t0)
+w._undo_step()
+w._undo_step()
+rp.unit.setCurrentIndex(rp.unit.findData("min"))
+rp._unit_set(0)
+
+# ---- the report: the ticked runs — a summary first; each in full; the selected one ----
+shown_before = [r.shown for r in w.runs]
+for r in w.runs:
+    r.shown = True
+w.refresh()
+options.PREFS["report_sections"] = {k: True for k in options.PREFS["report_sections"]}
+options.PREFS["report_scope"] = "summary"
+rep = report.html(w)
+assert "Summary — " in rep and rep.count("<h2>") == len(w.runs) + 2, rep.count("<h2>")
+assert "The same for every run" in rep and rep.count("<h3>Results</h3>") == 1
+options.PREFS["report_scope"] = "each"
+rep = report.html(w)
+assert "Summary" not in rep and rep.count("<h3>Results</h3>") == len(w.runs)
+options.PREFS["report_scope"] = "selected"
+assert report.html(w).count("<h2>") == 1
+w.runs[0].shown = False                                     # unticked: out of the report
+options.PREFS["report_scope"] = "each"
+assert report.html(w).count("<h3>Results</h3>") == len(w.runs) - 1
+options.PREFS["report_scope"] = "summary"
+w.runs[0].shown = True
+
+# ---- the figure: black and white, each run's line and fill, a title ----
+w._figure()
+fw = w.figure_win
+fw._style(2)                                                # black and white
+assert all(r.color == "#000000" for r in w.runs)
+assert [r.dash for r in w.runs[:3]] == ["solid", "dashed", "dotted"], [r.dash for r in w.runs]
+ax = figure.figure(w).axes[0]
+assert [ln.get_linestyle() for ln in ax.get_lines()[:2]] == ["-", "--"]
+fw.refresh()
+assert fw.runs_t.rowCount() == len(w.runs)
+n_fill = len(ax.collections)
+fw.runs_t.cellWidget(0, 4).setValue(0.2)                    # a fill under the first run
+assert w.runs[0].fill == 0.2 and len(figure.figure(w).axes[0].collections) == n_fill + 1
+w._undo_step()                                              # the fill …
+w._undo_step()                                              # … and the style
+assert w.runs[0].color != "#000000" and w.runs[0].fill == 0
+fw.load()
+fw.d["title"].setText("Panel A")
+fw.d["title"].editingFinished.emit()
+assert figure.figure(w).axes[0].get_title() == "Panel A"
+fw.d["title"].setText("")
+fw.d["title"].editingFinished.emit()
+for r, on in zip(w.runs, shown_before):
+    r.shown = on
+w.refresh()
 
 # ---- a session as .json: saved, opened ----
 js = TMP / "spikeless_smoke.json"

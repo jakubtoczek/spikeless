@@ -35,8 +35,10 @@ One screen: the chromatogram, its results under it, four steps on the right.
 3. **Regions**: **Find regions**, or **Draw region** and drag across a peak on the plot; drag
    an edge to adjust it. The table under the plot gives each region's **net counts ± σ** and
    **% of total** (the radiochemical purity).
-4. **Report** — pick the sections, see it, save it as PDF, Word-compatible `.odt`, Excel,
-   Markdown or web page. **Figure…** sets what **Copy / Export** make, at its size in mm.
+4. **Report** — the ticked runs (a summary first, or each in full) or the selected one; pick
+   the sections, see it, save it as PDF, Word-compatible `.odt`, Excel, Markdown or web page.
+   **Figure…** sets what **Copy / Export** make: its size in mm, colour or black and white,
+   each run's line, a title.
 5. **Save…** (Ctrl+S) keeps the whole analysis in a `.json` file.
 
 On the plot: click for a reading line (← → move it), drag to zoom, right-drag to pan,

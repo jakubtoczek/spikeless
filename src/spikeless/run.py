@@ -40,7 +40,7 @@ class Region:
 @dataclass
 class FindParams:
     """How Find regions looks for peaks (peaks.find_regions)."""
-    n_sigma: float = 5.0          # an apex stands this many σ above its surroundings
+    n_sigma: float = 8.0          # an apex stands this many σ above its surroundings
     min_gap_s: float = 10.0       # apexes at least this far apart
     smooth: int = 5               # points of the moving mean the apexes are looked for on
     foot_sigma: float = 2.0       # a region's feet: where that mean falls back within this
@@ -64,6 +64,9 @@ class Run:
     method: str = ""              # HPLC method (Options › Methods): names the regions
     conditions: str = ""          # free text, a line each
     color: str = COLORS[0]
+    dash: str = "solid"           # its line (plotting.DASHES)
+    width: float | None = None    # its line's width, pt; None: the figure's
+    fill: float = 0.0             # opacity of a fill under its trace (0: none)
     shown: bool = True
     spike_params: SpikeParams = field(default_factory=SpikeParams)
     spikes: np.ndarray | None = None     # flagged by the rule (bool per point)

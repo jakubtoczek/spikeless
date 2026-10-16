@@ -15,10 +15,17 @@ by trapezoids (count rate × time). Results follow radio-HPLC practice:
   As = w₀.₀₅ / 2d, resolution Rs = 1.18 (t₂ − t₁) / (w½₁ + w½₂) from the region before,
   S/N = 2H / h with h the range of the background around the region.
 
-Find regions proposes them: maxima of the 5-point mean standing 5 σ (Poisson, of that mean)
-above their surroundings, at least 10 s apart, each kept if its net counts pass L_D — a
-threshold of counting statistics, not a fraction of the tallest peak (which missed a 2 %
-impurity beside a large product). Those numbers are the run's FindParams (defaults shown).
+Find regions proposes them: maxima of the 5-point mean standing 8 σ above their surroundings,
+σ the Poisson noise of that mean at the level the apex is measured from (the background, or
+the tail of a bigger peak it rides on), at least 10 s apart, each kept if its net counts pass
+L_D — a threshold of counting statistics, not a fraction of the tallest peak (which missed a
+2 % impurity beside a large product). Those numbers are the run's FindParams (defaults shown).
+
+Why 8, and σ where the apex stands (2026-10-16, the nine example runs): noise bumps reach 5.2 σ
+on a 15-min run (7.2 on a 2-h blank, more points), real peaks 9.8 σ and up (an Imathera2 trace
+< LOQ; the September Tc runs' impurities 18 and up). With σ taken at the background, as before,
+a noise bump on a tail at 55 cps (background 11) was 10.4 σ: only a threshold of 12 kept the
+tail whole, and 12 missed isolated peaks below ~15 cps tall on a 10-cps background.
 """
 
 from __future__ import annotations
@@ -101,8 +108,13 @@ def find_regions(run: Run) -> list[Region]:
     noise = sigma(float(np.median(b)), run.dt_s)
     # on a w-point mean, n σ of that mean: one noisy point on a tail is not a peak
     sm = np.convolve(s, np.ones(w) / w, mode="same")
-    apexes, _ = find_peaks(sm, prominence=p.n_sigma * noise / np.sqrt(w),
-                           distance=max(1, round(p.min_gap_s / run.dt_s)))
+    apexes, props = find_peaks(sm, prominence=0, distance=max(1, round(p.min_gap_s / run.dt_s)))
+    # n σ of the counting noise where the apex is measured from (the higher of its two bases,
+    # never under the background): on a big peak's tail, at 50 cps where the background is
+    # 10, a bump must stand √5 × higher than on the background to be a peak of its own
+    base = np.maximum(np.maximum(sm[props["left_bases"]], sm[props["right_bases"]]), 0.0)
+    level = np.maximum(base + b[apexes], 1.0)
+    apexes = apexes[props["prominences"] >= p.n_sigma * np.sqrt(level / run.dt_s / w)]
     held = run.in_regions()
     dtm = run.dt_s / 60.0
     out = []
@@ -287,6 +299,14 @@ def _self_check():
     probe.detect_spikes()
     probe.find_params.n_sigma = 60
     assert len(find_regions(probe)) == 1
+
+    # a product's long tail stays one region: its noise bumps, measured against the noise of
+    # the tail (not the background's), are not peaks — the old rule split this one in three
+    lam = 10 + 2500 * np.exp(-0.5 * ((t - 300) / 6) ** 2) \
+        + np.where(t > 300, 400 * np.exp(-(t - 300) / 90), 0)
+    tail = Run(x=t / 60, y=np.random.default_rng(13).poisson(lam).astype(float), dt_s=1.0)
+    tail.detect_spikes()
+    assert len(find_regions(tail)) == 1, [(r.start, r.end) for r in find_regions(tail)]
 
     # a region with a straight line under it
     run.regions = [Region(7.5, 8.5, under="line")]

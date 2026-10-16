@@ -265,15 +265,16 @@ class MainWindow(QMainWindow):
         self.run_list = QListWidget()
         self.run_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.run_list.setTextElideMode(Qt.ElideMiddle)
-        self.run_list.setToolTip("Tick to show; click to work on it, click it again (or F2) to "
-                                 "rename it; double-click: the plot shows it whole; right-click: "
-                                 "rename, export, remove; Del removes it (Ctrl+Z brings it "
-                                 "back). Click below the runs (or Esc) to select none.")
-        self.run_list.setEditTriggers(QAbstractItemView.SelectedClicked
+        self.run_list.setToolTip("Tick to show; click to work on it; double-click (or F2) to "
+                                 "rename it; drag to reorder (the legend and the report follow); "
+                                 "right-click: rename, export, remove; Del removes it (Ctrl+Z "
+                                 "brings it back). Click below the runs (or Esc) to select none.")
+        self.run_list.setEditTriggers(QAbstractItemView.DoubleClicked
                                       | QAbstractItemView.EditKeyPressed)
+        self.run_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.run_list.model().rowsMoved.connect(self._runs_moved)
         self.run_list.itemChanged.connect(self._run_item_changed)
         self.run_list.currentRowChanged.connect(self._run_picked)
-        self.run_list.itemDoubleClicked.connect(self._run_focus)
         self.run_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.run_list.customContextMenuRequested.connect(self._run_menu)
         self.run_list.viewport().installEventFilter(self)
@@ -519,7 +520,7 @@ class MainWindow(QMainWindow):
         self.spikes_auto.setChecked(PREFS["spikes"]["auto"])
         self.find_auto.setChecked(PREFS["find"]["auto"])
         self.y_mode.setCurrentIndex(max(0, self.y_mode.findData(self.plot_opts.y_mode)))
-        _sync(self.run_list, [(r.name, r.shown, None, r.color, None) for r in self.runs],
+        _sync(self.run_list, [(r.name, r.shown, r.id, None, r.color) for r in self.runs],
               Qt.ItemIsEditable)
         for k, r in enumerate(self.runs):
             self.run_list.item(k).setToolTip(r.name)
@@ -735,10 +736,24 @@ class MainWindow(QMainWindow):
             w = w.parentWidget()
         return False
 
-    def _run_item_changed(self, it):
-        if self._filling:
+    def _run_of(self, it):
+        """The run a list item stands for (by its id: rows move while a run is dragged)."""
+        return next((r for r in self.runs if it is not None and r.id == it.data(Qt.UserRole)),
+                    None)
+
+    def _runs_moved(self, *_):
+        """Runs dragged into a new order: the list's order is the runs'."""
+        order = [self._run_of(self.run_list.item(k)) for k in range(self.run_list.count())]
+        if self._filling or None in order or order == self.runs:
             return
-        run = self.runs[self.run_list.row(it)]
+        self._push("reorder the runs")
+        self.runs = order
+        self.refresh()
+
+    def _run_item_changed(self, it):
+        run = None if self._filling else self._run_of(it)
+        if run is None:
+            return
         if it.text() != run.name:                        # typed in the list
             self.rename(run, it.text())
         elif (it.checkState() == Qt.Checked) != run.shown:
@@ -747,17 +762,12 @@ class MainWindow(QMainWindow):
 
     def _run_picked(self, row):
         if not self._filling:
-            self._select(self.runs[row] if 0 <= row < len(self.runs) else None)
-
-    def _run_focus(self, it):
-        run = self.runs[self.run_list.row(it)]
-        self.canvas.focus(float(run.x[0]), float(run.x[-1]))
+            self._select(self._run_of(self.run_list.item(row)))
 
     def _run_menu(self, pos):
-        it = self.run_list.itemAt(pos)
-        if it is None:
+        run = self._run_of(self.run_list.itemAt(pos))
+        if run is None:
             return
-        run = self.runs[self.run_list.row(it)]
         self._select(run)
         m = QMenu(self)
         m.addAction("Rename", lambda: self.run_list.editItem(
@@ -786,6 +796,14 @@ class MainWindow(QMainWindow):
             return
         self._push(f"legend of {run.name}")
         run.label = new
+        self.refresh()
+
+    def set_run(self, run, key, value):
+        """One thing about how a run is drawn (Figure › Traces): colour, line, width, fill."""
+        if run not in self.runs or getattr(run, key) == value:
+            return
+        self._push(f"{key} of {run.name}")
+        setattr(run, key, value)
         self.refresh()
 
     def _meta(self, key, value, undo=False, refresh=True):
