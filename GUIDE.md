@@ -144,10 +144,12 @@ the figure labels it.
 - **Draw**: push **Draw region** (it stays pushed in; the cursor turns to an open cross), then
   drag from a peak's left foot to its right foot — or click each foot. A right click or Esc
   cancels. The status line shows the net counts while you drag. Each edge lands on the lowest
-  point within 3 points of where you let go — the valley — so a rough drag gives the region you
-  meant. **Hold Alt** to place the edges exactly.
-- **Adjust**: over an edge the cursor turns ↔; drag it. **← →** move the last-touched edge one
-  point. Two regions that touch share their edge (a perpendicular drop at the valley): moving it
+  point within a few pixels of where you let go (3 points either side at most) — the valley —
+  so a rough drag gives the region you meant; zoomed in until the points are that far apart, it
+  lands on the nearest point. The line shown while dragging is where it will land. **Hold Alt**
+  to place the edges exactly.
+- **Adjust**: over an edge the cursor turns ↔; drag it (it lands as when drawn). **← →** move
+  the last-touched edge one point. Two regions that touch share their edge (a perpendicular drop at the valley): moving it
   moves both. Regions never overlap: a drag across a neighbour stops at its edge.
 - **Select** a region with a click (or its row, or its line in Regions); **Del** removes it.
 - How each was placed is kept and reported: *auto* (Find regions), *drawn*, *moved* (found,
@@ -161,8 +163,8 @@ opened (the ones you open stay open):
 - a **preset** — journals' single columns are 80–90 mm wide, their double columns 170–190 mm:
   **Panel, 80 mm** (fits any single column, and two side by side fit any double column),
   **Panel, ⅓ of a 2-column figure, 55 mm** (three side by side), **the full 2-column width,
-  170 mm**, all 7 pt; **Slide** (plot 160 × 90 mm, 14 pt). A panel's width is the whole of it,
-  labels included;
+  170 mm**, all 7 pt (the two panels' region labels 6 pt); **Slide** (plot 160 × 90 mm, 14 pt).
+  A panel's width is the whole of it, labels included;
 - **Size**: the plot area in mm; the whole figure's width and height (Auto: the plot area plus
   its labels; fixed, the plot area is what is left);
 - **Text**: one font for every text of the figure;
@@ -170,12 +172,14 @@ opened (the ones you open stay open):
 - **Regions**: shaded, their labels — **Name**, **% of total**, **Rt**, each ticked or not, a
   line each —, label size, opacity, and each
   region's colour, label and note (**edit ⤢**);
-- **Legend**: shown, where, an offset, its size, what it calls each run (**edit ▤**);
+- **Legend**: shown (unticked and greyed while the figure has one run), where, an offset, its
+  size, what it calls each run (**edit ▤**);
 - **Backgrounds**: of the plot area and around it, and their opacity;
 - **X axis**, **Y axis**: the **title** (text, size, gap to the labels); the **range** (from,
   to) and the axis line; the **major ticks** (every, first, last, in / out / across, length,
-  thickness, labels size and gap); the **minor ticks** (shown, how many per major interval,
-  length, thickness); the **grid** at the major and at the minor ticks (line, colour, width).
+  thickness, labels size and gap); the **minor ticks** (shown — Auto, or on, or off —, how many
+  per major interval, length, thickness); the **grid** at the major and at the minor ticks
+  (line, colour, width).
 
 Right: the figure as it will be written (wheel to zoom; the checkerboard is transparency).
 **Copy** puts it on the clipboard at its real size (a PNG carries its resolution, so it pastes
@@ -190,7 +194,12 @@ size (with the whole size fixed, the plot area shrinks instead). On screen the l
 inside.
 
 Axes: the time starts at 0; the count rate a little below 0 (by default 3 % of its top,
-Options › Figure), so the baseline clears the x axis. Labels: a region with a name of its own
+Options › Figure), so the baseline clears the x axis. Auto ticks: on the count rate, 2 values
+at least above 0, and no more than fit 8 mm apart (4 on a 32 mm high plot, 5 on 40 mm), every
+1, 2, 2.5 or 5 × 10ⁿ; on the time, the minor ticks shown when they mark whole minutes, 4
+between two majors (majors every 5 or 10 min). On a figure 80 mm wide or less, count rates of
+3 digits or more are labelled in 6 pt (Y axis › *6 pt for counts ≥ 100*: untick to keep the
+size set). Labels: a region with a name of its own
 shows it; every region shows its % of total; regions below the quantification limit carry no
 label (they are in the results).
 
@@ -397,7 +406,8 @@ show and document what was excluded, and why.
   detection limit; a peak below it is not distinguishable from background noise. Draw it by
   hand to see its counts (it will say n.d.).
 - **A flagged point is not a spike.** Untick it in Spikes; or raise the **Threshold**.
-- **A region's edge is in the wrong place.** Drag it (Alt for exactly where you let go), or ← →.
+- **A region's edge is in the wrong place.** Drag it — zoom in to place it on a given point —
+  (Alt for exactly where you let go), or ← →.
 - **A small peak on another's tail.** Select it, set *Under it* to **a straight line between its
   ends**.
 - **% does not match what you expect.** % of total counts everything above background,

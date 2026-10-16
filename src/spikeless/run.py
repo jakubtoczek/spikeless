@@ -80,6 +80,24 @@ class Run:
         self.x = np.asarray(self.x, dtype=float)
         self.y = np.asarray(self.y, dtype=float)
         self.source = self.source or self.name
+        self._made = {}           # trace / background: (what it was made from, it); not a field
+
+    def _memo(self, kind, key, make):
+        """make(), unless it was last made from the same key: one refresh asks for the trace
+        and background a dozen times, and an arPLS background takes 80 ms on a 2-h run. Read-only,
+        so a caller cannot change the copy the others get."""
+        hit = self._made.get(kind)
+        if hit is None or hit[0] != key:
+            v = make()
+            for a in (v if isinstance(v, tuple) else (v,)):
+                if isinstance(a, np.ndarray):
+                    a.setflags(write=False)
+            hit = self._made[kind] = (key, v)
+        return hit[1]
+
+    def _trace_key(self):
+        return (None if self.spikes is None else self.spikes.tobytes(), tuple(self.kept),
+                self.isotope, self.decayed(), self.half_life_s())
 
     def legend(self) -> str:
         return self.label or self.name
@@ -107,11 +125,11 @@ class Run:
 
     def trace(self, raw: bool = False) -> np.ndarray:
         """Spikes bridged (unless raw), then decay-corrected to the run start if its isotope
-        is ticked for that."""
-        y = self.y.copy() if raw else remove(self.y, self.excluded())
-        if self.decayed():
-            y = y * decay_factor(self.x, self.half_life_s())
-        return y
+        is ticked for that. Read-only."""
+        def make():
+            y = self.y.copy() if raw else remove(self.y, self.excluded())
+            return y * decay_factor(self.x, self.half_life_s()) if self.decayed() else y
+        return self._memo(f"trace{raw}", (raw, self._trace_key()), make)
 
     def in_regions(self) -> np.ndarray:
         m = np.zeros(len(self.x), bool)
@@ -119,9 +137,16 @@ class Run:
             m |= (self.x >= r.start) & (self.x <= r.end)
         return m
 
-    def background(self, y: np.ndarray | None = None) -> tuple[np.ndarray, str]:
-        """(background per point, cps; how it was obtained, in words)."""
-        y = self.trace() if y is None else y
+    def background(self) -> tuple[np.ndarray, str]:
+        """(background per point, cps, read-only; how it was obtained, in words) — of trace()."""
+        regions = (() if self.bg_mode in ("none", "drift") else
+                   tuple((r.start, r.end) for r in self.regions))
+        key = (self._trace_key(), self.bg_mode, tuple(self.bg_stretch or ()), self.bg_drift,
+               self.bg_n, self.dt_s, regions)
+        return self._memo("background", key, self._background)
+
+    def _background(self):
+        y = self.trace()
         if self.bg_mode == "none":
             return np.zeros(len(y)), "none: the counts as recorded"
         if self.bg_mode == "drift":

@@ -66,5 +66,6 @@ Layers: `io_gina.py`, `io_paste.py` readers · `run.py` the model (a run, its sp
 background, regions) · `spikes.py`, `peaks.py`, `adjust.py` the maths (no Qt) · `session.py`
 the session file · `plotting.py` the chromatogram as a matplotlib figure · `canvas.py` it on
 screen, with the mouse · `figure.py`, `report.py`, `options.py` their windows (`plotview.py`
-the figure preview), `editors.py` the run names and region details · `app.py` the main window.
+the figure preview), `editors.py` the run names and region details · `widgets.py` the small
+widgets they share · `app.py` the main window.
 scipy is imported inside the functions that need it, to keep it off the startup path.

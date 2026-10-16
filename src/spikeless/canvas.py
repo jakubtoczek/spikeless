@@ -10,8 +10,14 @@ whole run. The view is elastic: dragged or zoomed out past the data, it springs 
 On an edge of the selected run's regions, or of its background stretch, the cursor turns ↔
 and a drag moves that edge; ← → then move that edge one point. set_mode("region") or
 ("stretch") arms drawing (the cursor an open cross): a drag across the span, or a click on
-each of its edges; a right click or Esc cancels. The canvas only reports what the mouse did,
-in minutes; the main window decides what it means (snapping, overlaps, undo).
+each of its edges; a right click or Esc cancels. A region's edge lands in the valley: the
+lowest point within _SNAP_PX of the mouse (3 points either side at most; zoomed in that far,
+the nearest point; Alt: exactly there), and the line shown while dragging is where it will
+land. The canvas reports where, in minutes; the main window decides what it means (overlaps,
+undo).
+
+What moves with the mouse — the reading line, a dragged edge, a span being drawn — is blitted
+over the last full draw (a few ms, where a full draw takes 60 with three runs).
 """
 
 from __future__ import annotations
@@ -27,9 +33,11 @@ from PySide6.QtGui import QColor, QCursor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from .options import PREFS
+from .peaks import snap
 from .plotting import curves, draw, fit_y, place_legend, y_span, y_title
 
 _EDGE_PX = 6          # how close to an edge (pixels) the mouse grabs it
+_SNAP_PX = 8          # a region's edge lands on the lowest point this close to the mouse
 _CLICK_PX = 4         # a press that moves less than this is a click
 _MARGINS = (74, 44, 14, 10)   # left, bottom, right, top, pixels: the labels' room
 _RUBBER = 0.35        # past the data, a drag moves the view this much
@@ -50,8 +58,8 @@ def _open_cross() -> QCursor:
 
 
 class ChromCanvas(FigureCanvasQTAgg):
-    regionDrawn = Signal(float, float, bool)       # from, to (min), exact (Alt: no snapping)
-    edgeMoved = Signal(int, str, float, bool)      # region (-1: the stretch), side, t, exact
+    regionDrawn = Signal(float, float)             # from, to (min), snapped
+    edgeMoved = Signal(int, str, float)            # region (-1: the stretch), side, t
     regionPicked = Signal(int)                     # its index, -1 for none
     stretchDrawn = Signal(float, float)
     dragging = Signal(float, float)                # a drawn span as it is dragged
@@ -74,7 +82,9 @@ class ChromCanvas(FigureCanvasQTAgg):
         self._press = None        # the drag in progress
         self._edge = None         # (region, side) last touched, for the arrow keys
         self._arrows = None       # what ← → move: "line" (the reading line) or "edge"
-        self._temp = []           # artists shown while dragging
+        self._temp = []           # artists shown while dragging (blitted)
+        self._overlay = []        # the reading line and its box (blitted)
+        self._bg = None           # the last full draw, without those
         self._cross = _open_cross()
         self._anim = QTimer(self, interval=15, timeout=self._frame)
         self._anim_path = None
@@ -82,13 +92,15 @@ class ChromCanvas(FigureCanvasQTAgg):
         for ev, fn in (("button_press_event", self._on_press),
                        ("motion_notify_event", self._on_motion),
                        ("button_release_event", self._on_release),
-                       ("scroll_event", self._on_scroll)):
+                       ("scroll_event", self._on_scroll),
+                       ("draw_event", self._on_draw)):
             self.mpl_connect(ev, fn)
 
     def resizeEvent(self, e):                       # noqa: N802 - Qt's name
         # margins fixed in pixels: the plot's edges stay put, whatever the tick labels say
         # (a layout fitted to them moved the left edge as a zoom changed their width)
         w, h = max(e.size().width(), 150), max(e.size().height(), 100)
+        self._bg = None
         self.fig.subplots_adjust(left=_MARGINS[0] / w, bottom=_MARGINS[1] / h,
                                  right=1 - _MARGINS[2] / w, top=1 - _MARGINS[3] / h)
         super().resizeEvent(e)
@@ -98,7 +110,7 @@ class ChromCanvas(FigureCanvasQTAgg):
         """Draw the shown runs. view: {"raw", "spikes", "stretch", "line_<mode>"} for the
         selected run (every run when none is): the background line by the run's mode."""
         self.state = (runs, opts, results, sel, sel_region, view)
-        self._temp = []
+        self._temp, self._overlay, self._bg = [], [], None   # cleared with the axes
         text, face = _THEMES[bool(PREFS["chrom"]["light"])]
         self.fig.set_facecolor(face)
         ax = self.ax
@@ -148,6 +160,24 @@ class ChromCanvas(FigureCanvasQTAgg):
         if self.state:
             self.show(*self.state)
 
+    def _on_draw(self, _ev):
+        """After a full draw: keep it, then draw what is blitted over it (animated, so the full
+        draw left it out)."""
+        self._bg = self.copy_from_bbox(self.fig.bbox)
+        for a in self._overlay + self._temp:
+            self.ax.draw_artist(a)
+
+    def _blit(self):
+        """The reading line and the drag feedback, redrawn over the last full draw (or with
+        a full one, the view having changed since)."""
+        if self._bg is None:
+            self.draw_idle()
+            return
+        self.restore_region(self._bg)
+        for a in self._overlay + self._temp:
+            self.ax.draw_artist(a)
+        self.blit(self.fig.bbox)
+
     # ---------------- the view
     def _full_x(self):
         runs = self.state[0] if self.state else []
@@ -163,6 +193,7 @@ class ChromCanvas(FigureCanvasQTAgg):
         return x0, x1, y0, y1
 
     def _apply(self, x0, x1, y0, y1):
+        self._bg = None                                # stale until the next full draw
         self.ax.set_xlim(x0, x1)
         self.ax.set_ylim(y0, max(y1, y0 + 1e-9))
 
@@ -240,27 +271,48 @@ class ChromCanvas(FigureCanvasQTAgg):
     def set_mode(self, mode):
         """Arm drawing a "region" or the background "stretch"; None disarms."""
         self.mode, self.anchor = mode, None
-        self._clear_temp()
+        self._temp_shows()
         self.setCursor(self._cross if mode else Qt.ArrowCursor)
-        self.draw_idle()
 
     def _end_mode(self):
         self.set_mode(None)
         self.modeEnded.emit()
 
-    def _clear_temp(self):
+    def _temp_shows(self, *artists):
+        """The drag feedback is now `artists` (none: gone), blitted."""
         for a in self._temp:
             a.remove()
-        self._temp = []
+        for a in artists:
+            a.set_animated(True)
+        self._temp = list(artists)
+        self._blit()
 
     def _span(self, a, b, color):
-        self._clear_temp()
-        self._temp = [self.ax.axvspan(min(a, b), max(a, b), color=color, alpha=0.25, zorder=7)]
+        self._temp_shows(self.ax.axvspan(min(a, b), max(a, b), color=color, alpha=0.25,
+                                         zorder=7))
+
+    def _snap(self, t):
+        """Where a region's edge dropped at t lands: on the lowest point of the selected run
+        within _SNAP_PX of t, 3 points either side at most — zoomed in until the points are
+        that far apart, the nearest one; with Alt held, t itself."""
+        run = self._sel()
+        if run is None or QApplication.keyboardModifiers() & Qt.AltModifier:
+            return t
+        to_px = self.ax.transData.transform
+        px = abs(to_px((run.dt_s / 60, 0))[0] - to_px((0, 0))[0])     # between two points
+        return snap(run.x, run.trace(), t, min(3, int(_SNAP_PX / max(px, 1e-9))))
 
     # ---------------- the reading line
     def set_cursor(self, t):
         self.cursor_t = t
-        self.redraw()
+        self._update_reading()
+
+    def _update_reading(self):
+        for a in self._overlay:
+            a.remove()
+        self._overlay = []
+        self._reading()
+        self._blit()
 
     def _reading(self):
         """The reading line at cursor_t: the time, the point and the count rate there, of the
@@ -272,7 +324,7 @@ class ChromCanvas(FigureCanvasQTAgg):
         i = self._point(run)
         t = float(run.x[i])
         y = run.trace()
-        b = run.background(y)[0]
+        b = run.background()[0]
         net = y[i] - b[i]
         x, v = next(c for r, c in zip([r for r in runs if r.shown], self._curves) if r is run)
         lines = [run.legend()] if sum(r.shown for r in runs) > 1 else []
@@ -287,17 +339,20 @@ class ChromCanvas(FigureCanvasQTAgg):
         if run.excluded()[i]:
             lines.append(f"spike excluded: {run.y[i]:.0f} cps recorded")
         ax = self.ax
-        ax.axvline(t, color="#3d6ea5", lw=1.0, zorder=8)
-        ax.plot([t], [v[i]], "o", ms=4, color="#3d6ea5", zorder=8, label="_reading")
         x0, x1 = ax.get_xlim()
         right = t > (x0 + x1) / 2
-        ax.annotate("\n".join(lines), (t, 0.99), annotation_clip=True,
-                    xycoords=blended_transform_factory(ax.transData, ax.transAxes),
-                    xytext=(-5 if right else 5, 0), textcoords="offset points",
-                    ha="right" if right else "left", va="top", multialignment="left",
-                    fontsize=8, color="#203040",
-                    zorder=9, bbox={"boxstyle": "round,pad=0.25", "fc": "#ffffff", "ec": "#a0b0c0",
-                                    "alpha": 0.85})
+        self._overlay = [
+            ax.axvline(t, color="#3d6ea5", lw=1.0, zorder=8),
+            ax.plot([t], [v[i]], "o", ms=4, color="#3d6ea5", zorder=8, label="_reading")[0],
+            ax.annotate("\n".join(lines), (t, 0.99), annotation_clip=True,
+                        xycoords=blended_transform_factory(ax.transData, ax.transAxes),
+                        xytext=(-5 if right else 5, 0), textcoords="offset points",
+                        ha="right" if right else "left", va="top", multialignment="left",
+                        fontsize=8, color="#203040", zorder=9,
+                        bbox={"boxstyle": "round,pad=0.25", "fc": "#ffffff", "ec": "#a0b0c0",
+                              "alpha": 0.85})]
+        for a in self._overlay:
+            a.set_animated(True)
 
     def _reading_run(self):
         """The run the reading line reads: the selected one, else the first one shown."""
@@ -320,7 +375,7 @@ class ChromCanvas(FigureCanvasQTAgg):
         if self.cursor_t is None or run is None:
             return
         self.cursor_t = float(run.x[int(np.clip(self._point(run) + d, 0, len(run.x) - 1))])
-        self.redraw()
+        self._update_reading()
         if self.xlim and not self.xlim[0] <= self.cursor_t <= self.xlim[1]:
             self.centre(self.cursor_t)
 
@@ -370,8 +425,7 @@ class ChromCanvas(FigureCanvasQTAgg):
         self._finish()
         if ev.dblclick and ev.button == 1 and not self.mode:
             self._press = None
-            self.cursor_t = None
-            self.redraw()
+            self.set_cursor(None)
             self.reset_view()
             return
         if self.mode and ev.button == 1:
@@ -395,8 +449,7 @@ class ChromCanvas(FigureCanvasQTAgg):
                 if self.mode:
                     self.setCursor(self._cross)
                     if self.anchor is not None and ev.xdata is not None:
-                        self._span(self.anchor, ev.xdata, self._mode_color())
-                        self.draw_idle()
+                        self._draw_span(self.anchor, ev.xdata)
                 else:
                     self.setCursor(Qt.SizeHorCursor if self._edge_at(ev.x) else Qt.ArrowCursor)
             else:
@@ -405,20 +458,23 @@ class ChromCanvas(FigureCanvasQTAgg):
         kind = self._press[0]
         if kind == "pan":
             self._pan(ev)
+        elif ev.xdata is None:
             return
-        if ev.xdata is None:
-            return
-        if kind == "edge":
-            self._clear_temp()
-            self._temp = [self.ax.axvline(ev.xdata, color="#e08000", lw=1.5, zorder=7)]
+        elif kind == "edge":                          # where it will land
+            t = self._snap(ev.xdata) if self._press[1] >= 0 else ev.xdata
+            self._temp_shows(self.ax.axvline(t, color="#e08000", lw=1.5, zorder=7))
         elif kind == "zoom":
             self._span(self._press[4], ev.xdata, "#3d6ea5")
         else:                                                    # draw
-            a = self.anchor if self.anchor is not None else self._press[1]
-            self._span(a, ev.xdata, self._mode_color())
-            if self.mode == "region":
-                self.dragging.emit(min(a, ev.xdata), max(a, ev.xdata))
-        self.draw_idle()
+            self._draw_span(self.anchor if self.anchor is not None else self._press[1],
+                            ev.xdata)
+
+    def _draw_span(self, a, t):
+        """The span being drawn, from a to the mouse at t; a region's net counts reported."""
+        if self.mode == "region":
+            a, t = sorted((self._snap(a), self._snap(t)))
+            self.dragging.emit(a, t)
+        self._span(a, t, self._mode_color())
 
     def _mode_color(self):
         return "#909090" if self.mode == "stretch" else "#e08000"
@@ -442,36 +498,32 @@ class ChromCanvas(FigureCanvasQTAgg):
 
     def _on_release(self, ev):
         press, self._press = self._press, None
-        self._clear_temp()
+        self._temp_shows()
         if press is None:
             return
-        exact = bool(QApplication.keyboardModifiers() & Qt.AltModifier)
         t = ev.xdata
         kind = press[0]
         if kind == "edge":
             if t is not None:
-                self.edgeMoved.emit(press[1], press[2], float(t), exact)
-            self.draw_idle()
+                self.edgeMoved.emit(press[1], press[2],
+                                    float(self._snap(t) if press[1] >= 0 else t))
             return
         if kind == "draw":
-            moved = t is not None and abs(ev.x - press[2]) >= _CLICK_PX
             if t is None:
-                self.draw_idle()
                 return
-            if not moved and self.anchor is None:                # the first of two clicks
+            if abs(ev.x - press[2]) < _CLICK_PX and self.anchor is None:   # the first of two
                 self.anchor = press[1]
-                self._temp = [self.ax.axvline(press[1], color=self._mode_color(), lw=1.2,
-                                              zorder=7)]
-                self.draw_idle()
+                a = self._snap(press[1]) if self.mode == "region" else press[1]
+                self._temp_shows(self.ax.axvline(a, color=self._mode_color(), lw=1.2, zorder=7))
                 return
             a = self.anchor if self.anchor is not None else press[1]
             mode = self.mode
             self._end_mode()
-            if abs(t - a) > 0:
+            if t != a:
                 if mode == "stretch":
                     self.stretchDrawn.emit(min(a, t), max(a, t))
                 else:
-                    self.regionDrawn.emit(min(a, t), max(a, t), exact)
+                    self.regionDrawn.emit(*sorted((self._snap(a), self._snap(t))))
             return
         button, px0, py0 = press[1], press[2], press[3]
         if abs(ev.x - px0) >= _CLICK_PX or abs(ev.y - py0) >= _CLICK_PX:
@@ -480,7 +532,6 @@ class ChromCanvas(FigureCanvasQTAgg):
             elif t is not None:                                  # zoom to the span
                 a, b = sorted((press[4], float(t)))
                 self._set_view((a, b), None)
-            self.draw_idle()
             return
         self._click(button, press[4])
 
@@ -492,14 +543,13 @@ class ChromCanvas(FigureCanvasQTAgg):
                 self.set_cursor(None)
             return
         if button != 1 or self.mode:
-            self.draw_idle()
             return
         self.cursor_t, self._arrows = float(t), "line"
         k = self._region_at(t)
         if k != self.state[4]:
             self.regionPicked.emit(k)      # the main window redraws, the line with it
         else:
-            self.redraw()
+            self._update_reading()
         if PREFS["chrom"]["left_click"] == "centre":
             self.centre(float(t))
 
@@ -531,10 +581,9 @@ class ChromCanvas(FigureCanvasQTAgg):
         if arrow and sel is not None and self._edge:
             i, side = self._edge
             if i < len(sel.regions):
-                step = sel.dt_s / 60.0 * (1 if e.key() == Qt.Key_Right else -1)
                 now = (getattr(sel.regions[i], side) if i >= 0 else
                        sorted(sel.bg_stretch or [0, 0])[side == "end"])
-                self.edgeMoved.emit(i, side, now + step, True)
+                self.edgeMoved.emit(i, side, now + arrow * sel.dt_s / 60.0)
                 return
         if e.key() == Qt.Key_Escape:
             if self.mode:

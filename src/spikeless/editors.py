@@ -22,8 +22,8 @@ from PySide6.QtWidgets import (
     QLineEdit, QMainWindow, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .options import ColorButton, guard_fields, pick_color
 from .report import COLUMNS, HELP
+from .widgets import ColorButton, guard_fields, pick_color
 
 GREY, WHITE = QColor("#8d8d8d"), QColor("#e0e0e0")
 
@@ -58,6 +58,8 @@ class _Window(QMainWindow):
         self.setWindowTitle(title)
         self.resize(*size)
         self._filling = False
+        # once a burst of changes ends (a slider dragged), and never inside a table's signal
+        self._later = QTimer(self, singleShot=True, interval=0, timeout=self.refresh)
         if table:
             self.t = QTableWidget()
             self.t.verticalHeader().setVisible(False)
@@ -71,7 +73,7 @@ class _Window(QMainWindow):
 
     def refresh_later(self):
         if self.isVisible():
-            QTimer.singleShot(0, self.refresh)
+            self._later.start()
 
 
 class NamesWindow(_Window):

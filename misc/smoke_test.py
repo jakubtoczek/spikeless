@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QMessageBox,  # noqa: E4
                                QTableWidget)
 
 from spikeless import figure, io_gina, options, report, session  # noqa: E402
+from spikeless import peaks as spk_peaks  # noqa: E402
 from spikeless.editors import GREY, WHITE  # noqa: E402
 from spikeless.adjust import decay_on, lookup_half_life_s  # noqa: E402
 
@@ -119,18 +120,18 @@ assert run.bg_mode == "auto"
 
 # ---- ④ drawing: snapped, clipped against neighbours, n.d. on noise; edges; Del ----
 r0, r1 = run.regions
-w._drawn(11.0, 11.6, False)                                 # noise only
+w._drawn(11.0, 11.6)                                 # noise only
 k = w.sel_region
 row = w.results[run.id].rows[k]
 assert run.regions[k].how == "drawn" and "n.d." in row.flags and row.pct is None, row
 w._delete_regions([w.sel_region])
 assert len(run.regions) == 2
-w._drawn(r1.start - 0.3, r1.start + 0.2, True)              # overlaps the big one: cut at its start
+w._drawn(r1.start - 0.3, r1.start + 0.2)              # overlaps the big one: cut at its start
 k = w.sel_region
 assert abs(run.regions[k].end - r1.start) < 1e-9, (run.regions[k], r1)
 # that edge is now shared: moving it moves both
 shared = run.regions[k].end
-w._edge_moved(k, "end", shared - 0.05, True)
+w._edge_moved(k, "end", shared - 0.05)
 assert abs(run.regions[k].end - (shared - 0.05)) < 1e-9
 assert abs(run.regions[k + 1].start - (shared - 0.05)) < 1e-9
 assert run.regions[k + 1].how == "moved", run.regions[k + 1].how
@@ -220,6 +221,10 @@ fig = figure.figure(w)
 assert all(abs(a - b) < 0.5 for a, b in zip(fig.plot_area_mm, (80, 40))), fig.plot_area_mm
 w._figure()
 fw = w.figure_win
+assert not fw.d["legend"].isChecked() and not fw.d["legend"].isEnabled()   # one run: no legend
+assert w.plot_opts.legend                                   # … but kept for when there are two
+assert "#4a9782" in next(b for b in w.findChildren(appmod.QPushButton)
+                         if b.text() == "Figure…").styleSheet()
 fw._preset(4)                                               # Slide
 assert w.plot_opts.plot_w_mm == 160 and w.plot_opts.x.tick_font_size == 14
 assert abs(figure.figure(w).plot_area_mm[0] - 160) < 0.5
@@ -338,6 +343,25 @@ w.bg_from.setValue(0.2)
 assert abs(w.sel.bg_stretch[0] - 0.2) < 1e-9
 w.bg_radio["auto"].setChecked(True)
 
+# ---- a region's edge dragged zoomed in: where the line showed, on the nearest point ----
+run = w.sel
+reg = run.regions[-1]
+i0 = int(np.argmin(abs(run.x - reg.start)))
+cv.focus(run.x[i0 - 6], run.x[i0 + 6])                      # 13 points across the plot
+cv._finish()
+d = next(d for d in (2, 3, 4)                               # a drop the valley rule moves
+         if spk_peaks.snap(run.x, run.trace(), run.x[i0 + d], 3) != run.x[i0 + d])
+drop = run.x[i0 + d] + 0.3 * run.dt_s / 60                  # nearer point i0 + d than i0 + d + 1
+cv._on_press(ev("button_press_event", at(reg.start), 1))
+cv._on_motion(ev("motion_notify_event", at(drop)))
+assert abs(cv._temp[0].get_xdata()[0] - run.x[i0 + d]) < 1e-9   # the line: where it lands
+cv._on_release(ev("button_release_event", at(drop), 1))
+assert abs(reg.start - run.x[i0 + d]) < 1e-9, (reg.start, run.x[i0 + d])
+assert not cv._temp
+w._undo_step()
+cv.reset_view()
+cv._finish()
+
 # ---- run names: an alias typed in the list, a legend of its own, Run names ▤ ----
 run = w.sel
 w.run_list.item(0).setText("Alias")
@@ -366,6 +390,8 @@ f_out = figure.figure(w)
 assert f_out.get_figwidth() > w_in and abs(f_out.plot_area_mm[0] - o.plot_w_mm) < 0.5
 assert [t.get_text() for t in f_out.axes[0].get_legend().get_texts()] == ["Smoke Run"] * 2
 o.legend_loc = "auto"
+fw.refresh()
+assert fw.d["legend"].isChecked() and fw.d["legend"].isEnabled()           # two runs: shown
 
 # ---- selecting none: the steps wait; a click below the runs does it ----
 w._select(None)

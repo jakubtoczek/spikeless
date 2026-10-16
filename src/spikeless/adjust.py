@@ -49,18 +49,13 @@ def decay_on(isotope: str) -> bool:
     return isotope in DECAY_ON
 
 
-def decay_factor(x_min: np.ndarray, half_life_s: float | None,
-                 ref_offset_s: float = 0.0) -> np.ndarray:
-    """Multiplier that corrects each sample back to the reference time.
-
-    x_min: sample times in minutes from run start. ref_offset_s: reference time in seconds
-    from run start (0 = run start). factor = exp(+lambda * (t - t_ref)), i.e. counts are
-    scaled UP to undo the decay that happened between the reference time and acquisition.
-    """
+def decay_factor(x_min: np.ndarray, half_life_s: float | None) -> np.ndarray:
+    """Multiplier that corrects each sample back to the run start: exp(+λ t), t the sample's
+    time (x_min, minutes from the run start) — counts scaled UP to undo the decay since."""
     x_min = np.asarray(x_min, dtype=float)
     if not half_life_s or half_life_s <= 0:
         return np.ones_like(x_min)
-    return np.exp(_LN2 / half_life_s * (x_min * 60.0 - ref_offset_s))
+    return np.exp(_LN2 / half_life_s * x_min * 60.0)
 
 
 # ---------------------------------------------------------------- drifting background
@@ -113,7 +108,6 @@ def _baseline_arpls(y, lam=1e5, ratio=1e-6, max_iter=50, **_):
 
 
 BASELINE_METHODS = {"snip": _baseline_snip, "arpls": _baseline_arpls}
-BASELINE_LABELS = {"snip": "SNIP", "arpls": "arPLS"}
 
 
 def estimate_baseline(y: np.ndarray, method: str = "snip", n: int = 40) -> np.ndarray:

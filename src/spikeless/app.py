@@ -28,18 +28,19 @@ from PySide6.QtWidgets import (
 from . import __version__, io_gina, io_paste, session
 from .canvas import ChromCanvas
 from .editors import NamesWindow, RegionPanel, RegionsWindow, copy_table
-from .figure import FigureWindow, _Collapsible, _link
-from .options import (PREFS, ColorButton, OptionsWindow, guard_fields, load_prefs,
-                      method_names, params, save_prefs)
-from .peaks import find_regions, fit, measure, snap
+from .figure import FigureWindow
+from .options import OptionsWindow, PREFS, load_prefs, method_names, params, save_prefs
+from .peaks import find_regions, fit, measure
 from .plotting import Y_MODES, PlotOptions
 from .report import HELP, ReportWindow, columns, rows as result_rows
 from .run import COLORS, FindParams, Region
 from .spikes import SpikeParams, remove
+from .widgets import Collapsible, ColorButton, guard_fields, link
 
 APP_NAME = "Spikeless"
 OPENS = (".txt", session.EXT)               # what Open… and a drop take
 GREY = "color:#8d8d8d;"
+ACCENT = "#4a9782"                          # the suite's green (BioDist's Results button)
 TITLES = {"runs": "Runs", "spikes": "Spikes", "background": "Background", "peaks": "Regions"}
 
 
@@ -113,6 +114,9 @@ class MainWindow(QMainWindow):
             b = QPushButton(item[0])
             b.setToolTip(item[1])
             b.clicked.connect(lambda _=False, f=item[2]: f())
+            if item[0] == "Figure…":
+                b.setStyleSheet(f"QPushButton{{background:{ACCENT};color:white;font-weight:600;"
+                                "padding:3px 16px;border-radius:3px;}")
             tb.addWidget(b)
 
         # the plot, and above it what applies to every run, and Copy
@@ -204,15 +208,15 @@ class MainWindow(QMainWindow):
         sv = QVBoxLayout(self.steps)
         sv.setSpacing(6)
         self.step = {}
-        self._names_link = _link("", "▤", "#4caf50", self.names_window, "Run names: the "
-                                 "original, the name, the legend's")
+        self._names_link = link("", "▤", "#4caf50", self.names_window, "Run names: the "
+                                "original, the name, the legend's")
         for i, (key, body, extra) in enumerate((("runs", self._runs_step(), self._names_link),
                                                 ("spikes", self._spikes_step(), None),
                                                 ("background", self._bg_step(), None),
                                                 ("peaks", self._peaks_step(), None))):
             if i:
                 sv.addWidget(_hline())
-            self.step[key] = _Collapsible(TITLES[key], body, expanded=True, extra=extra)
+            self.step[key] = Collapsible(TITLES[key], body, expanded=True, extra=extra)
             sv.addWidget(self.step[key])
         sv.addStretch(1)
         guard_fields(self.steps)
@@ -502,13 +506,10 @@ class MainWindow(QMainWindow):
         self._fill_steps()
         if table:
             self._fill_table()
-        for w in (self.names_win, self.regions_win, self.region_win):
+        for w in (self.names_win, self.regions_win, self.region_win, self.figure_win,
+                  self.report_win):
             if w is not None:
                 w.refresh_later()
-        if self.figure_win is not None:
-            self.figure_win.refresh()
-        if self.report_win is not None:
-            self.report_win.refresh_later()
 
     def _fill_steps(self):
         self._filling = True
@@ -964,13 +965,11 @@ class MainWindow(QMainWindow):
                 f"counts" + (f", {row.pct:.1f} % of total" if row.pct is not None else "")
                 + (f" ({', '.join(row.flags)})" if row.flags else ""))
 
-    def _drawn(self, a, b, exact):
+    def _drawn(self, a, b):
+        """A region drawn on the plot, a to b (snapped there): cut back to overlap no other."""
         run = self.sel
         if run is None:
             return
-        if not exact:
-            y = run.trace()
-            a, b = snap(run.x, y, a), snap(run.x, y, b)
         ab = fit(run.regions, a, b, run.dt_s / 60)
         if ab is None:
             self.log("That span lies inside a region, or is too short: drag a region's edges "
@@ -983,7 +982,9 @@ class MainWindow(QMainWindow):
         self.refresh()
         self.log(f"Region drawn on '{run.name}': {self._row_text(run, self.sel_region)}.")
 
-    def _edge_moved(self, i, side, t, exact):
+    def _edge_moved(self, i, side, t):
+        """Edge `side` of region i (-1: the background stretch) dropped at t (snapped there),
+        kept off its neighbours; a shared edge moves for both."""
         run = self.sel
         if run is None or i >= len(run.regions):
             return
@@ -998,8 +999,6 @@ class MainWindow(QMainWindow):
                 self.refresh()
             return
         r, dtm = run.regions[i], run.dt_s / 60
-        if not exact:
-            t = snap(run.x, run.trace(), t)
         old = getattr(r, side)
         opp = "end" if side == "start" else "start"
         # an edge shared with the neighbour moves for both
@@ -1068,7 +1067,7 @@ class MainWindow(QMainWindow):
         y = run.trace()
         m = (run.x >= a) & (run.x <= b)
         if m.sum() >= 2:
-            net = float(np.trapezoid((y - run.background(y)[0])[m], run.x[m])) * 60
+            net = float(np.trapezoid((y - run.background()[0])[m], run.x[m])) * 60
             self.statusBar().showMessage(f"{a:.2f}–{b:.2f} min: {net:.0f} net counts", 2000)
 
     def set_region(self, k, key, val):
@@ -1376,15 +1375,6 @@ class MainWindow(QMainWindow):
 
 
 # ---------------- small helpers
-def _row(*widgets):
-    w = QWidget()
-    h = QHBoxLayout(w)
-    h.setContentsMargins(0, 0, 0, 0)
-    for k, wdg in enumerate(widgets):
-        h.addWidget(wdg, 1 if k == 0 else 0)
-    return w
-
-
 def _hline():
     f = QFrame()
     f.setFrameShape(QFrame.HLine)

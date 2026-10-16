@@ -82,22 +82,11 @@ def _readable(fg_hex: str, bg_hex: str, target: float = 3.0) -> str:
     return to_hex(cand)
 
 
-def _label_placement(px, py, xmin, xmax, ymin, ymax, mode, pad=3):
-    """(dx, dy, ha, va) offset-points + alignment for a peak label. 'auto' keeps it inside the
-    axes: a peak near the top edge is labelled to the side (left if also near the right edge)
-    rather than above, where it would spill out of the plot."""
-    if mode == "above":
-        return 0, pad, "center", "bottom"
-    if mode == "right":
-        return pad, 0, "left", "center"
-    if mode == "left":
-        return -pad, 0, "right", "center"
-    xr = (xmax - xmin) or 1.0
-    yr = (ymax - ymin) or 1.0
-    if py > ymin + 0.88 * yr:                 # near the top → move to the side
-        if px > xmin + 0.85 * xr:             # also near the right edge → put it on the left
-            return -pad, 0, "right", "center"
-        return pad, 0, "left", "center"
+def _label_offset(px, py, x_end, y_top, pad=3):
+    """(dx, dy in points, ha, va) of a peak's label: above its apex; near the top, beside it —
+    on its left near the right edge too — where above would leave the plot."""
+    if py > 0.88 * y_top:
+        return (-pad, 0, "right", "center") if px > 0.85 * x_end else (pad, 0, "left", "center")
     return 0, pad, "center", "bottom"
 
 
@@ -111,7 +100,7 @@ class AxisOptions:
     major: float | None = None
     grad_start: float | None = None
     grad_end: float | None = None
-    minor_on: bool = False
+    minor_on: bool | None = None      # None: auto (_minor_shown)
     minor_n: int | None = None
     major_len_mm: float = 1.0
     minor_len_mm: float = 0.5
@@ -120,6 +109,7 @@ class AxisOptions:
     tick_lw_auto: bool = True
     tick_dir: str = "out"
     tick_font_size: float = 7.0
+    small_counts: bool = True         # y: 6 pt labels for counts ≥ 100 on a figure ≤ 80 mm wide
     title_font_size: float = 8.0
     title_pad_mm: float = 1.2
     tick_label_pad_mm: float = 0.6
@@ -170,6 +160,8 @@ class PlotOptions:
 
 _X_MAJOR_CANDIDATES = [0.25, 0.5, 1, 2, 5, 10, 15, 20, 30, 60]
 _MINOR_BY_MAJOR = {1: 5, 5: 5, 2: 4, 10: 5, 20: 4, 15: 3, 30: 6, 60: 6, 0.5: 5, 0.25: 5}
+NARROW_MM = 80.0          # a figure this wide or less (a journal's single column) …
+SMALL_TICKS_PT = 6.0      # … has its y labels of counts ≥ 100 this size at most
 
 
 def _auto_x_major(span, width_mm):
@@ -180,20 +172,50 @@ def _auto_x_major(span, width_mm):
     return float(_X_MAJOR_CANDIDATES[-1])
 
 
-def _nice_major(span, size_mm, per_mm=12.0):
-    if span <= 0:
+def _auto_y_major(top, h_mm):
+    """The y step: as many ticks above 0 as fit 8 mm apart — 4 at most on 32 mm, 5 on 40 mm —
+    but 2 at least, on a step of 1, 2, 2.5 or 5 × 10ⁿ. top: the axis' top above 0."""
+    if top <= 0:
         return 1.0
-    target = max(2, size_mm / per_mm)
-    raw = span / target
-    mag = 10 ** np.floor(np.log10(raw))
-    for m in (1, 2, 5, 10):
-        if m * mag >= raw:
-            return float(m * mag)
-    return float(10 * mag)
+    cap = max(2, int(h_mm / 8 + 1e-9))
+    mag = 10.0 ** np.floor(np.log10(top / cap))
+    steps = [m * mag for m in (1, 2, 2.5, 5, 10)]
+    k = next(i for i, step in enumerate(steps) if top / step <= cap + 1e-9)
+    if k and top / steps[k] < 2:              # a short axis: 2 ticks rather than its cap
+        k -= 1
+    return float(steps[k])
+
+
+def _major(axis, auto, span):
+    """The major step as set, else (or if it would draw too many) auto."""
+    m = axis.major
+    return auto if m is None or m <= 0 or span / m > _MAX_TICKS else m
 
 
 def _minor_n(major, axis):
     return axis.minor_n or _MINOR_BY_MAJOR.get(major, 5)
+
+
+def _minor_shown(axis, which, major, span, span_mm):
+    """Minor ticks as set; Auto: on the x axis when they mark whole minutes, 4 between two
+    majors (a major step of 5 or 10 min), 1 mm apart at least."""
+    if axis.minor_on is not None:
+        return axis.minor_on
+    n = _minor_n(major, axis)
+    step = major / n
+    return (which == "x" and n == 5 and step >= 1 and abs(step - round(step)) < 1e-9
+            and span_mm * step / span >= 1.0)
+
+
+def _y_tick_pt(opts, ymax, major, fig_w_mm):
+    """The y labels' size: as set, but SMALL_TICKS_PT at most for counts of 3 digits or more on
+    a figure NARROW_MM wide or less, where their width would eat the plot (y.small_counts)."""
+    size = opts.y.tick_font_size
+    top_label = np.floor(ymax / major + 1e-9) * major
+    if (opts.y.small_counts and opts.y_mode == "cps" and top_label >= 100 - 1e-9
+            and fig_w_mm <= NARROW_MM + 1e-6):
+        return min(size, SMALL_TICKS_PT)
+    return size
 
 
 # ---------------- runs
@@ -315,7 +337,7 @@ def draw(ax, runs, opts, results, *, raw=False, spikes=False, background=False, 
             if txt:
                 top = int(np.argmax(ys - under))
                 px, py = xs[top], _f(ys[top], b[m][top], k, off, flat)
-                dx, dy, ha, va = _label_placement(px, py, 0.0, x_end, 0.0, y_top, "auto")
+                dx, dy, ha, va = _label_offset(px, py, x_end, y_top)
                 ax.annotate(txt, (px, py), textcoords="offset points", xytext=(dx, dy),
                             ha=ha, va=va, fontsize=opts.label_size, fontfamily=opts.font,
                             color=_readable(col, bg), zorder=6)
@@ -423,16 +445,9 @@ def resolve_limits(runs, opts):
     return xmin, xmax, ymin, ymax
 
 
-def auto_extents(runs, opts):
-    xmin, xmax, ymin, ymax = resolve_limits(runs, opts)
-    return {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax,
-            "xmajor": _auto_x_major(xmax - xmin, opts.plot_w_mm),
-            "ymajor": _nice_major(ymax - ymin, opts.plot_h_mm)}
-
-
-def _margins_mm(opts, y_max):
+def _margins_mm(opts, y_max, ytick_pt):
     ndigits = max(1, len(f"{int(round(y_max)):d}")) if np.isfinite(y_max) else 4
-    ytick_w = ndigits * opts.y.tick_font_size * 0.6 * 0.352777778
+    ytick_w = ndigits * ytick_pt * 0.6 * 0.352777778
     left = (opts.y.major_len_mm + 1.0 + ytick_w + opts.y.title_pad_mm
             + opts.y.title_font_size * 0.352777778 + 1.5)
     bottom = (opts.x.major_len_mm + 1.0 + opts.x.tick_font_size * 0.352777778
@@ -440,14 +455,9 @@ def _margins_mm(opts, y_max):
     return max(left, 12.0), max(bottom, 10.0), 3.0, 3.0
 
 
-def _apply_axis(ax, which, axis, vmin, vmax, span_mm, font="sans-serif"):
-    is_x = which == "x"
-    axr = ax.xaxis if is_x else ax.yaxis
-    span = vmax - vmin
-    auto_major = _auto_x_major(span, span_mm) if is_x else _nice_major(span, span_mm)
-    major = auto_major if axis.major is None else axis.major
-    if major <= 0 or span / major > _MAX_TICKS:
-        major = auto_major
+def _apply_axis(ax, which, axis, vmin, vmax, span_mm, major, tick_pt, font):
+    """Ticks, labels and grid of one axis; returns whether its minor ticks are shown."""
+    axr = ax.xaxis if which == "x" else ax.yaxis
     if axis.grad_start is not None or axis.grad_end is not None:
         start = vmin if axis.grad_start is None else axis.grad_start
         end = vmax if axis.grad_end is None else axis.grad_end
@@ -457,15 +467,15 @@ def _apply_axis(ax, which, axis, vmin, vmax, span_mm, font="sans-serif"):
             axr.set_major_locator(MultipleLocator(major))
     else:
         axr.set_major_locator(MultipleLocator(major))
-    if axis.minor_on or axis.minor_grid_on:
+    minor = _minor_shown(axis, which, major, vmax - vmin, span_mm)
+    if minor or axis.minor_grid_on:
         axr.set_minor_locator(MultipleLocator(major / max(1, _minor_n(major, axis))))
     tick_w = axis.lw_pt if axis.tick_lw_auto else axis.tick_lw_pt
     ax.tick_params(axis=which, which="major", direction=axis.tick_dir,
-                   length=axis.major_len_mm * PT_PER_MM, width=tick_w, labelsize=axis.tick_font_size,
-                   labelfontfamily=font,
-                   pad=axis.tick_label_pad_mm * PT_PER_MM)
+                   length=axis.major_len_mm * PT_PER_MM, width=tick_w, labelsize=tick_pt,
+                   labelfontfamily=font, pad=axis.tick_label_pad_mm * PT_PER_MM)
     ax.tick_params(axis=which, which="minor", direction=axis.tick_dir,
-                   length=axis.minor_len_mm * PT_PER_MM if axis.minor_on else 0,
+                   length=axis.minor_len_mm * PT_PER_MM if minor else 0,
                    width=tick_w if axis.minor_lw_pt is None else axis.minor_lw_pt)
     if axis.grid_on:
         ax.grid(True, which="major", axis=which, color=axis.grid_color,
@@ -474,14 +484,23 @@ def _apply_axis(ax, which, axis, vmin, vmax, span_mm, font="sans-serif"):
         ax.grid(True, which="minor", axis=which, color=axis.minor_grid_color,
                 linestyle=axis.minor_grid_style, linewidth=axis.minor_grid_width)
     ax.set_axisbelow(True)
+    return minor
 
 
 def build_figure(runs, opts: PlotOptions, results) -> Figure:
-    """The figure for export: plot area exactly opts' size in mm, plus the label margins."""
+    """The figure for export: plot area exactly opts' size in mm, plus the label margins.
+    What the Figure window shows back: fig.plot_area_mm, and fig.auto — what each Auto came to."""
     xmin, xmax, ymin, ymax = resolve_limits(runs, opts)
-    left, bottom, right, top = _margins_mm(opts, ymax)
+    left, bottom, right, top = _margins_mm(opts, ymax, opts.y.tick_font_size)
     plot_w = opts.plot_w_mm if opts.total_w_mm is None else max(5.0, opts.total_w_mm - left - right)
     plot_h = opts.plot_h_mm if opts.total_h_mm is None else max(5.0, opts.total_h_mm - bottom - top)
+    ymajor = _major(opts.y, _auto_y_major(ymax if ymax > 0 else ymax - ymin, plot_h), ymax - ymin)
+    ytick = _y_tick_pt(opts, ymax, ymajor, opts.total_w_mm or plot_w + left + right)
+    if ytick != opts.y.tick_font_size:                      # narrower labels: a narrower margin
+        left = _margins_mm(opts, ymax, ytick)[0]
+        if opts.total_w_mm is not None:
+            plot_w = max(5.0, opts.total_w_mm - left - right)
+    xmajor = _major(opts.x, _auto_x_major(xmax - xmin, plot_w), xmax - xmin)
     fig_w, fig_h = plot_w + left + right, plot_h + bottom + top
     fig = Figure(figsize=(fig_w / 25.4, fig_h / 25.4))
     fig.plot_area_mm = (plot_w, plot_h)   # what the size fields report back when a total is fixed
@@ -496,8 +515,11 @@ def build_figure(runs, opts: PlotOptions, results) -> Figure:
         ax.spines[side].set_visible(False)
     ax.spines["bottom"].set_linewidth(opts.x.lw_pt)
     ax.spines["left"].set_linewidth(opts.y.lw_pt)
-    _apply_axis(ax, "x", opts.x, xmin, xmax, plot_w, opts.font)
-    _apply_axis(ax, "y", opts.y, ymin, ymax, plot_h, opts.font)
+    xminor = _apply_axis(ax, "x", opts.x, xmin, xmax, plot_w, xmajor, opts.x.tick_font_size,
+                         opts.font)
+    yminor = _apply_axis(ax, "y", opts.y, ymin, ymax, plot_h, ymajor, ytick, opts.font)
+    fig.auto = {"xmin": xmin, "xmax": xmax, "ymin": ymin, "ymax": ymax, "xmajor": xmajor,
+                "ymajor": ymajor, "xminor": xminor, "yminor": yminor, "ytick": ytick}
     ax.set_xlabel(opts.x.title, fontfamily=opts.font,
                   fontsize=opts.x.title_font_size, labelpad=opts.x.title_pad_mm * PT_PER_MM)
     ax.set_ylabel(y_title(opts), fontfamily=opts.font,
@@ -561,6 +583,22 @@ def _self_check():
     run.dt_s = 1.0
     lo, hi = resolve_limits([run], PlotOptions())[2:]
     assert abs(lo + 0.03 * hi) < 1e-9, (lo, hi)      # 3 % of the top below zero
+
+    # y ticks: 2 to 4 above 0 on 32 mm, 2 to 5 on 40 mm, whatever the top
+    for top in (0.8, 3, 7.5, 42, 105, 420, 999, 1050, 3150, 18000):
+        for h, cap in ((32, 4), (40, 5)):
+            n = int(np.floor(top / _auto_y_major(top, h) + 1e-9))
+            assert 2 <= n <= cap, (top, h, n)
+    assert _auto_y_major(420, 40) == 100 and _auto_y_major(420, 32) == 200
+    # x minor ticks, Auto: every minute under majors of 5 min (a 16-min run), not under 2
+    o = PlotOptions()
+    assert _minor_shown(o.x, "x", 5.0, 16, 65) and _minor_shown(o.x, "x", 10.0, 40, 65)
+    assert not _minor_shown(o.x, "x", 2.0, 8, 65) and not _minor_shown(o.y, "y", 5.0, 16, 65)
+    # y labels of counts ≥ 100: 6 pt on a figure 80 mm wide or less, else as set
+    fig = build_figure([run], PlotOptions(total_w_mm=80), {})
+    assert fig.auto["ytick"] == 6.0 and fig.auto["ymajor"] >= 100, fig.auto
+    assert build_figure([run], PlotOptions(total_w_mm=81), {}).auto["ytick"] == 7.0
+    assert build_figure([run], PlotOptions(total_w_mm=80, y_mode="pct_max"), {}).auto["ytick"] == 7.0
 
     # two runs: the legend fits inside; a long label pushes it out, the figure grows for it
     other = Run(x=t / 60, y=y * 0.5, name="b")

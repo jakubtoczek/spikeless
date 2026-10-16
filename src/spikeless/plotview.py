@@ -15,7 +15,7 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass
 
-from PySide6.QtCore import QByteArray, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QByteArray, QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QPainter, QPixmap, QTransform
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtSvgWidgets import QGraphicsSvgItem
@@ -36,8 +36,6 @@ class Background:
 
 
 class ZoomableFigureView(QGraphicsView):
-    resized = Signal()
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self._scene = QGraphicsScene(self)
@@ -199,4 +197,3 @@ class ZoomableFigureView(QGraphicsView):
         super().resizeEvent(e)
         if not self._zoomed:
             self._fit()
-        self.resized.emit()

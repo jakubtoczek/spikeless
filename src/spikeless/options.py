@@ -11,8 +11,6 @@ retention time, their conditions), the log, and the settings a run starts with (
 background, finding regions). The report's choices are saved here too but set in the Report
 window. A run's own processing is not: it belongs to the run, and is saved with the session.
 
-Also here, because every window needs them: `guard_fields` (the mouse wheel over a field
-scrolls the page, it does not change the value) and `ColorButton`.
 """
 
 from __future__ import annotations
@@ -22,18 +20,17 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QCheckBox, QColorDialog, QComboBox, QDialog,
-    QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel, QListWidget,
-    QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QHBoxLayout, QHeaderView,
+    QLabel, QListWidget, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,
+    QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from . import plotting
 from .adjust import ISOTOPES, set_half_lives
 from .plotview import Background
+from .widgets import ColorButton, guard_fields
 
 APP_DIR = Path(__file__).resolve().parents[2]          # where Spikeless.bat is
 OPTIONS_FILE = APP_DIR / "spikeless_options.json"
@@ -159,67 +156,6 @@ def method_names() -> list[str]:
 def method_info(method: str) -> list[tuple[str, str]]:
     """(field, value) of a method's conditions (Options › Methods), the filled ones."""
     return [(r[1], r[2]) for r in PREFS["method_info"] if method and r[0] == method and r[2]]
-
-
-def pick_color(parent, color) -> str | None:
-    """A colour from the dialog (dark like the app), or None if cancelled."""
-    # the window, not the button: a ColorButton's style (its colour) would paint the dialog
-    dlg = QColorDialog(QColor(color), parent.window() if parent is not None else None)
-    dlg.setOption(QColorDialog.DontUseNativeDialog, True)
-    dlg.setPalette(QApplication.palette())
-    if dlg.exec() != QDialog.Accepted or not dlg.currentColor().isValid():
-        return None
-    return dlg.currentColor().name()
-
-
-class _WheelGuard(QObject):
-    """A field takes the wheel only once clicked into: scrolling a panel past a spin box
-    must not change the plot. The ignored event goes on to the scroll area behind it."""
-
-    def eventFilter(self, obj, ev):                     # noqa: N802 - Qt's name
-        if ev.type() == QEvent.Wheel and not obj.hasFocus():
-            ev.ignore()
-            return True
-        return False
-
-
-_GUARD = _WheelGuard()
-
-
-def guard_fields(root: QWidget) -> None:
-    """Every spin box and combo under `root`: no wheel until clicked into, and a typed
-    number applied on Enter or leaving the field, not at each key."""
-    for w in root.findChildren(QAbstractSpinBox) + root.findChildren(QComboBox):
-        # StrongFocus: the default WheelFocus would hand the field focus on the wheel event
-        # itself, and the guard would let that same event through.
-        w.setFocusPolicy(Qt.StrongFocus)
-        w.installEventFilter(_GUARD)
-        if isinstance(w, QAbstractSpinBox):
-            w.setKeyboardTracking(False)
-
-
-class ColorButton(QPushButton):
-    def __init__(self, color, on_change=None):
-        super().__init__(color)
-        self.color = color
-        self._on_change = on_change
-        self._paint()
-        self.clicked.connect(self._pick)
-
-    def set_color(self, color):
-        self.color = color
-        self._paint()
-
-    def _paint(self):
-        self.setStyleSheet(f"background:{self.color}; padding:4px;")
-        self.setText(self.color)
-
-    def _pick(self):
-        c = pick_color(self, self.color)
-        if c:
-            self.set_color(c)
-            if self._on_change:
-                self._on_change()
 
 
 class OptionsWindow(QMainWindow):

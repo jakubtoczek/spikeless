@@ -11,27 +11,28 @@ from __future__ import annotations
 
 import io
 
-from PySide6.QtCore import QByteArray, QMimeData, Qt
+from PySide6.QtCore import QByteArray, QMimeData, Qt, QTimer
 from PySide6.QtGui import QImage, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from .options import PREFS, ColorButton, guard_fields
-from .plotting import LEGEND, PlotOptions, auto_extents, build_figure, legend_text
+from .options import PREFS
+from .plotting import LEGEND, PlotOptions, build_figure, legend_text
 from .plotview import Background, ZoomableFigureView
+from .widgets import Collapsible, ColorButton, guard_fields, link
 
 _LINESTYLES = ["solid", "dotted", "dashed", "dashdot"]
 _DIRS = {"out": "Out", "in": "In", "inout": "Across"}
 
 
-def _preset(o: PlotOptions, total_w, w, h, font, lw):
+def _preset(o: PlotOptions, total_w, w, h, font, lw, labels):
     """total_w: the whole figure's width (a journal's column, or a share of it), the plot area
-    what is left; None: the plot area w × h."""
+    what is left; None: the plot area w × h. labels: the regions' labels, pt."""
     o.plot_w_mm, o.plot_h_mm, o.total_w_mm, o.total_h_mm = w, h, total_w, None
     o.line_width_pt = lw
-    o.legend_font_size = o.label_size = font
+    o.legend_font_size, o.label_size = font, labels
     for ax in (o.x, o.y):
         ax.tick_font_size, ax.title_font_size = font, font + 1
         ax.lw_pt = ax.tick_lw_pt = lw * 0.67
@@ -42,19 +43,11 @@ def _preset(o: PlotOptions, total_w, w, h, font, lw):
 # fit any double one with a gap; 55 mm, three; 170 mm, any double column.
 # ponytail: one panel per figure; a multi-panel figure is for later
 PRESETS = {"Panel — 1 column, or ½ of a 2-column figure: 80 mm wide, 7 pt":
-           (80, 65, 40, 7.0, 0.75),
-           "Panel — ⅓ of a 2-column figure: 55 mm wide, 7 pt": (55, 41, 32, 7.0, 0.6),
-           "Figure — the full 2-column width: 170 mm wide, 7 pt": (170, 155, 60, 7.0, 0.75),
-           "Slide — plot 160 × 90 mm, 14 pt": (None, 160, 90, 14.0, 1.5)}
-
-
-def _link(text, icon, color, fn, tip):
-    """'text icon', both clickable, the icon in colour (text may be empty)."""
-    lab = QLabel((f"<a href='#' style='color:#e0e0e0'>{text}</a> " if text else "")
-                 + f"<a href='#' style='color:{color}; text-decoration:none'>{icon}</a>")
-    lab.setToolTip(tip)
-    lab.linkActivated.connect(lambda _: fn())
-    return lab
+           (80, 65, 40, 7.0, 0.75, 6.0),
+           "Panel — ⅓ of a 2-column figure: 55 mm wide, 7 pt": (55, 41, 32, 7.0, 0.6, 6.0),
+           "Figure — the full 2-column width: 170 mm wide, 7 pt":
+           (170, 155, 60, 7.0, 0.75, 7.0),
+           "Slide — plot 160 × 90 mm, 14 pt": (None, 160, 90, 14.0, 1.5, 14.0)}
 
 
 def _fonts():
@@ -164,6 +157,8 @@ class FigureWindow(QMainWindow):
         self._loading = False
         self._sections = []
         self._open = set()               # the sections unfolded, kept when the panel is rebuilt
+        # the preview (a figure, then an SVG of it: 80 ms and more) once a burst of changes ends
+        self._later = QTimer(self, singleShot=True, interval=120, timeout=self.refresh)
         self.load()
 
     def open(self):
@@ -172,10 +167,21 @@ class FigureWindow(QMainWindow):
         self.activateWindow()
         self.refresh()
 
+    def refresh_later(self):
+        if self.isVisible():
+            self._later.start()
+
     def refresh(self):
         """The preview, after any change to the data or the settings (if shown)."""
         if not self.isVisible():
             return
+        self._later.stop()
+        n = sum(r.shown for r in self.main.runs)
+        leg = self.d["legend"]                       # no legend for one run: unticked, greyed
+        leg.blockSignals(True)
+        leg.setChecked(self.main.plot_opts.legend and n >= 2)
+        leg.setEnabled(n >= 2)
+        leg.blockSignals(False)
         self.preview.set_background(Background(**PREFS["background"]))
         if not self.main.runs:
             self._fig = None
@@ -263,12 +269,14 @@ class FigureWindow(QMainWindow):
         f.addRow("Label size (pt)", self.d["label_size"])
         self.d["alpha"] = _spin(0, 1, o.region_alpha, 0.05)
         f.addRow("Opacity", self.d["alpha"])
-        f.addRow("Each region", _link("edit", "⤢", "#7fb2e5", self.main.regions_window,
-                                       "Its colour, its label on or off, its note"))
+        f.addRow("Each region", link("edit", "⤢", "#7fb2e5", self.main.regions_window,
+                                      "Its colour, its label on or off, its note"))
 
         # legend
         lg, f = _section()
-        f.addRow(self._tick("legend", "Shown (2 runs or more)", o))
+        self.d["legend"] = self._tick("legend", "Shown", o)
+        self.d["legend"].setToolTip("The runs' names; greyed with one run on the figure")
+        f.addRow(self.d["legend"])
         self.d["leg_loc"] = QComboBox()
         for key in LEGEND:
             self.d["leg_loc"].addItem(legend_text(key), key)
@@ -283,8 +291,8 @@ class FigureWindow(QMainWindow):
         f.addRow("Then right (mm)", self.d["leg_dx"])
         f.addRow("Then up (mm)", self.d["leg_dy"])
         f.addRow("Size (pt)", self.d["leg_size"])
-        f.addRow("Labels", _link("edit", "▤", "#4caf50", self.main.names_window,
-                                 "What the legend calls each run (Run names)"))
+        f.addRow("Labels", link("edit", "▤", "#4caf50", self.main.names_window,
+                                "What the legend calls each run (Run names)"))
 
         # backgrounds
         bg, f = _section()
@@ -305,7 +313,7 @@ class FigureWindow(QMainWindow):
                             ("Legend", lg), ("Backgrounds", bg),
                             ("X axis", self._axis_group("x", o.x)),
                             ("Y axis", self._axis_group("y", o.y))):
-            s = _Collapsible(title, body, expanded=title in self._open)
+            s = Collapsible(title, body, expanded=title in self._open)
             self._sections.append(s)
             outer.addWidget(s)
         outer.addStretch(1)
@@ -368,13 +376,28 @@ class FigureWindow(QMainWindow):
         self.d[f"{p}_ticklw"], self.d[f"{p}_ticklw_auto"] = tlw, tlw_auto
         f.addRow("Thickness (pt)", _pair(tlw_auto, tlw))
         self._num(f, p, "tick", "Labels size (pt)", ax.tick_font_size, 4, 24, 0.5)
+        if p == "y":
+            small = QCheckBox("6 pt for counts ≥ 100, 80 mm wide or less")
+            small.setToolTip("Counts of 3 digits or more take a narrow figure's width: on a "
+                             "figure 80 mm wide or less, their labels are 6 pt at most")
+            small.setChecked(ax.small_counts)
+            small.toggled.connect(self._apply)
+            self.d["y_small"] = small
+            f.addRow("", small)
         self._num(f, p, "lblpad", "Labels gap (mm)", ax.tick_label_pad_mm, 0, 20, 0.1)
         _head(f, "Minor ticks")
         minor = QCheckBox("Shown")
-        minor.setChecked(ax.minor_on)
+        minor.setChecked(bool(ax.minor_on))
+        minor.setEnabled(ax.minor_on is not None)
         minor.toggled.connect(self._apply)
-        self.d[f"{p}_minor"] = minor
-        f.addRow(minor)
+        minor_auto = QCheckBox("Auto")
+        minor_auto.setToolTip("On the time axis when they mark whole minutes, 4 between two "
+                              "majors (majors every 5 or 10 min); off on the other")
+        minor_auto.setChecked(ax.minor_on is None)
+        minor_auto.toggled.connect(minor.setDisabled)
+        minor_auto.toggled.connect(self._apply)
+        self.d[f"{p}_minor"], self.d[f"{p}_minor_auto"] = minor, minor_auto
+        f.addRow(_pair(minor_auto, minor))
         mn = _spin(0, 20, ax.minor_n or 0, 1)
         mn.setSpecialValueText("Auto")
         mn.setToolTip("Minor intervals per major one (Auto: 5; 4 for a major of 2 or 20; 3 for "
@@ -461,7 +484,8 @@ class FigureWindow(QMainWindow):
             ax.tick_lw_pt = d[f"{p}_ticklw"].value()
             ax.tick_font_size = d[f"{p}_tick"].value()
             ax.tick_label_pad_mm = d[f"{p}_lblpad"].value()
-            ax.minor_on = d[f"{p}_minor"].isChecked()
+            ax.minor_on = (None if d[f"{p}_minor_auto"].isChecked()
+                           else d[f"{p}_minor"].isChecked())
             ax.minor_n = int(d[f"{p}_minorn"].value()) or None
             ax.minor_len_mm = d[f"{p}_minlen"].value()
             ax.minor_lw_pt = val(f"{p}_minlw")
@@ -473,6 +497,7 @@ class FigureWindow(QMainWindow):
             ax.minor_grid_style = d[f"{p}_mgridstyle"].currentText()
             ax.minor_grid_color = d[f"{p}_mgridcolor"].color
             ax.minor_grid_width = d[f"{p}_mgridwidth"].value()
+        o.y.small_counts = d["y_small"].isChecked()
         self.main.refresh()
 
     def _fill_auto_fields(self):
@@ -481,8 +506,11 @@ class FigureWindow(QMainWindow):
         if not self.main.runs or not self.d or self._fig is None:
             return
         o = self.main.plot_opts
-        ex = auto_extents(self.main.runs, o)
+        ex = self._fig.auto
         self._loading = True
+        for p in ("x", "y"):
+            if self.d[f"{p}_minor_auto"].isChecked():
+                self.d[f"{p}_minor"].setChecked(ex[f"{p}minor"])
         for k, v in (("x_min", ex["xmin"]), ("x_max", ex["xmax"]), ("x_maj", ex["xmajor"]),
                      ("x_gstart", ex["xmin"]), ("x_gend", ex["xmax"]),
                      ("y_min", ex["ymin"]), ("y_max", ex["ymax"]), ("y_maj", ex["ymajor"]),
@@ -513,44 +541,7 @@ def _head(form, text):
     form.addRow(lab)
 
 
-# ---------------- small widgets (also used by app.py)
-class _Collapsible(QWidget):
-    """A bold title that folds its content away; `extra`: a widget beside the title."""
-
-    def __init__(self, title, content, expanded=True, extra=None):
-        super().__init__()
-        from PySide6.QtWidgets import QToolButton
-        self._btn = QToolButton()
-        self._btn.setText(title)
-        self._btn.setCheckable(True)
-        self._btn.setChecked(expanded)
-        self._btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._btn.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
-        self._btn.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
-        self._btn.toggled.connect(self._on_toggled)
-        self._content = content
-        self._content.setVisible(expanded)
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        if extra is None:
-            lay.addWidget(self._btn)
-        else:
-            head = QHBoxLayout()
-            head.addWidget(self._btn)
-            head.addWidget(extra)
-            head.addStretch(1)
-            lay.addLayout(head)
-        lay.addWidget(self._content)
-
-    def set_title(self, text):
-        self._btn.setText(text)
-
-    def _on_toggled(self, on):
-        self._content.setVisible(on)
-        self._btn.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
-
-
+# ---------------- small widgets
 def _cform(w):
     f = QFormLayout(w)
     f.setVerticalSpacing(4)

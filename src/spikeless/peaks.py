@@ -47,8 +47,10 @@ def sigma(b_cps: float, dt_s: float) -> float:
 
 # ---------------------------------------------------------------- placing
 def snap(x, y, t: float, k: int = 3) -> float:
-    """t moved to the lowest point of y within ±k samples: a rough drag lands in the valley."""
-    i = int(np.clip(np.searchsorted(x, t), 0, len(x) - 1))
+    """t moved to the lowest point of y within ±k samples of the nearest: a rough drag lands
+    in the valley (k = 0: on the nearest point)."""
+    i = int(np.clip(np.searchsorted(x, t), 1, len(x) - 1))
+    i -= bool(t - x[i - 1] < x[i] - t)
     lo, hi = max(0, i - k), min(len(x), i + k + 1)
     return float(x[lo + int(np.argmin(y[lo:hi]))])
 
@@ -94,7 +96,7 @@ def find_regions(run: Run) -> list[Region]:
     p = run.find_params
     w = max(1, int(p.smooth))
     x, y = run.x, run.trace()
-    b, _ = run.background(y)
+    b, _ = run.background()
     s = y - b
     noise = sigma(float(np.median(b)), run.dt_s)
     # on a w-point mean, n σ of that mean: one noisy point on a tail is not a peak
@@ -168,7 +170,7 @@ def measure(run: Run, method_rows=()) -> Results:
     (Options › Methods), naming the regions whose apex falls in a window of the run's method;
     a region without a typed or method name is "peak N (Rt)"."""
     x, y = run.x, run.trace()
-    b, how = run.background(y)
+    b, how = run.background()
     raw = run.trace(raw=True)
     ex = run.excluded()
     total = _trapz(y - b, x)
