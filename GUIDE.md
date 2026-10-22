@@ -169,7 +169,7 @@ opened (the ones you open stay open):
   figure's size), **Panel, ⅓ of a 2-column figure, 55 mm** (three side by side), **the full
   2-column width, 170 mm**, all 7 pt (the two panels' region labels 6 pt); **Slide** (plot
   160 × 90 mm, 14 pt). A panel's width is the whole of it, labels included;
-- **Style…** — **Colour**: each run its colour, solid lines; **Black and white** (as Flowless):
+- **Style…** — **Colour**: each run its colour, solid lines; **Black and white**:
   each run black with its own dashes — solid, dashed, dotted, dash-dot… in the list's order,
   the runs shown first —, the regions shaded grey. Every run's colour, line and fill are reset
   (Ctrl+Z gives them back), then each can be changed (Traces);

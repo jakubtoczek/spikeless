@@ -51,7 +51,15 @@ isotopes (and which are decay-corrected), region names and conditions per HPLC m
 Every panel and setting, how the numbers are made, and how to report spike removal in a
 publication: **[the user guide](GUIDE.md)**.
 
-## Dev
+## Files
+
+- **Reads** GINA X exports (radio-HPLC: Windows-1252, tab-separated, decimal comma) and columns
+  pasted from a spreadsheet.
+- **Writes** the session (`.json`: the runs, their spikes, background and regions), the report
+  and the figure. The exports are never changed; a removed spike is recorded, not written over
+  the data.
+
+## Development
 
 ```
 uv run python -m spikeless              # launch
@@ -71,3 +79,7 @@ screen, with the mouse · `figure.py`, `report.py`, `options.py` their windows (
 the figure preview), `editors.py` the run names and region details · `widgets.py` the small
 widgets they share · `app.py` the main window.
 scipy is imported inside the functions that need it, to keep it off the startup path.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
