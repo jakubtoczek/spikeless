@@ -173,7 +173,7 @@ options.set_half_lives(options.PREFS["isotopes"])
 run.isotope = "⁶⁸Ga"
 w.refresh()
 k = run.trace()[600] / base[600]                            # 10 min after the run start
-assert run.decayed() and abs(k - 2 ** (10 / (1.12782 * 60))) < 1e-9, k
+assert run.decayed() and abs(k - 2 ** (10 / (1.1305 * 60))) < 1e-9, k
 assert "decay-corrected" in w.summary.text()
 options.PREFS["isotopes"][6][2] = False
 options.set_half_lives(options.PREFS["isotopes"])
@@ -267,7 +267,7 @@ mt = ow.pages.currentWidget().findChildren(QTableWidget)[0]
 assert mt.rowCount() == 2 and mt.item(1, 1).text() == "product"
 ow._apply(None)                                             # Reset to defaults
 QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-assert lookup_half_life_s("⁹⁹ᵐTc") == 6.00718 * 3600 and not decay_on("¹⁷⁷Lu")
+assert lookup_half_life_s("⁹⁹ᵐTc") == 6.0067 * 3600 and not decay_on("¹⁷⁷Lu")
 assert options.PREFS["methods"] == [] and w.results[w.sel.id].rows[0].name.startswith("peak 1")
 
 assert QLocale().decimalPoint() == ".", "a decimal comma in the fields"

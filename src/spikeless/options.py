@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import plotting
-from .adjust import ISOTOPES, set_half_lives
+from .adjust import ISOTOPES, OLD_HALF_LIVES, set_half_lives
 from .plotview import Background
 from .widgets import ColorButton, guard_fields
 
@@ -118,7 +118,9 @@ def load_prefs(path: Path | None = None, got=None) -> None:
         find.pop("n_sigma", None)          # a threshold of the old rule (σ of the background)
     for k, v in _DEFAULTS.items():
         PREFS[k] = _merge(v, got.get(k))
-    PREFS["isotopes"] = [[r[0], float(r[1]), bool(r[2]) if len(r) > 2 else False]
+    new = {r[0]: r[1] for r in ISOTOPES}         # the half-lives shipped before DDEP: the new ones
+    PREFS["isotopes"] = [[r[0], new[r[0]] if OLD_HALF_LIVES.get(r[0]) == r[1] else float(r[1]),
+                          bool(r[2]) if len(r) > 2 else False]
                          for r in PREFS["isotopes"] if isinstance(r, list) and len(r) in (2, 3)
                          and isinstance(r[0], str) and _num(r[1])]
     PREFS["methods"] = [[r[0], r[1], float(r[2]), float(r[3])] for r in PREFS["methods"]

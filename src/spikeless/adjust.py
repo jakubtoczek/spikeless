@@ -16,11 +16,15 @@ _LN2 = np.log(2.0)
 # common list in its order, none corrected at first. Options › Isotopes edits it, through
 # set_half_lives.
 ISOTOPES = [
-    ("⁹⁹ᵐTc", 6.00718, False), ("²⁰¹Tl", 73.01, False), ("¹¹¹In", 67.313, False),
-    ("¹²³I", 13.2234, False), ("¹²⁵I", 1425.6, False), ("¹⁸F", 1.8288, False),
-    ("⁶⁸Ga", 1.12782, False), ("⁶⁴Cu", 12.7004, False), ("⁹⁰Y", 64.053, False),
-    ("¹⁷⁷Lu", 159.528, False), ("¹⁶¹Tb", 166.9, False),
+    ("⁹⁹ᵐTc", 6.0067, False), ("²⁰¹Tl", 73.0104, False), ("¹¹¹In", 67.3176, False),
+    ("¹²³I", 13.2234, False), ("¹²⁵I", 1425.312, False), ("¹⁸F", 1.8288, False),
+    ("⁶⁸Ga", 1.1305, False), ("⁶⁴Cu", 12.7003, False), ("⁹⁰Y", 64.0416, False),
+    ("¹⁷⁷Lu", 159.4632, False), ("¹⁶¹Tb", 166.872, False),
 ]
+# DDEP, the suite's table (C:\Code\LRB_suite\nuclides.json; 2026.10.22). What was shipped
+# before: an options file still holding one of these takes the new value
+OLD_HALF_LIVES = {"⁹⁹ᵐTc": 6.00718, "²⁰¹Tl": 73.01, "¹¹¹In": 67.313, "¹²⁵I": 1425.6,
+                  "⁶⁸Ga": 1.12782, "⁶⁴Cu": 12.7004, "⁹⁰Y": 64.053, "¹⁷⁷Lu": 159.528, "¹⁶¹Tb": 166.9}
 HALF_LIFE_S: dict[str, float] = {}
 DECAY_ON: set[str] = set()
 
@@ -133,7 +137,7 @@ def _self_check():
         assert np.all(b[:50] < sig[:50] + 3.0), m                       # hugs it off-peak
 
     # the isotope table is the one the options set, with its decay ticks
-    assert abs(lookup_half_life_s("¹⁷⁷Lu") - 159.528 * 3600) < 1e-6 and not decay_on("¹⁷⁷Lu")
+    assert abs(lookup_half_life_s("¹⁷⁷Lu") - 159.4632 * 3600) < 1e-6 and not decay_on("¹⁷⁷Lu")
     set_half_lives([("¹⁷⁷Lu", 160.0, True), ("X", 0), ("", 5), ("¹⁸F", 1.83)])
     assert lookup_half_life_s("¹⁷⁷Lu") == 160.0 * 3600 and lookup_half_life_s("X") is None
     assert decay_on("¹⁷⁷Lu") and not decay_on("¹⁸F")
