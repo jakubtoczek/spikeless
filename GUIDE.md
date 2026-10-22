@@ -448,6 +448,14 @@ show and document what was excluded, and why.
 - **The plot is lost.** Double-click it.
 - **The steps say *select a run*.** Click a run in Runs.
 
+## Files
+
+- **Reads** GINA X exports (radio-HPLC: Windows-1252, tab-separated, decimal comma) and columns
+  pasted from a spreadsheet.
+- **Writes** the session (`.json`: the runs, their spikes, background and regions), the report
+  and the figure. The exports are never changed; a removed spike is recorded, not written over
+  the data.
+
 ## Shortcuts
 
 | Key | |
